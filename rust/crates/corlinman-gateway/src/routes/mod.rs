@@ -8,6 +8,7 @@ pub mod admin;
 pub mod chat;
 pub mod embeddings;
 pub mod health;
+pub mod metrics;
 pub mod models;
 pub mod plugin_callback;
 
@@ -29,6 +30,7 @@ pub fn router() -> Router {
         .merge(models::router())
         .merge(admin::router())
         .merge(plugin_callback::router())
+        .merge(metrics::router())
 }
 
 /// Same as [`router`] but the chat route is backed by the supplied
@@ -41,6 +43,7 @@ pub fn router_with_chat_state(state: chat::ChatState) -> Router {
         .merge(models::router())
         .merge(admin::router())
         .merge(plugin_callback::router())
+        .merge(metrics::router())
 }
 
 /// Placeholder handler for routes whose behaviour lands in a later milestone.

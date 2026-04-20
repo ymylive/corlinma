@@ -40,9 +40,12 @@ use axum::{
 };
 use corlinman_agent_client::tool_callback::{PlaceholderExecutor, ToolExecutor};
 use corlinman_core::CorlinmanError;
+use corlinman_plugins::runtime::jsonrpc_stdio::{execute as stdio_execute, DEFAULT_TIMEOUT_MS};
+use corlinman_plugins::runtime::PluginOutput;
+use corlinman_plugins::PluginRegistry;
 use corlinman_proto::v1::{
     client_frame, server_frame, ChatStart, ClientFrame, Message as PbMessage, Role, ServerFrame,
-    ToolCall as PbToolCall,
+    ToolCall as PbToolCall, ToolResult as PbToolResult,
 };
 use futures::{stream, Stream};
 use serde::{Deserialize, Serialize};
@@ -50,6 +53,7 @@ use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::pin::Pin;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
@@ -161,11 +165,184 @@ pub struct ChatState {
 
 impl ChatState {
     /// Bundle a backend with the default M1 placeholder tool executor.
+    ///
+    /// Used by tests and by the boot path when no plugin registry is
+    /// available. Production callers should prefer [`ChatState::with_registry`]
+    /// so real plugins execute instead of returning the
+    /// `awaiting_plugin_runtime` placeholder.
     pub fn new(backend: Arc<dyn ChatBackend>) -> Self {
         Self {
             backend,
             tool_executor: Arc::new(PlaceholderExecutor),
         }
+    }
+
+    /// Bundle a backend with a real plugin-registry-backed tool executor.
+    /// Tool calls routed through the chat pipeline dispatch to the matching
+    /// manifest's JSON-RPC stdio runtime.
+    pub fn with_registry(backend: Arc<dyn ChatBackend>, registry: Arc<PluginRegistry>) -> Self {
+        Self {
+            backend,
+            tool_executor: Arc::new(RegistryToolExecutor::new(registry)),
+        }
+    }
+
+    /// Escape hatch for tests / alternate composition (e.g. custom executors).
+    pub fn with_executor(
+        backend: Arc<dyn ChatBackend>,
+        tool_executor: Arc<dyn ToolExecutor>,
+    ) -> Self {
+        Self {
+            backend,
+            tool_executor,
+        }
+    }
+}
+
+// ---- Registry-backed tool executor -------------------------------------------
+
+/// Bridges a `ServerFrame::ToolCall` to the real plugin runtime via
+/// [`PluginRegistry`] + [`stdio_execute`], returning a populated
+/// [`PbToolResult`] so the Python reasoning loop can continue.
+///
+/// Errors, timeouts, and not-found manifests are folded into `is_error=true`
+/// payloads so the chat stream never aborts on a single bad tool call — the
+/// model sees a structured error and can recover on the next round.
+pub struct RegistryToolExecutor {
+    registry: Arc<PluginRegistry>,
+    /// Global fallback deadline when neither manifest nor request specifies one.
+    #[allow(dead_code)]
+    timeout_default: std::time::Duration,
+}
+
+impl RegistryToolExecutor {
+    pub fn new(registry: Arc<PluginRegistry>) -> Self {
+        Self {
+            registry,
+            timeout_default: std::time::Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for RegistryToolExecutor {
+    async fn execute(&self, call: &PbToolCall) -> Result<PbToolResult, CorlinmanError> {
+        // Resolve plugin. `call.plugin` is the manifest name; fall back to
+        // `call.tool` when the model only emitted a function name (common
+        // with OpenAI-standard tool_calls where plugin == tool).
+        let name = if !call.plugin.is_empty() {
+            call.plugin.as_str()
+        } else {
+            call.tool.as_str()
+        };
+        let entry = match self.registry.get(name) {
+            Some(e) => e,
+            None => {
+                return Ok(tool_error_result(
+                    &call.call_id,
+                    -32601,
+                    format!("plugin not found: {name}"),
+                ));
+            }
+        };
+        let manifest = entry.manifest.clone();
+        let cwd = entry.plugin_dir();
+
+        // Fresh cancellation token per call; later milestones will thread the
+        // request-level token here so client disconnects abort in-flight
+        // plugin work.
+        let cancel = CancellationToken::new();
+
+        let started = std::time::Instant::now();
+        let outcome = stdio_execute(
+            &manifest.name,
+            &call.tool,
+            &cwd,
+            Some(&manifest),
+            None, // caller-override deadline; rely on manifest / runtime default
+            &call.args_json,
+            "", // session_key — not yet threaded through chat
+            &call.call_id,
+            "", // trace_id — hooked up with the tracing milestone
+            None,
+            &[],
+            cancel,
+        )
+        .await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+
+        match outcome {
+            Ok(PluginOutput::Success {
+                content,
+                duration_ms,
+            }) => Ok(PbToolResult {
+                call_id: call.call_id.clone(),
+                result_json: content.to_vec(),
+                is_error: false,
+                duration_ms,
+            }),
+            Ok(PluginOutput::Error {
+                code,
+                message,
+                duration_ms,
+            }) => Ok(PbToolResult {
+                call_id: call.call_id.clone(),
+                result_json: serde_json::to_vec(&json!({
+                    "code": code,
+                    "message": message,
+                }))
+                .unwrap_or_default(),
+                is_error: true,
+                duration_ms,
+            }),
+            Ok(PluginOutput::AcceptedForLater {
+                task_id,
+                duration_ms,
+            }) => {
+                // Async plugin callback lands with the /plugin-callback route.
+                // Until then, surface a structured "pending" payload so the
+                // loop doesn't stall waiting for a result we cannot produce.
+                Ok(PbToolResult {
+                    call_id: call.call_id.clone(),
+                    result_json: serde_json::to_vec(&json!({
+                        "status": "pending_async_callback",
+                        "task_id": task_id,
+                    }))
+                    .unwrap_or_default(),
+                    is_error: false,
+                    duration_ms,
+                })
+            }
+            Err(err) => {
+                let mut r =
+                    tool_error_result(&call.call_id, runtime_error_code(&err), err.to_string());
+                r.duration_ms = elapsed_ms;
+                Ok(r)
+            }
+        }
+    }
+}
+
+fn tool_error_result(call_id: &str, code: i64, message: String) -> PbToolResult {
+    PbToolResult {
+        call_id: call_id.to_string(),
+        result_json: serde_json::to_vec(&json!({
+            "code": code,
+            "message": message,
+        }))
+        .unwrap_or_default(),
+        is_error: true,
+        duration_ms: 0,
+    }
+}
+
+fn runtime_error_code(err: &CorlinmanError) -> i64 {
+    match err {
+        CorlinmanError::Timeout { .. } => -32001,
+        CorlinmanError::Cancelled(_) => -32002,
+        CorlinmanError::PluginRuntime { .. } => -32010,
+        CorlinmanError::Parse { .. } => -32700,
+        _ => -32000,
     }
 }
 

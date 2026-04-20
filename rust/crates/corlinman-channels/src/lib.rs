@@ -8,3 +8,4 @@
 pub mod logstream;
 pub mod qq;
 pub mod router;
+pub mod service;

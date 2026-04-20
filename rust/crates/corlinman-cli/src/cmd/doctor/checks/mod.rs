@@ -9,9 +9,14 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::Serialize;
 
+pub mod channels;
 pub mod config;
 pub mod manifest;
+pub mod permissions;
+pub mod scheduler;
+pub mod sqlite;
 pub mod upstream;
+pub mod usearch;
 
 /// Shared, read-only context handed to every check. Built once by the runner
 /// so individual checks don't re-resolve the data dir or re-parse config.
@@ -105,5 +110,10 @@ pub fn all() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(config::ConfigCheck::new()),
         Box::new(manifest::ManifestCheck::new()),
         Box::new(upstream::UpstreamCheck::new()),
+        Box::new(sqlite::SqliteCheck::new()),
+        Box::new(usearch::UsearchCheck::new()),
+        Box::new(channels::ChannelsCheck::new()),
+        Box::new(scheduler::SchedulerCheck::new()),
+        Box::new(permissions::PermissionsCheck::new()),
     ]
 }

@@ -7,19 +7,33 @@
 
 ## 1. `corlinman doctor` 报问题该怎么修
 
-`corlinman doctor` 分模块运行检查（config / upstream / manifest / channels / vector / scheduler）。
-每个 check 输出 `OK / WARN / FAIL` + 简短 hint。
+`corlinman doctor` 分模块运行检查。M7 起覆盖 8 个模块（后续还会扩，目标 50+）：
+
+| module        | 说明 |
+|---------------|------|
+| `config`      | `config.toml` 解析 + 跨字段校验 |
+| `manifest`    | `data_dir/plugins/*/plugin-manifest.toml` 扫描 |
+| `upstream`    | enabled providers 的 `api_key` 能否解析 |
+| `sqlite`      | `data_dir/vector/chunks.sqlite` 打得开，FTS5 可用 |
+| `usearch`     | `data_dir/vector/index.usearch` 打得开，维度匹配 embedding 模型 |
+| `channels`    | `[channels.qq]` 若启用，ws_url 合法且 2s 握手尝试 |
+| `scheduler`   | 每个 `[[scheduler.jobs]].cron` 用 `cron` crate 能 parse |
+| `permissions` | `data_dir` 及 `plugins/agents/knowledge/vector/logs` 子目录存在且可读写 |
+
+每个 check 输出 `✓ OK / ! WARN / ✗ FAIL` + 简短 hint。
 
 - **FAIL `config.toml` 解析失败**：看 hint 里的 key 和行号，通常是引号不匹配或缩进错误。
 - **FAIL `upstream.anthropic` 429 / 5xx**：provider 不可达或 key 失效。`echo $ANTHROPIC_API_KEY` 确认环境变量真的注入进容器。
+- **FAIL `sqlite.FTS5 unavailable`**：容器里的 SQLite 没带 FTS5，重打镜像或换宿主 libsqlite。
+- **FAIL `usearch open_checked(dim=N) failed`**：索引维度和 `[rag] embedding_model` 不匹配，`corlinman vector rebuild` 重建。
+- **FAIL `scheduler.jobs[i] invalid cron`**：corlinman 用 7 字段 cron（秒 分 时 日 月 周 年）。
 - **WARN `manifest.duplicates`**：发现同名 manifest 有多条；`corlinman plugins inspect <name>`
   看所有候选，删掉不要的。
-- **WARN `channels.qq.gocq_heartbeat_missing`**：gocq 连上了但 30s 无心跳。多半 gocq 端异常，
-  重启 gocq。
-- **FAIL `vector.usearch.open`**：见第 6 条"RAG 检索不对"。
+- **WARN `channels.qq ws unreachable` / `ws connect timed out`**：gocq/NapCatQQ 没起或 `ws_url` 配错。
+- **WARN `permissions.missing subdir(s)`**：运行 `corlinman onboard` 建好 layout。
 
 每一类 FAIL 都有对应的 run subcommand 做 deep-dive，如 `corlinman doctor --module upstream -v`。
-`corlinman doctor --json` 输出结构化结果，适合 CI/监控吃。
+`corlinman doctor --json` 输出结构化结果，适合 CI/监控吃。可用 `--module <name>` 单跑一项。
 
 ## 2. `/health` 返回 degraded
 
@@ -216,8 +230,33 @@ docker tag ghcr.io/<org>/corlinman:1.0.0 ghcr.io/<org>/corlinman:rollback
 
 **数据向后兼容**：1.x 任意版本的数据 1.x 任意版本都能读。2.0 会有一次 `corlinman migrate` 流程，届时补充 migration 文档。
 
+## 11. `/metrics` 指标清单（M7 起）
+
+gateway 暴露 `GET /metrics`（Prometheus text exposition v0.0.4）。完整 metric family：
+
+| 名称                                          | 类型      | labels              | 埋点位置                                    |
+|-----------------------------------------------|-----------|---------------------|---------------------------------------------|
+| `corlinman_http_requests_total`               | counter   | `route`, `status`   | `corlinman-gateway::middleware::trace`      |
+| `corlinman_chat_stream_duration_seconds`      | histogram | `model`, `finish`   | `routes::chat::chat_stream` (TODO wall-timer) |
+| `corlinman_plugin_execute_total`              | counter   | `plugin`, `status`  | `corlinman-plugins::runtime` (TODO wiring)  |
+| `corlinman_plugin_execute_duration_seconds`   | histogram | `plugin`            | 同上                                        |
+| `corlinman_backoff_retries_total`             | counter   | `reason`            | `corlinman-agent-client::retry::with_retry` |
+| `corlinman_agent_grpc_inflight`               | gauge     | —                   | `agent-client::stream::ChatStream::open`    |
+| `corlinman_vector_query_duration_seconds`     | histogram | `stage` (hnsw/bm25/fuse) | `corlinman-vector::hybrid::search`     |
+
+`status` 用数字字符串（`"200"` / `"503"`）；`finish ∈ {stop, length, tool_calls, error}`；`reason` 取
+`FailoverReason::as_str`（`rate_limit` / `upstream_5xx` / `timeout` / `auth` / ...）。
+
+所有 metric 家族在 bootstrap 时就用 `label="startup"` 预先注册一条零值 series（`inc_by(0.0)` / `observe(0.0)`）
+以便 Grafana 面板和告警规则能在 zero-traffic 启动阶段也匹配到 series。dashboard 侧可直接过滤掉
+`{route="startup"}` / `{plugin="startup"}` / `{stage="startup"}`。
+
+埋点所有权：gateway 定义全部 metric 句柄（`corlinman_gateway::metrics`），plugins / agent-client / vector
+三个 crate 通过 import 同一组 `Lazy` 静态拿到同一 `Registry`。TODO：OpenTelemetry OTLP exporter
+和 Grafana dashboard JSON（`ops/dashboards/corlinman.json`）留到下一迭代。
+
 ## 延伸阅读
 
-- `/metrics` 完整清单：计划文件 §9 可观测性
+- `/metrics` 完整清单：计划文件 §9 可观测性，本文件 §11
 - 插件特定故障：[plugin-authoring.md §9 调试](plugin-authoring.md#9-调试)
 - 哪层组件出问题去哪查：[architecture.md](architecture.md) §6 时序图

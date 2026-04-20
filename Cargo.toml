@@ -55,6 +55,8 @@ argon2 = "0.5"
 dirs = "5"
 dialoguer = "0.11"
 serial_test = "3"
+prometheus = "0.13"
+cron = "0.12"
 
 # For the core error/cancel/backoff crate
 once_cell = "1"

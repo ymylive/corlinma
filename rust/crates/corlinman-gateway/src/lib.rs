@@ -4,9 +4,11 @@
 //! Keeping the logic in a lib crate lets integration tests drive the gateway
 //! without booting the process.
 
+pub mod metrics;
 pub mod middleware;
 pub mod routes;
 pub mod server;
+pub mod services;
 pub mod shutdown;
 pub mod state;
 pub mod ws;

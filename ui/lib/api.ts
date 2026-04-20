@@ -1,16 +1,19 @@
 /**
  * corlinman admin API client.
  *
- * Three fetch paths, picked in priority order per call:
+ * Two fetch paths, picked per call:
  *   1. `NEXT_PUBLIC_MOCK_API_URL` set → hit the standalone mock server
  *      (see ui/mock/server.ts; default http://127.0.0.1:7777).
- *   2. `MOCK_MODE === true` and `opts.mock` provided → inline stub.
- *   3. Otherwise → real gateway at `NEXT_PUBLIC_GATEWAY_URL`.
+ *   2. Otherwise → real gateway at `NEXT_PUBLIC_GATEWAY_URL`
+ *      (default http://localhost:6005), with `credentials: "include"` so
+ *      the browser forwards any auth cookie the gateway sets.
  *
- * Session cookie is sent via `credentials: "include"` for path (3).
+ * M6 note: admin endpoints are HTTP Basic right now — either hit them from a
+ * browser after a Basic-auth prompt or set the `Authorization` header on the
+ * fetch from a server-side helper. Cookie/session auth lands in M7.
  *
- * TODO(M6): flip MOCK_MODE to false and delete inline `opts.mock`
- *           once gateway admin routes land in corlinman-gateway::routes::admin.
+ * The inline `opts.mock` escape hatch is kept for local dev without a
+ * gateway running: set `NEXT_PUBLIC_MOCK_MODE=1` to enable it.
  */
 
 export const GATEWAY_BASE_URL =
@@ -19,8 +22,8 @@ export const GATEWAY_BASE_URL =
 /** Empty string means "no mock server"; any non-empty value routes all calls there. */
 export const MOCK_API_URL = process.env.NEXT_PUBLIC_MOCK_API_URL ?? "";
 
-/** Flip to `false` once the gateway is wired up. */
-export const MOCK_MODE = true;
+/** Opt-in inline mock for offline dev. Off by default now that the gateway is wired. */
+export const MOCK_MODE = process.env.NEXT_PUBLIC_MOCK_MODE === "1";
 
 export interface ApiError extends Error {
   status?: number;
