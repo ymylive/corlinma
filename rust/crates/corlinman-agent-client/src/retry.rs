@@ -7,6 +7,7 @@
 use std::future::Future;
 use std::time::Duration;
 
+use corlinman_core::metrics::BACKOFF_RETRIES;
 use corlinman_core::{backoff, CorlinmanError, FailoverReason};
 use tonic::Status;
 
@@ -47,6 +48,7 @@ where
             Ok(v) => return Ok(v),
             Err(status) => match next_retry_delay(attempt, &status) {
                 Some((delay, reason)) => {
+                    BACKOFF_RETRIES.with_label_values(&[reason.as_str()]).inc();
                     tracing::warn!(
                         attempt,
                         ?reason,
@@ -95,5 +97,23 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// S7.T3: the `BACKOFF_RETRIES` counter is reachable from the retry
+    /// module with the expected label taxonomy. We don't drive `with_retry`
+    /// in a unit test (the schedule starts at 5s and a `tokio::time::pause`
+    /// harness would bloat this test); instead we verify the code path that
+    /// `with_retry` consults — `next_retry_delay` + the `FailoverReason` →
+    /// label mapping — and that the counter itself accepts the label.
+    #[test]
+    fn backoff_metric_label_matches_reason_str() {
+        let s = Status::resource_exhausted("x");
+        let (_delay, reason) = next_retry_delay(0, &s).expect("retryable");
+        let label = reason.as_str();
+
+        let before = BACKOFF_RETRIES.with_label_values(&[label]).get();
+        BACKOFF_RETRIES.with_label_values(&[label]).inc();
+        let after = BACKOFF_RETRIES.with_label_values(&[label]).get();
+        assert_eq!(after, before + 1.0);
     }
 }

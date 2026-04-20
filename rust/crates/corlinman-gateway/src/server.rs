@@ -26,6 +26,7 @@ use crate::routes;
 use crate::routes::admin::scheduler::SchedulerHistory;
 use crate::routes::admin::{self as admin_routes, AdminState};
 use crate::routes::chat::{grpc::GrpcBackend, ChatBackend, ChatState};
+use crate::routes::HealthState;
 
 /// Build the top-level axum router with the default (stub) chat route.
 ///
@@ -79,6 +80,44 @@ pub fn build_router_with_backend_registry_and_sessions(
     trace::layer(routes::router_with_full_state(state, async_tasks))
 }
 
+/// Variant of [`build_router_with_backend_registry_and_sessions`] that
+/// swaps the stub `/health` route for one backed by live probes.
+pub fn build_router_with_backend_registry_sessions_and_health(
+    backend: Arc<dyn ChatBackend>,
+    registry: Arc<PluginRegistry>,
+    session_store: Arc<dyn SessionStore>,
+    session_max_messages: usize,
+    health_state: HealthState,
+) -> Router {
+    metrics::init();
+    let async_tasks = registry.async_tasks();
+    let state = ChatState::with_registry(backend, registry)
+        .with_session_store(session_store)
+        .with_session_max_messages(session_max_messages);
+    trace::layer(routes::router_with_full_state_and_health(
+        state,
+        async_tasks,
+        health_state,
+    ))
+}
+
+/// Variant of [`build_router_with_backend_and_registry`] with real probes
+/// on `/health`. Used when no session store is available.
+pub fn build_router_with_backend_registry_and_health(
+    backend: Arc<dyn ChatBackend>,
+    registry: Arc<PluginRegistry>,
+    health_state: HealthState,
+) -> Router {
+    metrics::init();
+    let async_tasks = registry.async_tasks();
+    let state = ChatState::with_registry(backend, registry);
+    trace::layer(routes::router_with_full_state_and_health(
+        state,
+        async_tasks,
+        health_state,
+    ))
+}
+
 /// Default idle TTL for admin web sessions — 24h. Mirrors
 /// `routes::admin::auth::DEFAULT_SESSION_TTL_SECS`.
 const DEFAULT_ADMIN_SESSION_TTL_SECS: u64 = 86_400;
@@ -94,39 +133,9 @@ const DEFAULT_ADMIN_SESSION_TTL_SECS: u64 = 86_400;
 /// When `$CORLINMAN_CONFIG` points at a real file the resolved path is
 /// attached via [`AdminState::with_config_path`] so `POST /admin/config`
 /// can persist accepted payloads back to the same file at runtime.
-fn build_admin_state(
-    plugins: Arc<PluginRegistry>,
-    log_tx: Option<broadcast::Sender<LogRecord>>,
-    rag_store: Option<Arc<SqliteStore>>,
-    scheduler_history: Option<Arc<SchedulerHistory>>,
-) -> AdminState {
-    let (cfg, cfg_path) = load_admin_config();
-    let session_store = Arc::new(AdminSessionStore::new(StdDuration::from_secs(
-        DEFAULT_ADMIN_SESSION_TTL_SECS,
-    )));
-
-    // Fire-and-forget GC. Uses a fresh CancellationToken that never fires,
-    // so the task loops until the process exits.
-    let cancel = tokio_util::sync::CancellationToken::new();
-    let _handle = Arc::clone(&session_store).start_gc(cancel);
-
-    let mut admin = AdminState::new(plugins, Arc::new(ArcSwap::from_pointee(cfg)))
-        .with_session_store(session_store);
-    if let Some(path) = cfg_path {
-        admin = admin.with_config_path(path);
-    }
-    if let Some(tx) = log_tx {
-        admin = admin.with_log_broadcast(tx);
-    }
-    if let Some(store) = rag_store {
-        admin = admin.with_rag_store(store);
-    }
-    if let Some(history) = scheduler_history {
-        admin = admin.with_scheduler_history(history);
-    }
-    admin
-}
-
+///
+/// Since S7.T5 the boot path uses [`build_admin_state_with_config`] so the
+/// admin surface and `/health` share one `Arc<ArcSwap<Config>>`.
 /// Same `$CORLINMAN_CONFIG` lookup `main.rs` uses. Missing / unreadable →
 /// `(Config::default(), None)` so the gateway still boots (admin endpoints
 /// then return 503 until credentials land in config). When a file was
@@ -194,20 +203,39 @@ pub async fn build_runtime_with_logs(
     // Open the session history store, keyed off `$CORLINMAN_DATA_DIR`.
     let session_store = open_session_store().await;
 
+    // Resolve config *once* so both the admin state and the /health probe
+    // share the same `Arc<ArcSwap<Config>>` — live reloads propagate to
+    // both surfaces at once.
+    let (cfg, cfg_path) = load_admin_config();
+    let config_handle: Arc<ArcSwap<Config>> = Arc::new(ArcSwap::from_pointee(cfg));
+
+    // S7.T5: bundle the health probe state.
     let endpoint = resolve_endpoint();
+    let health_state = HealthState {
+        config: Some(config_handle.clone()),
+        data_dir: Some(resolve_data_dir()),
+        plugin_registry: Some(registry.clone()),
+        agent_endpoint: Some(endpoint.clone()),
+    };
+
     let (base_router, backend_opt) = match connect_channel(&endpoint).await {
         Ok(channel) => {
             tracing::info!(endpoint = %endpoint, "agent client connected");
             let client = AgentClient::new(channel);
             let backend: Arc<dyn ChatBackend> = Arc::new(GrpcBackend::new(client));
             let router = match session_store {
-                Some(store) => build_router_with_backend_registry_and_sessions(
+                Some(store) => build_router_with_backend_registry_sessions_and_health(
                     backend.clone(),
                     registry.clone(),
                     store,
                     DEFAULT_SESSION_MAX_MESSAGES,
+                    health_state.clone(),
                 ),
-                None => build_router_with_backend_and_registry(backend.clone(), registry.clone()),
+                None => build_router_with_backend_registry_and_health(
+                    backend.clone(),
+                    registry.clone(),
+                    health_state.clone(),
+                ),
             };
             (router, Some(backend))
         }
@@ -236,10 +264,49 @@ pub async fn build_runtime_with_logs(
     // sink for records when the cron runtime lands in M7.
     let rag_store = open_rag_store().await;
     let scheduler_history = Some(SchedulerHistory::new());
-    let admin_state = build_admin_state(registry.clone(), log_tx, rag_store, scheduler_history);
+    let admin_state = build_admin_state_with_config(
+        registry.clone(),
+        log_tx,
+        rag_store,
+        scheduler_history,
+        config_handle,
+        cfg_path,
+    );
     let router = mount_admin_routes(base_router, admin_state);
 
     (router, backend_opt, registry)
+}
+
+/// Variant of [`build_admin_state`] that reuses a pre-loaded config handle
+/// so boot code can share the same live-reload swap with `/health`.
+fn build_admin_state_with_config(
+    plugins: Arc<PluginRegistry>,
+    log_tx: Option<broadcast::Sender<LogRecord>>,
+    rag_store: Option<Arc<SqliteStore>>,
+    scheduler_history: Option<Arc<SchedulerHistory>>,
+    config_handle: Arc<ArcSwap<Config>>,
+    cfg_path: Option<PathBuf>,
+) -> AdminState {
+    let session_store = Arc::new(AdminSessionStore::new(StdDuration::from_secs(
+        DEFAULT_ADMIN_SESSION_TTL_SECS,
+    )));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _handle = Arc::clone(&session_store).start_gc(cancel);
+
+    let mut admin = AdminState::new(plugins, config_handle).with_session_store(session_store);
+    if let Some(path) = cfg_path {
+        admin = admin.with_config_path(path);
+    }
+    if let Some(tx) = log_tx {
+        admin = admin.with_log_broadcast(tx);
+    }
+    if let Some(store) = rag_store {
+        admin = admin.with_rag_store(store);
+    }
+    if let Some(history) = scheduler_history {
+        admin = admin.with_scheduler_history(history);
+    }
+    admin
 }
 
 /// Default session trim cap used when a config isn't loaded. Matches

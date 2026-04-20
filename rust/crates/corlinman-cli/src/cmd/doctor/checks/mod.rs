@@ -9,12 +9,24 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::Serialize;
 
+pub mod agent_grpc_ping;
+pub mod broken_symlinks;
 pub mod channels;
 pub mod config;
+pub mod disk_space;
+pub mod docker_daemon;
+pub mod log_rotation;
 pub mod manifest;
+pub mod manifest_duplicates;
+pub mod memory_usage;
+pub mod pending_approvals_overflow;
 pub mod permissions;
+pub mod provider_https_smoke;
+pub mod python_subprocess_health;
 pub mod scheduler;
+pub mod scheduler_next_triggers;
 pub mod sqlite;
+pub mod startup_time;
 pub mod upstream;
 pub mod usearch;
 
@@ -109,11 +121,23 @@ pub fn all() -> Vec<Box<dyn DoctorCheck>> {
     vec![
         Box::new(config::ConfigCheck::new()),
         Box::new(manifest::ManifestCheck::new()),
+        Box::new(manifest_duplicates::ManifestDuplicatesCheck::new()),
         Box::new(upstream::UpstreamCheck::new()),
+        Box::new(provider_https_smoke::ProviderHttpsSmokeCheck::new()),
         Box::new(sqlite::SqliteCheck::new()),
         Box::new(usearch::UsearchCheck::new()),
         Box::new(channels::ChannelsCheck::new()),
         Box::new(scheduler::SchedulerCheck::new()),
+        Box::new(scheduler_next_triggers::SchedulerNextTriggersCheck::new()),
         Box::new(permissions::PermissionsCheck::new()),
+        Box::new(agent_grpc_ping::AgentGrpcPingCheck::new()),
+        Box::new(disk_space::DiskSpaceCheck::new()),
+        Box::new(log_rotation::LogRotationCheck::new()),
+        Box::new(docker_daemon::DockerDaemonCheck::new()),
+        Box::new(python_subprocess_health::PythonSubprocessHealthCheck::new()),
+        Box::new(memory_usage::MemoryUsageCheck::new()),
+        Box::new(startup_time::StartupTimeCheck::new()),
+        Box::new(pending_approvals_overflow::PendingApprovalsOverflowCheck::new()),
+        Box::new(broken_symlinks::BrokenSymlinksCheck::new()),
     ]
 }

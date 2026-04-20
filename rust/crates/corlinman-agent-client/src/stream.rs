@@ -18,6 +18,7 @@ use tonic::{Request, Streaming};
 
 use crate::client::AgentClient;
 use crate::retry::status_to_error;
+use crate::trace_propagate::inject_trace_context;
 
 /// Outbound capacity for ClientFrame queue (plan §5.1 "mpsc(16) both sides").
 pub const CHANNEL_CAPACITY: usize = 16;
@@ -37,9 +38,12 @@ impl ChatStream {
     pub async fn open(client: &mut AgentClient) -> Result<Self, CorlinmanError> {
         let (tx, rx) = mpsc::channel::<ClientFrame>(CHANNEL_CAPACITY);
         let outbound = ReceiverStream::new(rx);
+        let mut req = Request::new(outbound);
+        // S7.T1: inject W3C traceparent so the Python side joins the trace.
+        inject_trace_context(&mut req);
         let response = client
             .inner_mut()
-            .chat(Request::new(outbound))
+            .chat(req)
             .await
             .map_err(status_to_error)?;
         Ok(Self {

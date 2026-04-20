@@ -55,6 +55,11 @@ dirs = { workspace = true }
 base64 = "0.22"
 dashmap = { workspace = true }
 schemars = { workspace = true }
+sqlx = { workspace = true }
+opentelemetry = "0.24"
+opentelemetry_sdk = { version = "0.24", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.17", features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = "0.25"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

@@ -27,6 +27,8 @@ futures = { workspace = true }
 backoff = { workspace = true }
 bytes = { workspace = true }
 uuid = { workspace = true }
+opentelemetry = "0.24"
+tracing-opentelemetry = "0.25"
 
 [dev-dependencies]
 serial_test = { workspace = true }

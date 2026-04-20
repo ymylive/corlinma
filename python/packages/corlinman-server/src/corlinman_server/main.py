@@ -28,6 +28,7 @@ from corlinman_grpc import agent_pb2_grpc
 from corlinman_server.agent_servicer import CorlinmanAgentServicer
 from corlinman_server.middleware import install_tracecontext_interceptor
 from corlinman_server.shutdown import GracefulShutdown
+from corlinman_server.telemetry import init_telemetry, shutdown_telemetry
 
 logger = structlog.get_logger(__name__)
 
@@ -62,6 +63,11 @@ async def _serve() -> int:
 
     Returns the process exit code (143 on SIGTERM, 0 on clean shutdown).
     """
+    # S7.T1: install the OTLP tracer + structlog trace_id/span_id binding
+    # once per process. No-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset,
+    # and warn-and-continue on any exporter failure.
+    init_telemetry()
+
     shutdown = GracefulShutdown()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -93,6 +99,8 @@ async def _serve() -> int:
     # 5s grace for in-flight RPCs, then force close.
     await server.stop(grace=5.0)
     logger.info("grpc.server.stopped")
+
+    shutdown_telemetry()
 
     return _SIGTERM_EXIT_CODE if reason == "SIGTERM" else 0
 

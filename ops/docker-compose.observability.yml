@@ -1,0 +1,59 @@
+# Observability profile for S7 (M7) — Prometheus + Grafana + Jaeger.
+#
+# Usage:
+#   docker compose -f ops/docker-compose.observability.yml --profile obs up -d
+#
+# Then point the gateway at the collector:
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317 corlinman-gateway
+#
+# Grafana loads the `ops/dashboards/corlinman.json` dashboard; import it via
+# the UI against the `Prometheus` datasource named below.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: corlinman-prometheus
+    profiles: ["obs"]
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+
+  grafana:
+    image: grafana/grafana-oss:11.2.2
+    container_name: corlinman-grafana
+    profiles: ["obs"]
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: corlinman-jaeger
+    profiles: ["obs"]
+    restart: unless-stopped
+    ports:
+      - "16686:16686"  # UI
+      - "4317:4317"    # OTLP/gRPC
+      - "4318:4318"    # OTLP/HTTP
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+
+volumes:
+  prometheus-data:
+  grafana-data:

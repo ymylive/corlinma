@@ -1467,9 +1467,29 @@ pub mod grpc {
     use super::*;
     use corlinman_agent_client::client::AgentClient;
     use corlinman_agent_client::retry::status_to_error;
+    use corlinman_agent_client::trace_propagate::inject_trace_context;
+    use corlinman_core::metrics::AGENT_GRPC_INFLIGHT;
     use tokio::sync::Mutex;
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::Request;
+
+    /// RAII guard: `inc` on construction, `dec` on drop. Used to track
+    /// `corlinman_agent_grpc_inflight` across the life of a single
+    /// `Agent.Chat` bidi stream.
+    struct InflightGuard;
+
+    impl InflightGuard {
+        fn new() -> Self {
+            AGENT_GRPC_INFLIGHT.inc();
+            Self
+        }
+    }
+
+    impl Drop for InflightGuard {
+        fn drop(&mut self) {
+            AGENT_GRPC_INFLIGHT.dec();
+        }
+    }
 
     /// Wraps a pooled [`AgentClient`] so multiple requests can share one channel.
     #[derive(Clone)]
@@ -1509,17 +1529,28 @@ pub mod grpc {
             let outbound = ReceiverStream::new(rx);
 
             let mut client = self.client.lock().await.clone();
+            // S7.T1: propagate W3C `traceparent` into the gRPC metadata so
+            // the Python agent joins this span in its own exporter.
+            let mut req = Request::new(outbound);
+            inject_trace_context(&mut req);
             let response = client
                 .inner_mut()
-                .chat(Request::new(outbound))
+                .chat(req)
                 .await
                 .map_err(status_to_error)?;
             let mut rx_stream = response.into_inner();
+
+            // S7.T3: track inflight bidi streams. The guard lives inside the
+            // pump task so the gauge decrements when the stream actually
+            // ends — on EOF, error, or receiver drop — not when `start`
+            // returns.
+            let inflight = InflightGuard::new();
 
             // Pump incoming frames into a local channel so the handler sees a
             // plain `Stream` of `Result<ServerFrame, CorlinmanError>`.
             let (out_tx, out_rx) = mpsc::channel::<Result<ServerFrame, CorlinmanError>>(16);
             tokio::spawn(async move {
+                let _guard = inflight; // drop on task exit
                 loop {
                     match rx_stream.message().await {
                         Ok(Some(frame)) => {

@@ -12,4 +12,5 @@ pub mod server;
 pub mod services;
 pub mod shutdown;
 pub mod state;
+pub mod telemetry;
 pub mod ws;

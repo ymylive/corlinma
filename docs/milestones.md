@@ -15,7 +15,7 @@
 | **M4** Vector/RAG | HNSW + FTS5 BM25 + RRF 融合 + 可选 rerank | 3 周 | 🚧 | ~25% | sqlx + usearch 基础 CRUD ✅；RRF 融合 + rerank WIP |
 | **M5** Channels QQ/OneBot | 正向 WS + Agent 分派 + 关键词过滤 | 2 周 | 🚧 | ~40% | 正向 WS 客户端 + OneBot v11 parse + router + mock integration test ✅；gateway chat pipeline 对接 WIP |
 | **M6** Admin UI | Next.js 替代 AdminPanel | 3 周（并行 M3-M5） | 🚧 | ~92% | S1-S5 骨架 + auth/config/logs/approvals 真联调 ✅；S6 新增 rag/channels/scheduler/models 4 路由 + Monaco config + plugin invoke + agent 编辑 + Playwright admin-full E2E ✅；剩余：scheduler cron 运行时需 M7 + QQ runtime 状态回填 |
-| **M7** Observability + CLI ops | doctor / onboard / metrics / Prometheus / OTel | 2 周 | ⏳ | ~5% | 日志 JSON 到 stdout ✅（不含 OTel export） |
+| **M7** Observability + CLI ops | doctor / onboard / metrics / Prometheus / OTel | 2 周 | 🚧 | ~92% | S7 closed: OTel SDK+OTLP exporter (Rust + Python, W3C traceparent propagation), plugin/agent/vector real metrics wired, doctor 20 checks (<1s on empty env), /health real probes, grafana dashboard JSON + obs compose (prometheus + grafana + jaeger) |
 | **M8** 1.0 Release | docs + docker image + 全绿 QA | 2 周 | ⏳ | 0% | — |
 
 ## M0 交付物清单

@@ -22,6 +22,8 @@ use axum::{
 use corlinman_plugins::AsyncTaskRegistry;
 use serde_json::json;
 
+pub use health::HealthState;
+
 /// Compose every route submodule into a single router. `chat` uses its 501
 /// stub; callers that have a `ChatBackend` should use
 /// [`router_with_chat_state`] instead.
@@ -59,6 +61,23 @@ pub fn router_with_full_state(
 ) -> Router {
     Router::new()
         .merge(health::router())
+        .merge(chat::router_with_state(chat_state))
+        .merge(embeddings::router())
+        .merge(models::router())
+        .merge(admin::router())
+        .merge(plugin_callback::router_with_state(async_tasks))
+        .merge(metrics::router())
+}
+
+/// Same as [`router_with_full_state`] but `/health` is backed by a real
+/// [`HealthState`] that runs live probes on every request.
+pub fn router_with_full_state_and_health(
+    chat_state: chat::ChatState,
+    async_tasks: Arc<AsyncTaskRegistry>,
+    health_state: HealthState,
+) -> Router {
+    Router::new()
+        .merge(health::router_with_state(health_state))
         .merge(chat::router_with_state(chat_state))
         .merge(embeddings::router())
         .merge(models::router())

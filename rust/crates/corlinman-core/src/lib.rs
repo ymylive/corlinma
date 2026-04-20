@@ -13,6 +13,7 @@ pub mod channel_binding;
 pub mod config;
 pub mod error;
 pub mod manifest;
+pub mod metrics;
 pub mod placeholder;
 pub mod session;
 pub mod session_sqlite;

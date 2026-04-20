@@ -25,6 +25,7 @@ use tokio::process::{Child, Command};
 use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
+use corlinman_core::metrics::{PLUGIN_EXECUTE_DURATION, PLUGIN_EXECUTE_TOTAL};
 use corlinman_core::CorlinmanError;
 
 use crate::manifest::PluginManifest;
@@ -156,12 +157,83 @@ pub async fn execute(
     .await
 }
 
+/// Classify a runtime outcome into a Prometheus `status` label value. Mirrors
+/// the set documented next to `PLUGIN_EXECUTE_TOTAL`.
+fn status_label(outcome: &Result<PluginOutput, CorlinmanError>) -> &'static str {
+    match outcome {
+        Ok(PluginOutput::Success { .. }) | Ok(PluginOutput::AcceptedForLater { .. }) => "ok",
+        Ok(PluginOutput::Error { .. }) => "error",
+        Err(CorlinmanError::Timeout { .. }) => "timeout",
+        Err(CorlinmanError::Cancelled(_)) => "cancelled",
+        Err(CorlinmanError::PluginRuntime { message, .. }) => {
+            let lc = message.to_ascii_lowercase();
+            if lc.contains("oom") || lc.contains("memory") {
+                "oom"
+            } else if lc.contains("denied") || lc.contains("permission") {
+                "denied"
+            } else {
+                "error"
+            }
+        }
+        Err(_) => "error",
+    }
+}
+
 /// Like [`execute`], but accepts an injected `DockerRunner` so tests can
 /// exercise the sandbox dispatch branch without a Docker daemon. When
 /// `runner_override` is `None` and the manifest requests sandboxing, we lazily
 /// build a real `DockerSandbox`.
+///
+/// S7.T3: every invocation records into
+/// `corlinman_plugin_execute_duration_seconds{plugin}` and
+/// `corlinman_plugin_execute_total{plugin, status}` — `status` derived from
+/// the returned outcome via [`status_label`].
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_with_runner(
+    plugin_name: &str,
+    tool_name: &str,
+    cwd: &Path,
+    manifest: Option<&PluginManifest>,
+    timeout_override_ms: Option<u64>,
+    arguments_json: &[u8],
+    session_key: &str,
+    request_id: &str,
+    trace_id: &str,
+    command_override: Option<(&str, &[String])>,
+    env: &[(String, String)],
+    runner_override: Option<Arc<dyn DockerRunner>>,
+    cancel: CancellationToken,
+) -> Result<PluginOutput, CorlinmanError> {
+    let metric_start = Instant::now();
+    let outcome = execute_with_runner_inner(
+        plugin_name,
+        tool_name,
+        cwd,
+        manifest,
+        timeout_override_ms,
+        arguments_json,
+        session_key,
+        request_id,
+        trace_id,
+        command_override,
+        env,
+        runner_override,
+        cancel,
+    )
+    .await;
+    let status = status_label(&outcome);
+    let elapsed = metric_start.elapsed().as_secs_f64();
+    PLUGIN_EXECUTE_DURATION
+        .with_label_values(&[plugin_name])
+        .observe(elapsed);
+    PLUGIN_EXECUTE_TOTAL
+        .with_label_values(&[plugin_name, status])
+        .inc();
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_with_runner_inner(
     plugin_name: &str,
     tool_name: &str,
     cwd: &Path,
@@ -567,5 +639,96 @@ mod tests {
         assert_eq!(resolve_timeout(&m, Some(999)), 999);
         m.communication.timeout_ms = None;
         assert_eq!(resolve_timeout(&m, None), DEFAULT_TIMEOUT_MS);
+    }
+
+    // ---- S7.T3 metric wiring -----------------------------------------------
+
+    #[test]
+    fn status_label_classifies_outcomes() {
+        use bytes::Bytes;
+
+        let ok: Result<PluginOutput, CorlinmanError> =
+            Ok(PluginOutput::success(Bytes::from_static(b"{}"), 1));
+        assert_eq!(status_label(&ok), "ok");
+
+        let err_plugin: Result<PluginOutput, CorlinmanError> =
+            Ok(PluginOutput::error(-1, "boom", 1));
+        assert_eq!(status_label(&err_plugin), "error");
+
+        let pending: Result<PluginOutput, CorlinmanError> = Ok(PluginOutput::AcceptedForLater {
+            task_id: "t".into(),
+            duration_ms: 1,
+        });
+        assert_eq!(status_label(&pending), "ok");
+
+        let timeout_err: Result<PluginOutput, CorlinmanError> = Err(CorlinmanError::Timeout {
+            what: "x",
+            millis: 100,
+        });
+        assert_eq!(status_label(&timeout_err), "timeout");
+
+        let cancelled: Result<PluginOutput, CorlinmanError> = Err(CorlinmanError::Cancelled("x"));
+        assert_eq!(status_label(&cancelled), "cancelled");
+
+        let oom: Result<PluginOutput, CorlinmanError> = Err(CorlinmanError::PluginRuntime {
+            plugin: "p".into(),
+            message: "container killed (OOM)".into(),
+        });
+        assert_eq!(status_label(&oom), "oom");
+
+        let denied: Result<PluginOutput, CorlinmanError> = Err(CorlinmanError::PluginRuntime {
+            plugin: "p".into(),
+            message: "permission denied".into(),
+        });
+        assert_eq!(status_label(&denied), "denied");
+    }
+
+    #[tokio::test]
+    async fn execute_records_plugin_metrics() {
+        use corlinman_core::metrics::{PLUGIN_EXECUTE_DURATION, PLUGIN_EXECUTE_TOTAL};
+
+        // Use a unique plugin name so the snapshot is isolated across tests.
+        let plugin = "metric_probe_plugin";
+        let before = PLUGIN_EXECUTE_TOTAL
+            .with_label_values(&[plugin, "error"])
+            .get();
+        let before_hist = PLUGIN_EXECUTE_DURATION
+            .with_label_values(&[plugin])
+            .get_sample_count();
+
+        // Missing command + no manifest → error path. We don't care about the
+        // specific error, only that the instrumenting wrapper ran.
+        let _ = execute(
+            plugin,
+            "any",
+            std::path::Path::new("."),
+            None,
+            Some(10),
+            b"{}",
+            "s",
+            "r",
+            "t",
+            None,
+            &[],
+            CancellationToken::new(),
+        )
+        .await;
+
+        let after = PLUGIN_EXECUTE_TOTAL
+            .with_label_values(&[plugin, "error"])
+            .get();
+        let after_hist = PLUGIN_EXECUTE_DURATION
+            .with_label_values(&[plugin])
+            .get_sample_count();
+        assert_eq!(
+            after,
+            before + 1.0,
+            "execute should bump plugin_execute_total{{status=error}}"
+        );
+        assert_eq!(
+            after_hist,
+            before_hist + 1,
+            "execute should observe plugin_execute_duration_seconds once"
+        );
     }
 }

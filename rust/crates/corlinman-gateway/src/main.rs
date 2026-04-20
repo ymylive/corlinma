@@ -19,7 +19,7 @@ use corlinman_gateway::log_broadcast::{
 };
 use corlinman_gateway::routes::chat::ChatBackend;
 use corlinman_gateway::services::ChatService as GatewayChatService;
-use corlinman_gateway::{server, shutdown};
+use corlinman_gateway::{server, shutdown, telemetry};
 use corlinman_gateway_api::ChatService as ChatServiceTrait;
 use corlinman_plugins::registry::watcher::{HotReloader, DEFAULT_DEBOUNCE};
 use corlinman_plugins::runtime::service_grpc::ServiceRuntime;
@@ -157,6 +157,10 @@ async fn main() {
         let _ = h.await;
     }
 
+    // S7.T1: flush + shutdown the OTLP exporter if it was installed. No-op
+    // when telemetry was never initialised.
+    telemetry::shutdown();
+
     std::process::exit(shutdown::EXIT_CODE_ON_SIGNAL);
 }
 
@@ -164,16 +168,21 @@ async fn main() {
 ///   - `EnvFilter` from `RUST_LOG` (fallback `info`).
 ///   - `fmt` layer → JSON to stdout.
 ///   - `BroadcastLayer` + `BroadcastLayerSpans` → feed `/admin/logs/stream`.
+///   - `tracing-opentelemetry` layer when `OTEL_EXPORTER_OTLP_ENDPOINT`
+///     is set (S7.T1). Missing / unreachable collector is warn-and-continue.
 ///
 /// Returns the broadcast sender so `main` can inject it into `AppState`.
 fn init_tracing() -> broadcast::Sender<LogRecord> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let (broadcast_layer, log_tx) = BroadcastLayer::new(DEFAULT_CAPACITY);
+    let otel_layer =
+        telemetry::try_init_tracer().map(tracing_opentelemetry::OpenTelemetryLayer::new);
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt::layer().json().with_current_span(false))
         .with(BroadcastLayerSpans)
         .with(broadcast_layer)
+        .with(otel_layer)
         .init();
     log_tx
 }

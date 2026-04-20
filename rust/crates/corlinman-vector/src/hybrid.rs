@@ -40,8 +40,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
+use corlinman_core::metrics::VECTOR_QUERY_DURATION;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -251,6 +253,8 @@ impl HybridSearcher {
         }
 
         // --- Recall path 1: HNSW (dense) -----------------------------------
+        // S7.T3: record `corlinman_vector_query_duration_seconds{stage=hnsw}`.
+        let hnsw_start = Instant::now();
         let dense_hits: Vec<(i64, f32)> = {
             let idx = self.usearch.read().await;
             if idx.size() == 0 || query_vector.is_empty() {
@@ -275,13 +279,20 @@ impl HybridSearcher {
                 out
             }
         };
+        VECTOR_QUERY_DURATION
+            .with_label_values(&["hnsw"])
+            .observe(hnsw_start.elapsed().as_secs_f64());
 
         // --- Recall path 2: BM25 (sparse) ----------------------------------
+        let bm25_start = Instant::now();
         let sparse_hits: Vec<(i64, f32)> = self
             .sqlite
             .search_bm25_with_filter(query_text, fetch, allowed_ids.as_deref())
             .await
             .context("bm25 search")?;
+        VECTOR_QUERY_DURATION
+            .with_label_values(&["bm25"])
+            .observe(bm25_start.elapsed().as_secs_f64());
 
         // --- Fusion --------------------------------------------------------
         //
@@ -289,12 +300,17 @@ impl HybridSearcher {
         // path). When rerank is enabled we keep the full fused set so the
         // cross-encoder has real candidates to re-order; truncation to
         // `top_k` happens inside the reranker.
+        let fuse_start = Instant::now();
         let fused = rrf_fuse(&dense_hits, &sparse_hits, &p);
         let candidates: Vec<(i64, f32, HitSource)> = if p.rerank_enabled {
             fused
         } else {
             fused.into_iter().take(p.top_k).collect()
         };
+        VECTOR_QUERY_DURATION
+            .with_label_values(&["fuse"])
+            .observe(fuse_start.elapsed().as_secs_f64());
+
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -304,10 +320,16 @@ impl HybridSearcher {
 
         // --- Optional rerank ----------------------------------------------
         if p.rerank_enabled {
-            self.reranker
+            let rerank_start = Instant::now();
+            let out = self
+                .reranker
                 .rerank(query_text, hits, p.top_k)
                 .await
-                .map_err(|e| anyhow::anyhow!("reranker failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("reranker failed: {e}"));
+            VECTOR_QUERY_DURATION
+                .with_label_values(&["rerank"])
+                .observe(rerank_start.elapsed().as_secs_f64());
+            out
         } else {
             Ok(hits)
         }
@@ -787,6 +809,54 @@ mod tests {
         assert_eq!(
             reranked.last().unwrap().chunk_id,
             baseline.first().unwrap().chunk_id
+        );
+    }
+
+    /// S7.T3: each `search()` call records into
+    /// `corlinman_vector_query_duration_seconds` for the three core
+    /// stages (`hnsw`, `bm25`, `fuse`). Counters are process-global so
+    /// other concurrent tests may also observe — we assert the deltas
+    /// are non-zero rather than exact.
+    #[tokio::test]
+    async fn search_records_stage_metrics() {
+        let (searcher, _tmp) = tagged_store().await;
+
+        let hnsw_before = VECTOR_QUERY_DURATION
+            .with_label_values(&["hnsw"])
+            .get_sample_count();
+        let bm25_before = VECTOR_QUERY_DURATION
+            .with_label_values(&["bm25"])
+            .get_sample_count();
+        let fuse_before = VECTOR_QUERY_DURATION
+            .with_label_values(&["fuse"])
+            .get_sample_count();
+
+        let _ = searcher
+            .search("banana", &[1.0, 0.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+
+        let hnsw_after = VECTOR_QUERY_DURATION
+            .with_label_values(&["hnsw"])
+            .get_sample_count();
+        let bm25_after = VECTOR_QUERY_DURATION
+            .with_label_values(&["bm25"])
+            .get_sample_count();
+        let fuse_after = VECTOR_QUERY_DURATION
+            .with_label_values(&["fuse"])
+            .get_sample_count();
+
+        assert!(
+            hnsw_after > hnsw_before,
+            "hnsw stage must record at least one observation"
+        );
+        assert!(
+            bm25_after > bm25_before,
+            "bm25 stage must record at least one observation"
+        );
+        assert!(
+            fuse_after > fuse_before,
+            "fuse stage must record at least one observation"
         );
     }
 

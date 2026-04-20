@@ -11,3 +11,4 @@ pub mod client;
 pub mod retry;
 pub mod stream;
 pub mod tool_callback;
+pub mod trace_propagate;
