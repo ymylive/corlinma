@@ -100,7 +100,7 @@ fn load_registry() -> PluginRegistry {
 
 fn list(registry: &PluginRegistry, as_json: bool, source: Option<&str>) -> anyhow::Result<()> {
     let min_origin = source.map(parse_origin).transpose()?;
-    let rows: Vec<&PluginEntry> = registry
+    let rows: Vec<PluginEntry> = registry
         .list()
         .into_iter()
         .filter(|entry| match min_origin {
@@ -148,10 +148,11 @@ fn list(registry: &PluginRegistry, as_json: bool, source: Option<&str>) -> anyho
             entry.manifest_path.display()
         );
     }
-    if !registry.diagnostics().is_empty() {
+    let diags = registry.diagnostics();
+    if !diags.is_empty() {
         eprintln!();
-        eprintln!("{} diagnostics:", registry.diagnostics().len());
-        for diag in registry.diagnostics() {
+        eprintln!("{} diagnostics:", diags.len());
+        for diag in &diags {
             eprintln!("  - {:?}", diag);
         }
     }
@@ -292,7 +293,7 @@ async fn invoke(
 }
 
 fn doctor(registry: &PluginRegistry, name: Option<&str>) -> anyhow::Result<()> {
-    let entries: Vec<&PluginEntry> = match name {
+    let entries: Vec<PluginEntry> = match name {
         Some(n) => vec![registry
             .get(n)
             .ok_or_else(|| anyhow::anyhow!("plugin '{n}' not found"))?],

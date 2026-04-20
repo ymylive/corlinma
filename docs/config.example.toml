@@ -78,18 +78,47 @@ hybrid_hnsw_weight = 1.0
 rrf_k = 60.0
 
 # ---------------------------------------------------------------------------
-# [[approvals.rules]] — per-plugin / per-tool approval gate.
-# mode = "auto" | "prompt" | "deny"
+# [[approvals.rules]] — per-plugin / per-tool approval gate (Sprint 2 T3).
+#
+# Every `ToolCall` the agent emits is matched against this list BEFORE the
+# plugin runtime sees it:
+#
+#   mode = "auto"   → pass through immediately (useful as an explicit allow).
+#   mode = "prompt" → row lands in SQLite `pending_approvals`; the admin UI
+#                     (/admin/approvals) shows it, and the tool call blocks
+#                     until an operator clicks Approve / Deny or the gate's
+#                     default TTL (5 minutes) elapses — the latter surfaces
+#                     `approval_timeout` in the ToolResult payload.
+#   mode = "deny"   → structured rejection sent back to the model; no plugin
+#                     process ever spawns.
+#
+# Matching is most-specific-first:
+#   1. rules with `plugin = X, tool = "X.write"` → only that tool
+#   2. rules with `plugin = X` (no `tool = `)    → every tool on that plugin
+#   3. no rule                                    → default-auto (pass)
+#
+# `allow_session_keys` ONLY applies to prompt rules: when the chat request's
+# `session_key` is in the list the call short-circuits to approved without
+# pinging the admin UI. Handy for trusted internal channels (scheduler jobs,
+# server-to-server) while still gating human-facing channels.
 # ---------------------------------------------------------------------------
+
+# Example 1: prompt before any file-ops write reaches disk.
 [[approvals.rules]]
 plugin = "file-ops"
 tool = "file-ops.write"
 mode = "prompt"
 
+# Example 2: hard-deny shell plugins entirely.
 # [[approvals.rules]]
 # plugin = "shell"
 # mode = "deny"
-# allow_session_keys = ["abcd1234..."]
+
+# Example 3: prompt for shell except for the scheduler's trusted session key.
+# [[approvals.rules]]
+# plugin = "shell"
+# mode = "prompt"
+# allow_session_keys = ["scheduler:daily-brief", "scheduler:git-sync"]
 
 # ---------------------------------------------------------------------------
 # [[scheduler.jobs]] — cron-style background jobs (tokio-cron-scheduler).

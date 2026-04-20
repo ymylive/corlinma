@@ -73,17 +73,19 @@ pub fn build_router_with_backend_registry_and_sessions(
 /// Connect to the Python gRPC agent server; falls back to the stub router
 /// when the agent isn't reachable (so `/health` stays up even if Python died).
 pub async fn build_router_for_runtime() -> Router {
-    build_runtime().await.0
+    let (router, _, _) = build_runtime().await;
+    router
 }
 
 /// Same as [`build_router_for_runtime`] but also returns the shared
-/// [`ChatBackend`] when the agent was reachable, so callers (e.g. the QQ
-/// channel task in `main`) can drive the chat pipeline without HTTP.
+/// [`ChatBackend`] when the agent was reachable, plus the live
+/// [`PluginRegistry`] so callers (e.g. `main`) can spawn a hot reloader on
+/// top of it.
 ///
 /// Opens `<data_dir>/sessions.sqlite` lazily; a failure there only warns and
 /// the gateway boots without session history (falls back to stateless single
 /// turns). This keeps boot resilient on first run / fresh containers.
-pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>) {
+pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>, Arc<PluginRegistry>) {
     let registry = Arc::new(load_plugin_registry());
     tracing::info!(
         plugin_count = registry.len(),
@@ -103,13 +105,13 @@ pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>) {
             let router = match session_store {
                 Some(store) => build_router_with_backend_registry_and_sessions(
                     backend.clone(),
-                    registry,
+                    registry.clone(),
                     store,
                     DEFAULT_SESSION_MAX_MESSAGES,
                 ),
-                None => build_router_with_backend_and_registry(backend.clone(), registry),
+                None => build_router_with_backend_and_registry(backend.clone(), registry.clone()),
             };
-            (router, Some(backend))
+            (router, Some(backend), registry)
         }
         Err(err) => {
             tracing::warn!(
@@ -117,7 +119,7 @@ pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>) {
                 error = %err,
                 "agent client unreachable; /v1/chat/completions will 501",
             );
-            (build_router(), None)
+            (build_router(), None, registry)
         }
     }
 }

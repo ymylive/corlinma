@@ -1,12 +1,26 @@
 //! Plugin registry: deduped, origin-ranked view of discovered manifests.
 //!
-//! M3 vanguard scope: synchronous discover-and-populate. Hot reload via
-//! `notify` is deferred — the scaffold lives here but the watcher loop is
-//! gated behind `Registry::start_watcher` which callers opt into.
+//! Sprint 2 T4: the registry is now mutable behind a `RwLock` so the
+//! [`watcher::HotReloader`] can `upsert` / `remove` entries in response to
+//! `plugin-manifest.toml` edits on disk.
+//!
+//! Reader contract:
+//!   - [`PluginRegistry::list`] / [`PluginRegistry::get`] /
+//!     [`PluginRegistry::diagnostics`] return **owned clones** under a brief
+//!     read lock. Callers must never hold the lock across `.await` points —
+//!     this API is intentionally snapshot-based to prevent that.
+//!   - Writers go through `upsert` / `remove` / `set_diagnostics`, each of
+//!     which takes a short write lock and releases it before returning.
+//!
+//! The `RwLock` choice (over `Mutex`) matches the workload: hot path is the
+//! tool-call dispatch (`registry.get("echo")`) which is read-heavy; writes
+//! only fire on manifest filesystem changes (typically minutes apart).
+
+pub mod watcher;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use crate::async_task::AsyncTaskRegistry;
 use crate::discovery::{discover, DiscoveredPlugin, DiscoveryDiagnostic, Origin, SearchRoot};
@@ -32,8 +46,6 @@ impl PluginEntry {
     }
 }
 
-use std::path::Path;
-
 /// Diagnostic types surfaced via `Registry::diagnostics`.
 #[derive(Debug, Clone)]
 pub enum Diagnostic {
@@ -53,19 +65,22 @@ pub enum Diagnostic {
     },
 }
 
-/// Read-only plugin registry populated from a fixed list of search roots.
+/// Mutable inner state guarded by a single `RwLock`.
+#[derive(Debug, Default)]
+struct RegistryInner {
+    /// Active entries keyed by plugin name.
+    entries: HashMap<String, PluginEntry>,
+}
+
+/// Plugin registry populated from a set of search roots and optionally
+/// refreshed at runtime by [`watcher::HotReloader`].
 ///
-/// For M3 the registry is immutable after construction; hot reload via
-/// `notify` arrives with the service runtime work.
-///
-/// Carries a process-wide [`AsyncTaskRegistry`] so the gateway can park
-/// `AcceptedForLater` tool_calls and resolve them from the
-/// `/plugin-callback/:task_id` HTTP route.
+/// Cheap to clone: the inner state sits behind `Arc<RwLock<_>>`.
 #[derive(Debug, Clone)]
 pub struct PluginRegistry {
-    entries: HashMap<String, PluginEntry>,
-    diagnostics: Vec<Diagnostic>,
-    roots: Vec<SearchRoot>,
+    inner: Arc<RwLock<RegistryInner>>,
+    diagnostics: Arc<RwLock<Vec<Diagnostic>>>,
+    roots: Arc<Vec<SearchRoot>>,
     /// Shared parking lot for async plugin task ids. Cheap to clone.
     async_tasks: Arc<AsyncTaskRegistry>,
 }
@@ -73,9 +88,9 @@ pub struct PluginRegistry {
 impl Default for PluginRegistry {
     fn default() -> Self {
         Self {
-            entries: HashMap::new(),
-            diagnostics: Vec::new(),
-            roots: Vec::new(),
+            inner: Arc::new(RwLock::new(RegistryInner::default())),
+            diagnostics: Arc::new(RwLock::new(Vec::new())),
+            roots: Arc::new(Vec::new()),
             async_tasks: Arc::new(AsyncTaskRegistry::new()),
         }
     }
@@ -102,9 +117,9 @@ impl PluginRegistry {
             .collect();
         diagnostics.extend(dedup_diags);
         Self {
-            entries,
-            diagnostics,
-            roots,
+            inner: Arc::new(RwLock::new(RegistryInner { entries })),
+            diagnostics: Arc::new(RwLock::new(diagnostics)),
+            roots: Arc::new(roots),
             async_tasks: Arc::new(AsyncTaskRegistry::new()),
         }
     }
@@ -118,30 +133,71 @@ impl PluginRegistry {
 
     /// All registered plugins sorted alphabetically by name (stable output
     /// for CLI + snapshot tests).
-    pub fn list(&self) -> Vec<&PluginEntry> {
-        let mut v: Vec<&PluginEntry> = self.entries.values().collect();
+    ///
+    /// Returns a **clone**: the read lock is released before this function
+    /// returns so callers can safely hold the result across `.await` points.
+    pub fn list(&self) -> Vec<PluginEntry> {
+        let guard = self.inner.read().expect("registry inner lock poisoned");
+        let mut v: Vec<PluginEntry> = guard.entries.values().cloned().collect();
+        drop(guard);
         v.sort_by(|a, b| a.manifest.name.cmp(&b.manifest.name));
         v
     }
 
-    pub fn get(&self, name: &str) -> Option<&PluginEntry> {
-        self.entries.get(name)
+    /// Look up a plugin by name. Returns an owned clone.
+    pub fn get(&self, name: &str) -> Option<PluginEntry> {
+        let guard = self.inner.read().expect("registry inner lock poisoned");
+        guard.entries.get(name).cloned()
     }
 
-    pub fn diagnostics(&self) -> &[Diagnostic] {
-        &self.diagnostics
+    /// Snapshot of diagnostics emitted during the most recent (re-)discover.
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        self.diagnostics
+            .read()
+            .expect("diagnostics lock poisoned")
+            .clone()
     }
 
+    /// Search roots configured at construction time. Stable for the life of
+    /// the registry — the hot reloader watches exactly these paths.
     pub fn roots(&self) -> &[SearchRoot] {
-        &self.roots
+        self.roots.as_slice()
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.inner
+            .read()
+            .expect("registry inner lock poisoned")
+            .entries
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.inner
+            .read()
+            .expect("registry inner lock poisoned")
+            .entries
+            .is_empty()
+    }
+
+    /// Insert or replace `entry` keyed by `entry.manifest.name`.
+    ///
+    /// Intended for the hot reloader; the `pub(crate)` visibility keeps
+    /// application code on the read-only surface.
+    pub(crate) fn upsert(&self, entry: PluginEntry) {
+        let mut guard = self.inner.write().expect("registry inner lock poisoned");
+        guard.entries.insert(entry.manifest.name.clone(), entry);
+    }
+
+    /// Remove a plugin by name. Returns the previous entry if one existed.
+    pub(crate) fn remove(&self, name: &str) -> Option<PluginEntry> {
+        let mut guard = self.inner.write().expect("registry inner lock poisoned");
+        guard.entries.remove(name)
+    }
+
+    /// Overwrite the diagnostics vector in one write lock.
+    pub(crate) fn set_diagnostics(&self, diags: Vec<Diagnostic>) {
+        *self.diagnostics.write().expect("diagnostics lock poisoned") = diags;
     }
 }
 
@@ -220,8 +276,9 @@ mod tests {
         let entry = reg.get("shared").unwrap();
         assert_eq!(entry.manifest.version, "9.9.9");
         assert_eq!(entry.origin, Origin::Config);
-        assert_eq!(reg.diagnostics().len(), 1);
-        match &reg.diagnostics()[0] {
+        let diags = reg.diagnostics();
+        assert_eq!(diags.len(), 1);
+        match &diags[0] {
             Diagnostic::NameCollision {
                 name, loser_origin, ..
             } => {
@@ -230,5 +287,39 @@ mod tests {
             }
             _ => panic!("expected collision"),
         }
+    }
+
+    #[test]
+    fn upsert_then_remove_round_trips() {
+        let reg = PluginRegistry::default();
+        assert!(reg.is_empty());
+
+        let manifest: PluginManifest = toml::from_str(&body("alpha", "0.1.0")).unwrap();
+        let entry = PluginEntry {
+            manifest: Arc::new(manifest),
+            origin: Origin::Workspace,
+            manifest_path: PathBuf::from("/tmp/alpha/plugin-manifest.toml"),
+            shadowed_count: 0,
+        };
+        reg.upsert(entry.clone());
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg.get("alpha").unwrap().manifest.version, "0.1.0");
+
+        let prev = reg.remove("alpha").unwrap();
+        assert_eq!(prev.manifest.name, "alpha");
+        assert!(reg.get("alpha").is_none());
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn set_diagnostics_replaces_snapshot() {
+        let reg = PluginRegistry::default();
+        assert!(reg.diagnostics().is_empty());
+        reg.set_diagnostics(vec![Diagnostic::ParseError {
+            path: PathBuf::from("/tmp/bad/plugin-manifest.toml"),
+            origin: Origin::Config,
+            message: "bad".into(),
+        }]);
+        assert_eq!(reg.diagnostics().len(), 1);
     }
 }

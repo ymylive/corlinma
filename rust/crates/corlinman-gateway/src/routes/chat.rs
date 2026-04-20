@@ -42,8 +42,9 @@ use corlinman_agent_client::tool_callback::{PlaceholderExecutor, ToolExecutor};
 use corlinman_core::session::{SessionMessage, SessionRole, SessionStore};
 use corlinman_core::CorlinmanError;
 use corlinman_plugins::runtime::jsonrpc_stdio::{execute as stdio_execute, DEFAULT_TIMEOUT_MS};
-use corlinman_plugins::runtime::PluginOutput;
-use corlinman_plugins::PluginRegistry;
+use corlinman_plugins::runtime::service_grpc::ServiceRuntime;
+use corlinman_plugins::runtime::{PluginInput, PluginOutput};
+use corlinman_plugins::{PluginRegistry, PluginType};
 use corlinman_proto::v1::{
     client_frame, server_frame, ChatStart, ClientFrame, Message as PbMessage, Role, ServerFrame,
     ToolCall as PbToolCall, ToolResult as PbToolResult,
@@ -264,6 +265,11 @@ pub struct ChatState {
     /// Model alias + fallback configuration. Default = pass-through for every
     /// model (empty aliases + empty known_models).
     pub model_redirect: Arc<ModelRedirect>,
+    /// Optional tool-approval gate (Sprint 2 T3). When present, every tool
+    /// call is wrapped in an [`ApprovalToolExecutor`] for the duration of
+    /// the request, so `Denied` / `Timeout` short-circuit to structured
+    /// error results instead of executing the plugin.
+    pub approval_gate: Option<Arc<crate::middleware::approval::ApprovalGate>>,
 }
 
 /// Default cap used when [`ChatState`] is constructed without an explicit
@@ -284,6 +290,7 @@ impl ChatState {
             session_store: None,
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
+            approval_gate: None,
         }
     }
 
@@ -297,6 +304,26 @@ impl ChatState {
             session_store: None,
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
+            approval_gate: None,
+        }
+    }
+
+    /// Like [`Self::with_registry`] but also attaches a long-lived gRPC
+    /// runtime so `plugin_type = "service"` manifests dispatch through the
+    /// supervisor-managed child processes. Used by the gateway boot path.
+    pub fn with_registry_and_service_runtime(
+        backend: Arc<dyn ChatBackend>,
+        registry: Arc<PluginRegistry>,
+        service_runtime: Arc<ServiceRuntime>,
+    ) -> Self {
+        let exec = RegistryToolExecutor::new(registry).with_service_runtime(service_runtime);
+        Self {
+            backend,
+            tool_executor: Arc::new(exec),
+            session_store: None,
+            session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
+            model_redirect: Arc::new(ModelRedirect::default()),
+            approval_gate: None,
         }
     }
 
@@ -324,6 +351,7 @@ impl ChatState {
             session_store: None,
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
+            approval_gate: None,
         }
     }
 
@@ -333,6 +361,31 @@ impl ChatState {
     pub fn with_model_redirect(mut self, redirect: ModelRedirect) -> Self {
         self.model_redirect = Arc::new(redirect);
         self
+    }
+
+    /// Attach a tool-approval gate. Every tool call during the request
+    /// is wrapped by an [`ApprovalToolExecutor`] that consults the gate
+    /// before delegating to the underlying executor.
+    pub fn with_approval_gate(
+        mut self,
+        gate: Arc<crate::middleware::approval::ApprovalGate>,
+    ) -> Self {
+        self.approval_gate = Some(gate);
+        self
+    }
+
+    /// Build the per-request executor: if an approval gate is attached,
+    /// wrap the base executor with one scoped to `session_key`; otherwise
+    /// return the underlying executor unchanged.
+    pub(crate) fn request_executor(&self, session_key: Option<&str>) -> Arc<dyn ToolExecutor> {
+        match &self.approval_gate {
+            Some(gate) => Arc::new(ApprovalToolExecutor::new(
+                self.tool_executor.clone(),
+                gate.clone(),
+                session_key.unwrap_or("").to_string(),
+            )),
+            None => self.tool_executor.clone(),
+        }
     }
 }
 
@@ -353,6 +406,10 @@ pub struct RegistryToolExecutor {
     /// Deadline for async plugin callbacks. Tests override this via
     /// [`Self::with_async_timeout`] to avoid 5-minute waits.
     async_callback_timeout: std::time::Duration,
+    /// Long-lived gRPC runtime used for `plugin_type = "service"` manifests.
+    /// Absent in tests that never exercise service plugins; an executor with
+    /// `None` here returns `plugin_runtime` errors for service calls.
+    service_runtime: Option<Arc<ServiceRuntime>>,
 }
 
 /// Default deadline we wait for a `/plugin-callback/:task_id` HTTP hit
@@ -367,7 +424,16 @@ impl RegistryToolExecutor {
             async_callback_timeout: std::time::Duration::from_secs(
                 DEFAULT_ASYNC_CALLBACK_TIMEOUT_SECS,
             ),
+            service_runtime: None,
         }
+    }
+
+    /// Attach a long-lived gRPC runtime so service-type plugins dispatch
+    /// through the supervised child processes instead of falling back to
+    /// a `plugin_runtime` error.
+    pub fn with_service_runtime(mut self, runtime: Arc<ServiceRuntime>) -> Self {
+        self.service_runtime = Some(runtime);
+        self
     }
 
     /// Override the async callback timeout. Only used by tests that need
@@ -408,21 +474,45 @@ impl ToolExecutor for RegistryToolExecutor {
         let cancel = CancellationToken::new();
 
         let started = std::time::Instant::now();
-        let outcome = stdio_execute(
-            &manifest.name,
-            &call.tool,
-            &cwd,
-            Some(&manifest),
-            None, // caller-override deadline; rely on manifest / runtime default
-            &call.args_json,
-            "", // session_key — not yet threaded through chat
-            &call.call_id,
-            "", // trace_id — hooked up with the tracing milestone
-            None,
-            &[],
-            cancel,
-        )
-        .await;
+        let outcome = match manifest.plugin_type {
+            PluginType::Service => match self.service_runtime.as_ref() {
+                Some(runtime) => {
+                    let input = PluginInput {
+                        plugin: manifest.name.clone(),
+                        tool: call.tool.clone(),
+                        args_json: bytes::Bytes::copy_from_slice(&call.args_json),
+                        call_id: call.call_id.clone(),
+                        session_key: String::new(),
+                        trace_id: String::new(),
+                        cwd: cwd.clone(),
+                        env: Vec::new(),
+                        deadline_ms: manifest.communication.timeout_ms,
+                    };
+                    runtime.execute(input, cancel).await
+                }
+                None => Err(CorlinmanError::PluginRuntime {
+                    plugin: manifest.name.clone(),
+                    message: "service plugin runtime not wired on this gateway".into(),
+                }),
+            },
+            PluginType::Sync | PluginType::Async => {
+                stdio_execute(
+                    &manifest.name,
+                    &call.tool,
+                    &cwd,
+                    Some(&manifest),
+                    None, // caller-override deadline; rely on manifest / runtime default
+                    &call.args_json,
+                    "", // session_key — not yet threaded through chat
+                    &call.call_id,
+                    "", // trace_id — hooked up with the tracing milestone
+                    None,
+                    &[],
+                    cancel,
+                )
+                .await
+            }
+        };
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         match outcome {
@@ -531,6 +621,107 @@ fn tool_error_result(call_id: &str, code: i64, message: String) -> PbToolResult 
         .unwrap_or_default(),
         is_error: true,
         duration_ms: 0,
+    }
+}
+
+/// Per-request wrapper that consults the [`ApprovalGate`] before delegating
+/// to the inner executor. Sprint 2 T3: every tool call that reaches the
+/// plugin runtime first runs through the gate; `Denied` / `Timeout` short
+/// circuit to an `is_error=true` [`PbToolResult`] so the reasoning loop
+/// observes a structured failure rather than a hang.
+///
+/// The session key is captured at request entry so each in-flight chat
+/// has its own executor clone — the inner `Arc<dyn ToolExecutor>` and
+/// `Arc<ApprovalGate>` are shared cheaply.
+pub struct ApprovalToolExecutor {
+    inner: Arc<dyn ToolExecutor>,
+    gate: Arc<crate::middleware::approval::ApprovalGate>,
+    session_key: String,
+}
+
+impl ApprovalToolExecutor {
+    pub fn new(
+        inner: Arc<dyn ToolExecutor>,
+        gate: Arc<crate::middleware::approval::ApprovalGate>,
+        session_key: String,
+    ) -> Self {
+        Self {
+            inner,
+            gate,
+            session_key,
+        }
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for ApprovalToolExecutor {
+    async fn execute(&self, call: &PbToolCall) -> Result<PbToolResult, CorlinmanError> {
+        use crate::middleware::approval::ApprovalDecision;
+
+        // Resolve the name the approval rule list was authored against
+        // (mirrors RegistryToolExecutor's resolution: `plugin` field wins,
+        // fall back to `tool` when the agent emitted a bare function name).
+        let plugin = if !call.plugin.is_empty() {
+            call.plugin.as_str()
+        } else {
+            call.tool.as_str()
+        };
+
+        // A dedicated per-call cancel token is enough for M3 — the outer
+        // request-level token lands in a later milestone (see chat.rs
+        // comment around RegistryToolExecutor's own `cancel`).
+        let cancel = CancellationToken::new();
+
+        match self
+            .gate
+            .check(
+                &self.session_key,
+                plugin,
+                &call.tool,
+                &call.args_json,
+                cancel,
+            )
+            .await
+        {
+            Ok(ApprovalDecision::Approved) => self.inner.execute(call).await,
+            Ok(ApprovalDecision::Denied(reason)) => Ok(PbToolResult {
+                call_id: call.call_id.clone(),
+                result_json: serde_json::to_vec(&json!({
+                    "code": "approval_denied",
+                    "plugin": plugin,
+                    "tool": call.tool,
+                    "reason": reason,
+                }))
+                .unwrap_or_default(),
+                is_error: true,
+                duration_ms: 0,
+            }),
+            Ok(ApprovalDecision::Timeout) => Ok(PbToolResult {
+                call_id: call.call_id.clone(),
+                result_json: serde_json::to_vec(&json!({
+                    "code": "approval_timeout",
+                    "plugin": plugin,
+                    "tool": call.tool,
+                    "message": "approval request expired before an operator responded",
+                }))
+                .unwrap_or_default(),
+                is_error: true,
+                duration_ms: 0,
+            }),
+            Err(CorlinmanError::Cancelled(_)) => Ok(PbToolResult {
+                call_id: call.call_id.clone(),
+                result_json: serde_json::to_vec(&json!({
+                    "code": "approval_cancelled",
+                    "plugin": plugin,
+                    "tool": call.tool,
+                    "message": "approval wait cancelled",
+                }))
+                .unwrap_or_default(),
+                is_error: true,
+                duration_ms: 0,
+            }),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -682,13 +873,22 @@ async fn handle_chat(
         None
     };
 
+    let request_executor = state.request_executor(session_key.as_deref());
     if req.stream {
-        match chat_stream(state.clone(), start, req.model, persist_ctx).await {
+        match chat_stream(
+            state.clone(),
+            start,
+            req.model,
+            persist_ctx,
+            request_executor,
+        )
+        .await
+        {
             Ok(sse) => sse.into_response(),
             Err(err) => upstream_error(err),
         }
     } else {
-        match chat_nonstream(state.clone(), start, req.model).await {
+        match chat_nonstream(state.clone(), start, req.model, request_executor).await {
             Ok((resp, assistant_text, tool_calls_json)) => {
                 persist_turn(
                     &state,
@@ -785,6 +985,7 @@ async fn chat_nonstream(
     state: ChatState,
     start: ChatStart,
     model: String,
+    tool_executor: Arc<dyn ToolExecutor>,
 ) -> Result<(ChatResponse, String, Option<Value>), CorlinmanError> {
     let (tx, mut rx) = state.backend.start(start).await?;
 
@@ -804,7 +1005,7 @@ async fn chat_nonstream(
                 // side can advance its loop. The placeholder is NOT surfaced
                 // to the client — only logged — to avoid confusing an
                 // OpenAI-compatible consumer.
-                let result = state.tool_executor.execute(&tc).await?;
+                let result = tool_executor.execute(&tc).await?;
                 debug!(
                     call_id = %tc.call_id,
                     status = "awaiting_plugin_runtime",
@@ -881,12 +1082,12 @@ async fn chat_stream(
     start: ChatStart,
     model: String,
     persist: Option<SsePersistCtx>,
+    tool_executor: Arc<dyn ToolExecutor>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, CorlinmanError> {
     let (tx, rx) = state.backend.start(start).await?;
-    let executor = state.tool_executor.clone();
     let id = format!("chatcmpl-{}", Uuid::new_v4());
 
-    let sse_stream = build_sse_stream(rx, tx, executor, id, model, persist);
+    let sse_stream = build_sse_stream(rx, tx, tool_executor, id, model, persist);
     Ok(Sse::new(sse_stream).keep_alive(KeepAlive::default()))
 }
 

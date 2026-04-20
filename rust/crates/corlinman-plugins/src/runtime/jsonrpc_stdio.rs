@@ -29,6 +29,7 @@ use corlinman_core::CorlinmanError;
 
 use crate::manifest::PluginManifest;
 use crate::runtime::{PluginInput, PluginOutput, PluginRuntime, ProgressSink};
+use crate::sandbox::{self, DockerRunner};
 
 /// Default per-call deadline when neither manifest nor caller overrides it.
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -137,6 +138,44 @@ pub async fn execute(
     env: &[(String, String)],
     cancel: CancellationToken,
 ) -> Result<PluginOutput, CorlinmanError> {
+    execute_with_runner(
+        plugin_name,
+        tool_name,
+        cwd,
+        manifest,
+        timeout_override_ms,
+        arguments_json,
+        session_key,
+        request_id,
+        trace_id,
+        command_override,
+        env,
+        None,
+        cancel,
+    )
+    .await
+}
+
+/// Like [`execute`], but accepts an injected `DockerRunner` so tests can
+/// exercise the sandbox dispatch branch without a Docker daemon. When
+/// `runner_override` is `None` and the manifest requests sandboxing, we lazily
+/// build a real `DockerSandbox`.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_with_runner(
+    plugin_name: &str,
+    tool_name: &str,
+    cwd: &Path,
+    manifest: Option<&PluginManifest>,
+    timeout_override_ms: Option<u64>,
+    arguments_json: &[u8],
+    session_key: &str,
+    request_id: &str,
+    trace_id: &str,
+    command_override: Option<(&str, &[String])>,
+    env: &[(String, String)],
+    runner_override: Option<Arc<dyn DockerRunner>>,
+    cancel: CancellationToken,
+) -> Result<PluginOutput, CorlinmanError> {
     // ---- resolve timeout + command -------------------------------------
     let timeout_ms = match manifest {
         Some(m) => resolve_timeout(m, timeout_override_ms),
@@ -180,6 +219,19 @@ pub async fn execute(
         message: e.to_string(),
     })?;
     request_line.push(b'\n');
+
+    // ---- sandbox branch: when the manifest requests containerisation ----
+    if command_override.is_none() {
+        if let Some(m) = manifest {
+            if sandbox::is_enabled(&m.sandbox) {
+                let runner = match runner_override {
+                    Some(r) => r,
+                    None => sandbox::docker::default_runner().await?,
+                };
+                return runner.run(m, &request_line, timeout_ms, cancel).await;
+            }
+        }
+    }
 
     // ---- spawn child ----------------------------------------------------
     let mut cmd = Command::new(&program);
@@ -318,7 +370,179 @@ async fn run_exchange(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
     use super::*;
+
+    struct RecordingMockRunner {
+        calls: AtomicUsize,
+        last_request: Mutex<Vec<u8>>,
+        canned: PluginOutput,
+    }
+
+    impl RecordingMockRunner {
+        fn new(canned: PluginOutput) -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                last_request: Mutex::new(Vec::new()),
+                canned,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl DockerRunner for RecordingMockRunner {
+        async fn run(
+            &self,
+            _manifest: &PluginManifest,
+            request_line: &[u8],
+            _timeout_ms: u64,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<PluginOutput, CorlinmanError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_request.lock().unwrap() = request_line.to_vec();
+            Ok(self.canned.clone())
+        }
+    }
+
+    fn sandboxed_manifest() -> PluginManifest {
+        PluginManifest {
+            name: "sbx".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            author: String::new(),
+            plugin_type: crate::manifest::PluginType::Sync,
+            entry_point: crate::manifest::EntryPoint {
+                command: "python3".into(),
+                args: vec!["main.py".into()],
+                env: Default::default(),
+            },
+            communication: Default::default(),
+            capabilities: Default::default(),
+            sandbox: crate::manifest::SandboxConfig {
+                memory: Some("64m".into()),
+                ..Default::default()
+            },
+            meta: None,
+        }
+    }
+
+    fn bare_manifest() -> PluginManifest {
+        PluginManifest {
+            name: "bare".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            author: String::new(),
+            plugin_type: crate::manifest::PluginType::Sync,
+            entry_point: crate::manifest::EntryPoint {
+                command: "/definitely/not/here".into(),
+                args: vec![],
+                env: Default::default(),
+            },
+            communication: Default::default(),
+            capabilities: Default::default(),
+            sandbox: Default::default(),
+            meta: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_manifest_dispatches_to_runner() {
+        let canned = PluginOutput::success(Bytes::from_static(br#"{"ok":true}"#), 12);
+        let mock = RecordingMockRunner::new(canned);
+        let m = sandboxed_manifest();
+
+        let out = execute_with_runner(
+            &m.name,
+            "tool-x",
+            std::path::Path::new("."),
+            Some(&m),
+            None,
+            b"{\"hello\":\"world\"}",
+            "sess",
+            "req-1",
+            "trace-1",
+            None,
+            &[],
+            Some(mock.clone() as Arc<dyn DockerRunner>),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("runner path must succeed");
+
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+        let recorded = mock.last_request.lock().unwrap().clone();
+        let recorded = String::from_utf8(recorded).unwrap();
+        assert!(recorded.contains("\"hello\":\"world\""), "args forwarded");
+        assert!(recorded.ends_with('\n'), "line terminated");
+        assert!(matches!(out, PluginOutput::Success { .. }));
+    }
+
+    #[tokio::test]
+    async fn sandbox_runner_error_surfaces_unchanged() {
+        let canned = PluginOutput::error(crate::sandbox::OOM_ERROR_CODE, "container OOM-killed", 7);
+        let mock = RecordingMockRunner::new(canned);
+        let m = sandboxed_manifest();
+
+        let out = execute_with_runner(
+            &m.name,
+            "tool-x",
+            std::path::Path::new("."),
+            Some(&m),
+            None,
+            b"{}",
+            "sess",
+            "req-1",
+            "trace-1",
+            None,
+            &[],
+            Some(mock.clone() as Arc<dyn DockerRunner>),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("runner path must succeed");
+
+        match out {
+            PluginOutput::Error { code, .. } => {
+                assert_eq!(code, crate::sandbox::OOM_ERROR_CODE);
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_sandbox_manifest_takes_local_spawn_path() {
+        // Point the manifest at a command that does not exist; the local
+        // spawn path must surface an `io::Error`, which means the sandbox
+        // dispatch did NOT fire (otherwise the mock would own the call).
+        let canned = PluginOutput::success(Bytes::from_static(b"{}"), 0);
+        let mock = RecordingMockRunner::new(canned);
+        let m = bare_manifest();
+        let err = execute_with_runner(
+            &m.name,
+            "tool-x",
+            std::path::Path::new("."),
+            Some(&m),
+            Some(10),
+            b"{}",
+            "sess",
+            "req-1",
+            "trace-1",
+            None,
+            &[],
+            Some(mock.clone() as Arc<dyn DockerRunner>),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect_err("missing binary must fail spawn");
+        assert!(matches!(err, CorlinmanError::Io(_)), "got {err:?}");
+        assert_eq!(
+            mock.calls.load(Ordering::SeqCst),
+            0,
+            "non-sandbox manifest must not touch the docker runner"
+        );
+    }
 
     #[test]
     fn resolve_timeout_prefers_override() {

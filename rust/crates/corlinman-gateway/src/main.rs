@@ -18,8 +18,15 @@ use corlinman_gateway::routes::chat::ChatBackend;
 use corlinman_gateway::services::ChatService as GatewayChatService;
 use corlinman_gateway::{server, shutdown};
 use corlinman_gateway_api::ChatService as ChatServiceTrait;
+use corlinman_plugins::registry::watcher::{HotReloader, DEFAULT_DEBOUNCE};
+use corlinman_plugins::runtime::service_grpc::ServiceRuntime;
+use corlinman_plugins::{PluginSupervisor, PluginType};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+/// Default root directory for per-plugin UDS files. Mirrors the env the
+/// plugin child sees in `CORLINMAN_PLUGIN_ADDR`.
+const DEFAULT_SOCKET_ROOT: &str = "/tmp/corlinman-plugins";
 
 #[tokio::main]
 async fn main() {
@@ -31,9 +38,71 @@ async fn main() {
     // Root cancellation token. Cancels gRPC/channels/axum on shutdown.
     let root = CancellationToken::new();
 
-    // Build router + keep a handle on the shared backend.
-    let (router, backend) = server::build_runtime().await;
+    // Build router + keep a handle on the shared backend + registry.
+    let (router, backend, plugin_registry) = server::build_runtime().await;
 
+    // Boot the long-lived service-plugin stack: spawn every
+    // `plugin_type = "service"` manifest into a supervised child process,
+    // dial it over UDS, and start a watchdog per plugin so crashes respawn
+    // with backoff. Failures are logged but non-fatal — the gateway keeps
+    // serving sync / async plugins + non-plugin routes.
+    let service_runtime = Arc::new(ServiceRuntime::new());
+    let supervisor = Arc::new(PluginSupervisor::new(std::path::PathBuf::from(
+        DEFAULT_SOCKET_ROOT,
+    )));
+    for entry in plugin_registry.list() {
+        if entry.manifest.plugin_type != PluginType::Service {
+            continue;
+        }
+        let manifest = entry.manifest.as_ref().clone();
+        match supervisor.spawn_service(&manifest).await {
+            Ok(socket) => {
+                if let Err(err) = service_runtime.register(&manifest.name, &socket).await {
+                    tracing::error!(
+                        plugin = %manifest.name,
+                        error = %err,
+                        "service plugin register failed; skipping watchdog",
+                    );
+                    continue;
+                }
+                Arc::clone(&supervisor).start_watchdog(
+                    manifest.name.clone(),
+                    manifest,
+                    Arc::clone(&service_runtime),
+                );
+            }
+            Err(err) => tracing::error!(
+                plugin = %manifest.name,
+                error = %err,
+                "service plugin spawn failed at boot",
+            ),
+        }
+    }
+
+    // Spawn the plugin hot reloader. It watches the registry's search roots
+    // with `notify` (or falls back to polling) and `upsert`s / `remove`s
+    // entries as `plugin-manifest.toml` files change on disk. Cancellation
+    // flows from the root shutdown token so the watcher thread drains on
+    // SIGTERM alongside the HTTP server.
+    let hot_reloader_handle = {
+        let roots: Vec<std::path::PathBuf> = plugin_registry
+            .roots()
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        if roots.is_empty() {
+            tracing::debug!("no plugin roots configured; hot reloader not spawned");
+            None
+        } else {
+            let reloader = HotReloader::new(plugin_registry.clone(), roots, DEFAULT_DEBOUNCE);
+            let cancel = root.child_token();
+            Some(tokio::spawn(async move {
+                if let Err(err) = reloader.run(cancel).await {
+                    tracing::warn!(error = %err, "plugin hot reloader exited with error");
+                }
+            }))
+        }
+    };
     // Optionally launch channel adapters.
     let mut channel_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if let Some(backend) = backend.as_ref() {
@@ -71,6 +140,9 @@ async fn main() {
         tracing::warn!(error = %err, "server task join failed");
     }
     for h in channel_handles {
+        let _ = h.await;
+    }
+    if let Some(h) = hot_reloader_handle {
         let _ = h.await;
     }
 

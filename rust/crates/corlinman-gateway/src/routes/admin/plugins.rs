@@ -80,7 +80,7 @@ pub fn router(state: AdminState) -> Router {
 }
 
 async fn list_plugins(State(state): State<AdminState>) -> Json<Vec<PluginSummaryOut>> {
-    let rows: Vec<PluginSummaryOut> = state.plugins.list().iter().map(|e| (*e).into()).collect();
+    let rows: Vec<PluginSummaryOut> = state.plugins.list().iter().map(Into::into).collect();
     Json(rows)
 }
 
@@ -135,7 +135,7 @@ async fn get_plugin(
         .collect();
 
     Json(PluginDetail {
-        summary: entry.into(),
+        summary: (&entry).into(),
         manifest: manifest_json,
         diagnostics,
     })

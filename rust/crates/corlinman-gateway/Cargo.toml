@@ -22,6 +22,7 @@ corlinman-agent-client = { path = "../corlinman-agent-client" }
 corlinman-gateway-api = { path = "../corlinman-gateway-api" }
 corlinman-channels = { path = "../corlinman-channels" }
 corlinman-plugins = { path = "../corlinman-plugins" }
+corlinman-vector = { path = "../corlinman-vector" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -52,6 +53,7 @@ time = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 base64 = "0.22"
+dashmap = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

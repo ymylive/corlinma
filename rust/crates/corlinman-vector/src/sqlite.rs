@@ -1,12 +1,14 @@
 //! sqlx pool + file/chunk/kv access + BM25 FTS5 search.
 //!
-//! Tables (corlinman-native, schema v2):
+//! Tables (corlinman-native, schema v3):
 //!
 //! - `files` — one row per indexed source file.
 //! - `chunks` — text chunks + little-endian f32 BLOB vector.
 //! - `chunks_fts` — FTS5 contentless-linked virtual table mirroring
 //!   `chunks.content`, maintained by INSERT/DELETE/UPDATE triggers.
 //! - `kv_store` — general KV cache + `schema_version`.
+//! - `pending_approvals` — one row per tool call that hit a `prompt`
+//!   approval rule; consumed by the `/admin/approvals` UI.
 //!
 //! The BM25 path uses SQLite's built-in `bm25()` ranker. FTS5 ships in
 //! the sqlx-bundled `libsqlite3-sys` by default (no Cargo feature flip
@@ -72,6 +74,23 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
     INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
     INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
 END;
+
+CREATE TABLE IF NOT EXISTS pending_approvals (
+    id TEXT PRIMARY KEY,
+    session_key TEXT NOT NULL,
+    plugin TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    decided_at TEXT,
+    decision TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_undecided
+    ON pending_approvals(decided_at) WHERE decided_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_pending_approvals_requested
+    ON pending_approvals(requested_at);
 "#;
 
 /// Row from `files`.
@@ -96,6 +115,25 @@ pub struct ChunkRow {
     /// Decoded vector (little-endian f32). `None` if the BLOB is NULL or the
     /// length wasn't a multiple of 4.
     pub vector: Option<Vec<f32>>,
+}
+
+/// Row from `pending_approvals` — one per tool call intercepted by an
+/// approval rule set to `mode = "prompt"`.
+///
+/// `requested_at` and `decided_at` are ISO 8601 strings (RFC 3339 profile)
+/// produced by `time::OffsetDateTime::format(&Rfc3339)`. `decision` is
+/// `None` while the row is awaiting an operator; it becomes
+/// `"approved" | "denied" | "timeout"` once the gate resolves the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApproval {
+    pub id: String,
+    pub session_key: String,
+    pub plugin: String,
+    pub tool: String,
+    pub args_json: String,
+    pub requested_at: String,
+    pub decided_at: Option<String>,
+    pub decision: Option<String>,
 }
 
 /// Thin wrapper over a `SqlitePool` pointed at `knowledge_base.sqlite`.
@@ -354,6 +392,125 @@ impl SqliteStore {
                 .with_context(|| format!("table_exists({name})"))?;
         Ok(row.is_some())
     }
+
+    // ---- pending_approvals (schema v3) -----------------------------------
+
+    /// Insert a fresh pending-approval row.
+    ///
+    /// Callers supply a UUID v4 in `row.id`; `decided_at` and `decision`
+    /// must be `None` for a freshly-minted row. Re-inserting a row with an
+    /// existing `id` yields a `UNIQUE` constraint error (SQL code 2067)
+    /// which the caller can propagate — we don't implement upsert here.
+    pub async fn insert_pending_approval(&self, row: &PendingApproval) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO pending_approvals(id, session_key, plugin, tool, args_json, \
+             requested_at, decided_at, decision) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(&row.id)
+        .bind(&row.session_key)
+        .bind(&row.plugin)
+        .bind(&row.tool)
+        .bind(&row.args_json)
+        .bind(&row.requested_at)
+        .bind(&row.decided_at)
+        .bind(&row.decision)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("insert_pending_approval(id={})", row.id))?;
+        Ok(())
+    }
+
+    /// List approvals ordered by `requested_at ASC`. When `include_decided`
+    /// is false, only rows whose `decided_at IS NULL` are returned (the
+    /// queue the admin UI shows by default).
+    pub async fn list_pending_approvals(
+        &self,
+        include_decided: bool,
+    ) -> Result<Vec<PendingApproval>> {
+        let sql = if include_decided {
+            "SELECT id, session_key, plugin, tool, args_json, requested_at, decided_at, decision \
+             FROM pending_approvals ORDER BY requested_at DESC"
+        } else {
+            "SELECT id, session_key, plugin, tool, args_json, requested_at, decided_at, decision \
+             FROM pending_approvals WHERE decided_at IS NULL ORDER BY requested_at ASC"
+        };
+        let rows = sqlx::query(sql)
+            .fetch_all(&self.pool)
+            .await
+            .context("list_pending_approvals")?;
+        Ok(rows.into_iter().map(row_to_approval).collect())
+    }
+
+    /// Fetch a single row by id. Returns `None` if not present.
+    pub async fn get_pending_approval(&self, id: &str) -> Result<Option<PendingApproval>> {
+        let row = sqlx::query(
+            "SELECT id, session_key, plugin, tool, args_json, requested_at, decided_at, decision \
+             FROM pending_approvals WHERE id = ?1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("get_pending_approval({id})"))?;
+        Ok(row.map(row_to_approval))
+    }
+
+    /// Mark a row as decided. `decision` must be one of
+    /// `"approved" | "denied" | "timeout"` — callers are trusted to enforce
+    /// this (the table has no CHECK constraint to keep migrations forward
+    /// compatible). No-op when the id is unknown.
+    pub async fn decide_approval(
+        &self,
+        id: &str,
+        decision: &str,
+        decided_at: time::OffsetDateTime,
+    ) -> Result<()> {
+        let decided_str = decided_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .with_context(|| "format decided_at")?;
+        sqlx::query(
+            "UPDATE pending_approvals SET decided_at = ?1, decision = ?2 \
+             WHERE id = ?3 AND decided_at IS NULL",
+        )
+        .bind(&decided_str)
+        .bind(decision)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("decide_approval({id}, {decision})"))?;
+        Ok(())
+    }
+
+    /// Delete undecided rows whose `requested_at` is strictly older than
+    /// `older_than`. Returns the number of rows removed. Used by the
+    /// gateway's periodic cleanup task so a long-running process doesn't
+    /// accumulate orphaned prompts from crashed sessions.
+    pub async fn cleanup_stale_approvals(&self, older_than: time::OffsetDateTime) -> Result<u64> {
+        let cutoff = older_than
+            .format(&time::format_description::well_known::Rfc3339)
+            .with_context(|| "format cleanup cutoff")?;
+        let res = sqlx::query(
+            "DELETE FROM pending_approvals WHERE decided_at IS NULL AND requested_at < ?1",
+        )
+        .bind(&cutoff)
+        .execute(&self.pool)
+        .await
+        .context("cleanup_stale_approvals")?;
+        Ok(res.rows_affected())
+    }
+}
+
+fn row_to_approval(r: sqlx::sqlite::SqliteRow) -> PendingApproval {
+    PendingApproval {
+        id: r.get::<String, _>("id"),
+        session_key: r.get::<String, _>("session_key"),
+        plugin: r.get::<String, _>("plugin"),
+        tool: r.get::<String, _>("tool"),
+        args_json: r.get::<String, _>("args_json"),
+        requested_at: r.get::<String, _>("requested_at"),
+        decided_at: r.get::<Option<String>, _>("decided_at"),
+        decision: r.get::<Option<String>, _>("decision"),
+    }
 }
 
 fn row_to_chunk(r: sqlx::sqlite::SqliteRow) -> ChunkRow {
@@ -543,5 +700,99 @@ mod tests {
     fn schema_sql_not_empty() {
         assert!(SCHEMA_SQL.contains("CREATE TABLE"));
         assert!(SCHEMA_SQL.contains("chunks_fts"));
+        assert!(SCHEMA_SQL.contains("pending_approvals"));
+    }
+
+    // ---- pending_approvals ------------------------------------------------
+
+    fn sample_approval(id: &str, session: &str) -> PendingApproval {
+        PendingApproval {
+            id: id.into(),
+            session_key: session.into(),
+            plugin: "file-ops".into(),
+            tool: "write".into(),
+            args_json: r#"{"path":"a.md"}"#.into(),
+            requested_at: "2026-04-20T06:00:00Z".into(),
+            decided_at: None,
+            decision: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_approvals_insert_and_list_roundtrip() {
+        let (store, _tmp) = fresh_store().await;
+        store
+            .insert_pending_approval(&sample_approval("apv_a", "sess_a"))
+            .await
+            .unwrap();
+        store
+            .insert_pending_approval(&sample_approval("apv_b", "sess_b"))
+            .await
+            .unwrap();
+
+        let undecided = store.list_pending_approvals(false).await.unwrap();
+        assert_eq!(undecided.len(), 2);
+        assert_eq!(undecided[0].id, "apv_a");
+        assert_eq!(undecided[1].id, "apv_b");
+
+        let one = store.get_pending_approval("apv_a").await.unwrap().unwrap();
+        assert_eq!(one.plugin, "file-ops");
+        assert!(store
+            .get_pending_approval("missing")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn decide_approval_moves_row_out_of_undecided_view() {
+        let (store, _tmp) = fresh_store().await;
+        store
+            .insert_pending_approval(&sample_approval("apv_x", "sess"))
+            .await
+            .unwrap();
+        store
+            .decide_approval("apv_x", "approved", time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+
+        let undecided = store.list_pending_approvals(false).await.unwrap();
+        assert!(undecided.is_empty());
+        let all = store.list_pending_approvals(true).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].decision.as_deref(), Some("approved"));
+        assert!(all[0].decided_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_stale_approvals_drops_only_old_undecided() {
+        let (store, _tmp) = fresh_store().await;
+        // Old undecided — gets pruned.
+        let mut old = sample_approval("apv_old", "sess");
+        old.requested_at = "2020-01-01T00:00:00Z".into();
+        store.insert_pending_approval(&old).await.unwrap();
+        // Recent undecided — kept.
+        let mut recent = sample_approval("apv_new", "sess");
+        recent.requested_at = "2099-01-01T00:00:00Z".into();
+        store.insert_pending_approval(&recent).await.unwrap();
+        // Old decided — kept (history).
+        let mut decided = sample_approval("apv_done", "sess");
+        decided.requested_at = "2020-01-01T00:00:00Z".into();
+        store.insert_pending_approval(&decided).await.unwrap();
+        store
+            .decide_approval("apv_done", "approved", time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+
+        let removed = store
+            .cleanup_stale_approvals(time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        let all = store.list_pending_approvals(true).await.unwrap();
+        let ids: Vec<_> = all.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains(&"apv_new"));
+        assert!(ids.contains(&"apv_done"));
+        assert!(!ids.contains(&"apv_old"));
     }
 }

@@ -14,6 +14,7 @@ pub mod preprocessor;
 pub mod registry;
 pub mod runtime;
 pub mod sandbox;
+pub mod supervisor;
 
 pub use async_task::{AsyncTaskRegistry, CompleteError};
 pub use discovery::{
@@ -24,3 +25,4 @@ pub use manifest::{
     PluginManifest, PluginType, SandboxConfig, Tool,
 };
 pub use registry::{Diagnostic, PluginEntry, PluginRegistry};
+pub use supervisor::{PluginChild, PluginSupervisor};

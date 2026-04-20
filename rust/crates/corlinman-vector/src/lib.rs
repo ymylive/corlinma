@@ -28,7 +28,7 @@ pub mod usearch_index;
 
 pub use hybrid::{HitSource, HybridParams, HybridSearcher, RagHit};
 pub use query::VectorStore;
-pub use sqlite::{ChunkRow, FileRow, SqliteStore};
+pub use sqlite::{ChunkRow, FileRow, PendingApproval, SqliteStore};
 pub use usearch_index::UsearchIndex;
 
 /// Current corlinman schema version written to `kv_store('schema_version')`.
@@ -36,9 +36,13 @@ pub use usearch_index::UsearchIndex;
 /// - v1: `files`/`chunks`/`kv_store` baseline (no FTS5).
 /// - v2: add FTS5 virtual table `chunks_fts` + sync triggers, plus a
 ///   one-shot backfill via `rebuild_fts` for pre-existing chunks.
+/// - v3: add `pending_approvals` table used by the gateway's tool-approval
+///   gate (Sprint 2 T3). Forward-only migration — the DDL is `IF NOT EXISTS`
+///   so a fresh v3 DB materialises the table during `SqliteStore::open`, and
+///   `migration::ensure_schema` just bumps the stored version for legacy DBs.
 ///
 /// Bumped on any breaking migration; see [`migration::ensure_schema`].
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Encode a `&[f32]` as a little-endian byte blob for the `chunks.vector`
 /// column.

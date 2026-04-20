@@ -22,10 +22,12 @@ use corlinman_core::config::Config;
 use corlinman_plugins::registry::PluginRegistry;
 
 use crate::middleware::admin_auth::{require_admin, AdminAuthState};
+use crate::middleware::approval::ApprovalGate;
 
 use super::not_implemented;
 
 pub mod agents;
+pub mod approvals;
 pub mod plugins;
 
 /// Shared read-only state passed to every admin handler.
@@ -36,11 +38,27 @@ pub mod plugins;
 pub struct AdminState {
     pub plugins: Arc<PluginRegistry>,
     pub config: Arc<ArcSwap<Config>>,
+    /// Sprint 2 T3: handle used by `/admin/approvals*` routes to list,
+    /// decide, and broadcast pending tool-approval requests. `None` on
+    /// stripped-down builds that boot without approval rules configured;
+    /// the `/admin/approvals*` endpoints then return 503.
+    pub approval_gate: Option<Arc<ApprovalGate>>,
 }
 
 impl AdminState {
     pub fn new(plugins: Arc<PluginRegistry>, config: Arc<ArcSwap<Config>>) -> Self {
-        Self { plugins, config }
+        Self {
+            plugins,
+            config,
+            approval_gate: None,
+        }
+    }
+
+    /// Fluent: attach the approval gate so `/admin/approvals*` routes
+    /// can read the SQLite queue and wake parked decisions.
+    pub fn with_approval_gate(mut self, gate: Arc<ApprovalGate>) -> Self {
+        self.approval_gate = Some(gate);
+        self
     }
 }
 
@@ -56,7 +74,8 @@ pub fn router_with_state(state: AdminState) -> Router {
 
     Router::new()
         .merge(plugins::router(state.clone()))
-        .merge(agents::router(state))
+        .merge(agents::router(state.clone()))
+        .merge(approvals::router(state))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             require_admin,

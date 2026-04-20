@@ -1,9 +1,14 @@
 //! Schema migrations for the corlinman SQLite store.
 //!
-//! The only migration corlinman-native carries today is **v1 → v2**: a
-//! DB written before FTS5 was part of the baseline needs the
-//! `chunks_fts` virtual table populated from existing `chunks` rows
-//! (the triggers handle everything from that point forward).
+//! corlinman-native ships two forward migrations today:
+//!
+//! - **v1 → v2**: a DB written before FTS5 was part of the baseline needs
+//!   the `chunks_fts` virtual table populated from existing `chunks` rows
+//!   (the triggers handle everything from that point forward).
+//! - **v2 → v3**: the `pending_approvals` table used by the gateway's
+//!   approval gate (Sprint 2 T3). The DDL is `IF NOT EXISTS` in
+//!   [`crate::sqlite::SCHEMA_SQL`] so the table already exists by the time
+//!   the migration runs — we just bump the stored version.
 //!
 //! # Behaviour
 //!
@@ -13,15 +18,19 @@
 //!   [`MigrationOutcome::Initialised`].
 //! - **Equals `SCHEMA_VERSION`** — no-op, returns
 //!   [`MigrationOutcome::UpToDate`].
-//! - **`1`** — pre-FTS5 layout. Run [`SqliteStore::rebuild_fts`],
-//!   bump the stored version, return [`MigrationOutcome::Migrated`].
+//! - **`1`** — pre-FTS5 layout. Run [`SqliteStore::rebuild_fts`], walk
+//!   forward to v3, bump the stored version, return
+//!   [`MigrationOutcome::Migrated`].
+//! - **`2`** — pre-approval layout. DDL has already materialised the
+//!   `pending_approvals` table; bump version and return
+//!   [`MigrationOutcome::Migrated`].
 //! - **Anything else** — error. We refuse to auto-downgrade or
 //!   guess-forward from unknown versions.
 //!
 //! # TODO
 //!
 //! - A `MigrationScript { from: u32, to: u32, run: async fn(...) }`
-//!   registry once we have more than one step.
+//!   registry once we have more than two steps (we're getting close).
 //! - `.usearch` header compat probe (convert-on-mismatch).
 
 use anyhow::{anyhow, Result};
@@ -54,30 +63,42 @@ pub async fn ensure_schema(store: &SqliteStore) -> Result<MigrationOutcome> {
                 .parse()
                 .map_err(|e| anyhow!("kv_store.schema_version='{v}' not an integer: {e}"))?;
             if parsed == crate::SCHEMA_VERSION {
-                Ok(MigrationOutcome::UpToDate(parsed))
-            } else if parsed == 1 && crate::SCHEMA_VERSION == 2 {
-                // v1 → v2: the FTS5 virtual table + triggers already exist
-                // (SCHEMA_SQL in SqliteStore::open is idempotent). All we
-                // need is a one-shot backfill so pre-existing chunk rows
-                // become searchable.
+                return Ok(MigrationOutcome::UpToDate(parsed));
+            }
+            if !(1..=crate::SCHEMA_VERSION).contains(&parsed) {
+                return Err(anyhow!(
+                    "schema_version mismatch: stored={} current={}; no migration path",
+                    parsed,
+                    crate::SCHEMA_VERSION
+                ));
+            }
+
+            let from = parsed;
+            let mut current = parsed;
+            // v1 → v2: backfill FTS5 so pre-existing chunks become searchable.
+            if current == 1 {
                 store
                     .rebuild_fts()
                     .await
                     .map_err(|e| anyhow!("v1→v2 FTS5 backfill failed: {e}"))?;
-                store
-                    .kv_set("schema_version", &crate::SCHEMA_VERSION.to_string())
-                    .await?;
-                Ok(MigrationOutcome::Migrated {
-                    from: 1,
-                    to: crate::SCHEMA_VERSION,
-                })
-            } else {
-                Err(anyhow!(
-                    "schema_version mismatch: stored={} current={}; no migration path",
-                    parsed,
-                    crate::SCHEMA_VERSION
-                ))
+                current = 2;
             }
+            // v2 → v3: the `pending_approvals` DDL is in SCHEMA_SQL (idempotent
+            // `IF NOT EXISTS`), so the table already exists. Just bump the
+            // stored version — there's no data to backfill. (`current` is
+            // only read below in future migrations; mark the step explicitly
+            // so the intent survives a "v3 → v4" hop in a later milestone.)
+            if current == 2 {
+                current = 3;
+            }
+            debug_assert_eq!(current, crate::SCHEMA_VERSION);
+            store
+                .kv_set("schema_version", &crate::SCHEMA_VERSION.to_string())
+                .await?;
+            Ok(MigrationOutcome::Migrated {
+                from,
+                to: crate::SCHEMA_VERSION,
+            })
         }
     }
 }
@@ -102,7 +123,7 @@ mod tests {
         assert_eq!(out, MigrationOutcome::Initialised(crate::SCHEMA_VERSION));
         assert_eq!(
             store.kv_get("schema_version").await.unwrap().as_deref(),
-            Some("2")
+            Some("3")
         );
     }
 
@@ -115,7 +136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v1_to_v2_backfills_fts_and_bumps_version() {
+    async fn v1_to_current_backfills_fts_and_bumps_version() {
         let (store, _tmp) = fresh_store().await;
 
         // Simulate a legacy v1 DB: chunks row inserted, then FTS5 purged,
@@ -134,13 +155,40 @@ mod tests {
         store.kv_set("schema_version", "1").await.unwrap();
 
         let out = ensure_schema(&store).await.unwrap();
-        assert_eq!(out, MigrationOutcome::Migrated { from: 1, to: 2 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Migrated {
+                from: 1,
+                to: crate::SCHEMA_VERSION,
+            }
+        );
         assert_eq!(
             store.kv_get("schema_version").await.unwrap().as_deref(),
-            Some("2")
+            Some("3")
         );
         // BM25 now returns the backfilled row.
         assert_eq!(store.search_bm25("legacy", 5).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn v2_to_v3_just_bumps_version() {
+        let (store, _tmp) = fresh_store().await;
+        // Simulate a v2 DB: table exists (SCHEMA_SQL is idempotent) but
+        // the recorded version says otherwise.
+        store.kv_set("schema_version", "2").await.unwrap();
+
+        let out = ensure_schema(&store).await.unwrap();
+        assert_eq!(out, MigrationOutcome::Migrated { from: 2, to: 3 });
+        assert_eq!(
+            store.kv_get("schema_version").await.unwrap().as_deref(),
+            Some("3")
+        );
+        // Table is usable right after the migration (no backfill required).
+        assert!(store
+            .list_pending_approvals(false)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
