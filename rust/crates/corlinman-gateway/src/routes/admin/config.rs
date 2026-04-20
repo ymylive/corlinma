@@ -57,7 +57,17 @@ use super::AdminState;
 pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/admin/config", get(get_config).post(post_config))
+        .route("/admin/config/schema", get(get_schema))
         .with_state(state)
+}
+
+/// Sprint 6 T4: `GET /admin/config/schema` — JSON-Schema document for
+/// [`Config`], rendered via `schemars`. The UI consumes it to drive
+/// Monaco's autocomplete + hover tooltips; also useful for any future
+/// typed client that wants to validate a TOML edit before posting.
+async fn get_schema(State(_state): State<AdminState>) -> Json<serde_json::Value> {
+    let schema = schemars::schema_for!(Config);
+    Json(serde_json::to_value(schema).unwrap_or_else(|_| serde_json::json!({})))
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +741,33 @@ mode = "prompt"
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn get_schema_returns_json_schema_document() {
+        let state = base_state(None);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/config/schema")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        // Schemars v0.8 emits `$schema` + a top-level object with
+        // `properties.server`, `properties.models`, etc.
+        let props = &v["properties"];
+        assert!(
+            props.is_object(),
+            "expected top-level properties; got {v:?}"
+        );
+        assert!(props.get("server").is_some());
+        assert!(props.get("models").is_some());
+        assert!(props.get("providers").is_some());
     }
 
     #[tokio::test]

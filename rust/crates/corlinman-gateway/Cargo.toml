@@ -54,6 +54,7 @@ toml = { workspace = true }
 dirs = { workspace = true }
 base64 = "0.22"
 dashmap = { workspace = true }
+schemars = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

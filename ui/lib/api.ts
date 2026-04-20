@@ -236,3 +236,216 @@ export async function decideApprovalsBatch(
 
 /** Convenience re-export for callers that want the SSE helper. */
 export { openEventStream } from "./sse";
+
+// ---------------------------------------------------------------------------
+// S6 T1 — RAG admin surface
+// ---------------------------------------------------------------------------
+
+export interface RagStats {
+  ready: boolean;
+  files: number;
+  chunks: number;
+  tags: number;
+}
+export function fetchRagStats(): Promise<RagStats> {
+  return apiFetch<RagStats>("/admin/rag/stats");
+}
+
+export interface RagHit {
+  chunk_id: number;
+  score: number;
+  content_preview: string;
+}
+export interface RagQueryResponse {
+  backend: string;
+  q: string;
+  k: number;
+  hits: RagHit[];
+}
+export function queryRag(q: string, k = 10): Promise<RagQueryResponse> {
+  const qs = new URLSearchParams({ q, k: String(k) }).toString();
+  return apiFetch<RagQueryResponse>(`/admin/rag/query?${qs}`);
+}
+export function rebuildRag(): Promise<{ status: string; target: string }> {
+  return apiFetch<{ status: string; target: string }>("/admin/rag/rebuild", {
+    method: "POST",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// S6 T2 — QQ channel admin surface
+// ---------------------------------------------------------------------------
+
+export interface QqStatus {
+  configured: boolean;
+  enabled: boolean;
+  ws_url: string | null;
+  self_ids: number[];
+  group_keywords: Record<string, string[]>;
+  runtime: "unknown" | "connected" | "disconnected";
+  recent_messages: unknown[];
+}
+export function fetchQqStatus(): Promise<QqStatus> {
+  return apiFetch<QqStatus>("/admin/channels/qq/status");
+}
+export function reconnectQq(): Promise<unknown> {
+  return apiFetch("/admin/channels/qq/reconnect", { method: "POST" });
+}
+export function updateQqKeywords(
+  groupKeywords: Record<string, string[]>,
+): Promise<{ status: string; group_keywords: Record<string, string[]> }> {
+  return apiFetch("/admin/channels/qq/keywords", {
+    method: "POST",
+    body: { group_keywords: groupKeywords },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// S6 T3 — Scheduler admin surface
+// ---------------------------------------------------------------------------
+
+export interface SchedulerJob {
+  name: string;
+  cron: string;
+  timezone: string | null;
+  action_kind: "run_agent" | "run_tool";
+  next_fire_at: string | null;
+  last_status: string | null;
+}
+export function fetchSchedulerJobs(): Promise<SchedulerJob[]> {
+  return apiFetch<SchedulerJob[]>("/admin/scheduler/jobs");
+}
+export interface SchedulerHistory {
+  job: string;
+  at: string;
+  source: string;
+  status: string;
+  message: string;
+}
+export function fetchSchedulerHistory(): Promise<SchedulerHistory[]> {
+  return apiFetch<SchedulerHistory[]>("/admin/scheduler/history");
+}
+export function triggerSchedulerJob(name: string): Promise<unknown> {
+  return apiFetch(`/admin/scheduler/jobs/${encodeURIComponent(name)}/trigger`, {
+    method: "POST",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// S6 T4 — Config admin surface
+// ---------------------------------------------------------------------------
+
+export interface ConfigGetResponse {
+  toml: string;
+  version: string;
+  meta: Record<string, unknown>;
+}
+export function fetchConfig(): Promise<ConfigGetResponse> {
+  return apiFetch<ConfigGetResponse>("/admin/config");
+}
+export interface ConfigIssue {
+  path: string;
+  code: string;
+  message: string;
+  level: "error" | "warn";
+}
+export interface ConfigPostResponse {
+  status: "ok" | "invalid";
+  issues: ConfigIssue[];
+  requires_restart: string[];
+  version?: string;
+}
+export function postConfig(
+  toml: string,
+  dryRun: boolean,
+): Promise<ConfigPostResponse> {
+  return apiFetch<ConfigPostResponse>("/admin/config", {
+    method: "POST",
+    body: { toml, dry_run: dryRun },
+  });
+}
+export function fetchConfigSchema(): Promise<unknown> {
+  return apiFetch("/admin/config/schema");
+}
+
+// ---------------------------------------------------------------------------
+// S6 T5 — Models admin surface
+// ---------------------------------------------------------------------------
+
+export interface ProviderRow {
+  name: string;
+  enabled: boolean;
+  has_api_key: boolean;
+  api_key_kind: "env" | "literal" | null;
+  base_url: string | null;
+}
+export interface ModelsResponse {
+  default: string;
+  aliases: Record<string, string>;
+  providers: ProviderRow[];
+}
+export function fetchModels(): Promise<ModelsResponse> {
+  return apiFetch<ModelsResponse>("/admin/models");
+}
+export function updateAliases(
+  aliases: Record<string, string>,
+  defaultModel?: string,
+): Promise<{ status: string; default: string; aliases: Record<string, string> }> {
+  return apiFetch("/admin/models/aliases", {
+    method: "POST",
+    body: { aliases, default: defaultModel },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// S6 T6 — Plugin invoke + Agent editor
+// ---------------------------------------------------------------------------
+
+export interface PluginInvokeResponse {
+  status: "success" | "error" | "accepted";
+  duration_ms: number;
+  result?: unknown;
+  result_raw?: string | null;
+  code?: number;
+  message?: string;
+  task_id?: string;
+}
+export function invokePlugin(
+  name: string,
+  tool: string,
+  args: unknown,
+): Promise<PluginInvokeResponse> {
+  return apiFetch<PluginInvokeResponse>(
+    `/admin/plugins/${encodeURIComponent(name)}/invoke`,
+    { method: "POST", body: { tool, arguments: args } },
+  );
+}
+
+export interface PluginDetail {
+  summary: PluginSummary;
+  manifest: Record<string, unknown>;
+  diagnostics: unknown[];
+}
+export function fetchPluginDetail(name: string): Promise<PluginDetail> {
+  return apiFetch<PluginDetail>(`/admin/plugins/${encodeURIComponent(name)}`);
+}
+
+export interface AgentContent {
+  name: string;
+  file_path: string;
+  bytes: number;
+  last_modified: string | null;
+  content: string;
+}
+export function fetchAgent(name: string): Promise<AgentContent> {
+  return apiFetch<AgentContent>(`/admin/agents/${encodeURIComponent(name)}`);
+}
+export function saveAgent(
+  name: string,
+  content: string,
+): Promise<{ status: string; name: string; file_path: string; bytes: number }> {
+  return apiFetch(`/admin/agents/${encodeURIComponent(name)}`, {
+    method: "POST",
+    body: { content },
+  });
+}

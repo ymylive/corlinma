@@ -7,13 +7,15 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use corlinman_plugins::manifest::PluginType;
 use corlinman_plugins::registry::{Diagnostic, PluginEntry};
-use serde::Serialize;
+use corlinman_plugins::runtime::jsonrpc_stdio::execute as jsonrpc_execute;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 use super::AdminState;
 
@@ -76,6 +78,7 @@ pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/admin/plugins", get(list_plugins))
         .route("/admin/plugins/:name", get(get_plugin))
+        .route("/admin/plugins/:name/invoke", post(invoke_plugin))
         .with_state(state)
 }
 
@@ -140,6 +143,168 @@ async fn get_plugin(
         diagnostics,
     })
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /admin/plugins/:name/invoke — Sprint 6 T6 test-invoke endpoint.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct InvokeBody {
+    /// Tool name as declared in `capabilities.tools[*].name`. Required.
+    pub tool: String,
+    /// Tool arguments as raw JSON. Defaults to `{}`.
+    #[serde(default = "default_args")]
+    pub arguments: serde_json::Value,
+    /// Optional session-key override for the call; defaults to
+    /// `"admin-invoke"` which is distinct from any channel-bound session.
+    #[serde(default)]
+    pub session_key: Option<String>,
+    /// Optional deadline override in milliseconds. Handler clamps to 60_000
+    /// so a hung plugin can't tie up the admin request indefinitely.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+fn default_args() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+async fn invoke_plugin(
+    State(state): State<AdminState>,
+    Path(name): Path<String>,
+    Json(body): Json<InvokeBody>,
+) -> axum::response::Response {
+    let Some(entry) = state.plugins.get(&name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "not_found", "resource": "plugin", "id": name})),
+        )
+            .into_response();
+    };
+
+    // Currently only stdio (Sync/Async) plugins go through this path — the
+    // service runtime needs a gRPC handle we don't wire up in admin.
+    if matches!(entry.manifest.plugin_type, PluginType::Service) {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "error": "invoke_unsupported",
+                "message": "test-invoke for service plugins is not supported; use the service's own gRPC surface",
+            })),
+        )
+            .into_response();
+    }
+
+    // Validate that the tool is actually declared by the manifest.
+    let tool_declared = entry
+        .manifest
+        .capabilities
+        .tools
+        .iter()
+        .any(|t| t.name == body.tool);
+    if !tool_declared {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "tool_not_declared",
+                "plugin": name,
+                "tool": body.tool,
+            })),
+        )
+            .into_response();
+    }
+
+    let cwd = entry
+        .manifest_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let args_bytes = match serde_json::to_vec(&body.arguments) {
+        Ok(v) => v,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid_arguments", "message": err.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    let timeout_ms = body.timeout_ms.map(|ms| ms.min(60_000));
+    let session_key = body.session_key.unwrap_or_else(|| "admin-invoke".into());
+    let request_id = format!("admin-invoke-{}", uuid::Uuid::new_v4());
+    let trace_id = request_id.clone();
+
+    let result = jsonrpc_execute(
+        &name,
+        &body.tool,
+        &cwd,
+        Some(&entry.manifest),
+        timeout_ms,
+        &args_bytes,
+        &session_key,
+        &request_id,
+        &trace_id,
+        None,
+        &[],
+        CancellationToken::new(),
+    )
+    .await;
+
+    match result {
+        Ok(out) => Json(plugin_output_to_json(out)).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": "invoke_failed",
+                "message": err.to_string(),
+            })),
+        )
+            .into_response(),
+    }
+}
+
+fn plugin_output_to_json(out: corlinman_plugins::runtime::PluginOutput) -> serde_json::Value {
+    use corlinman_plugins::runtime::PluginOutput;
+    match out {
+        PluginOutput::Success {
+            content,
+            duration_ms,
+        } => {
+            // Try to surface the payload as JSON for readability; fall back
+            // to a string preview if it isn't UTF-8/JSON.
+            let body = String::from_utf8(content.to_vec()).ok();
+            let parsed = body
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+            json!({
+                "status": "success",
+                "duration_ms": duration_ms,
+                "result": parsed,
+                "result_raw": body,
+            })
+        }
+        PluginOutput::Error {
+            code,
+            message,
+            duration_ms,
+        } => json!({
+            "status": "error",
+            "duration_ms": duration_ms,
+            "code": code,
+            "message": message,
+        }),
+        PluginOutput::AcceptedForLater {
+            task_id,
+            duration_ms,
+        } => json!({
+            "status": "accepted",
+            "duration_ms": duration_ms,
+            "task_id": task_id,
+        }),
+    }
 }
 
 fn diagnostic_for(plugin: &str, d: &Diagnostic) -> Option<Value> {
@@ -296,6 +461,42 @@ mod tests {
         let v = body_json(resp).await;
         assert_eq!(v["error"], "not_found");
         assert_eq!(v["id"], "nope");
+    }
+
+    #[tokio::test]
+    async fn invoke_rejects_unknown_plugin() {
+        let (_dir, reg) = scratch_registry();
+        let resp = app(reg)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/nope/invoke")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"tool":"echo"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn invoke_rejects_undeclared_tool() {
+        let (_dir, reg) = scratch_registry();
+        let resp = app(reg)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/plugins/alpha/invoke")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"tool":"no-such-tool","arguments":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"], "tool_not_declared");
     }
 
     #[test]

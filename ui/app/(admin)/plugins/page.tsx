@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -99,7 +100,16 @@ export default function PluginsPage() {
               query.data.map((p) => (
                 <TableRow key={p.name}>
                   <TableCell className="font-medium">
-                    {p.name}
+                    <Link
+                      href={{
+                        pathname: "/plugins/detail",
+                        query: { name: p.name },
+                      }}
+                      className="hover:underline"
+                      data-testid={`plugin-link-${p.name}`}
+                    >
+                      {p.name}
+                    </Link>
                     {p.error ? (
                       <span
                         className="ml-2 text-xs text-destructive"

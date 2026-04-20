@@ -1,16 +1,8 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -46,7 +38,6 @@ function formatTime(iso: string): string {
 
 export default function AgentsPage() {
   const { t } = useI18n();
-  const [selected, setSelected] = React.useState<AgentSummary | null>(null);
 
   const query = useQuery<AgentSummary[]>({
     queryKey: ["admin", "agents"],
@@ -60,8 +51,7 @@ export default function AgentsPage() {
           {t("nav.agents")}
         </h1>
         <p className="text-sm text-muted-foreground">
-          编辑 `Agent/*.txt`，点击行打开编辑器占位（M6 接 Monaco）。文件名遵循
-          Markdown frontmatter 约定（plan §17）。
+          编辑 `Agent/*.md`，点击行进入 Monaco 编辑器（frontmatter + 正文）。
         </p>
       </header>
 
@@ -108,17 +98,19 @@ export default function AgentsPage() {
               </TableRow>
             ) : (
               query.data.map((a) => (
-                <TableRow
-                  key={a.name}
-                  onClick={() => setSelected(a)}
-                  className="cursor-pointer"
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") setSelected(a);
-                  }}
-                >
-                  <TableCell className="font-medium">{a.name}</TableCell>
+                <TableRow key={a.name}>
+                  <TableCell className="font-medium">
+                    <Link
+                      href={{
+                        pathname: "/agents/detail",
+                        query: { name: a.name },
+                      }}
+                      className="hover:underline"
+                      data-testid={`agent-link-${a.name}`}
+                    >
+                      {a.name}
+                    </Link>
+                  </TableCell>
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {a.file_path}
                   </TableCell>
@@ -135,32 +127,6 @@ export default function AgentsPage() {
         </Table>
       </section>
 
-      <Dialog open={selected !== null} onOpenChange={(o) => !o && setSelected(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {selected?.name ?? ""}{" "}
-              <span className="font-mono text-xs text-muted-foreground">
-                {selected?.file_path}
-              </span>
-            </DialogTitle>
-            <DialogDescription>{t("agent.editor.placeholder")}</DialogDescription>
-          </DialogHeader>
-          <pre className="max-h-80 overflow-auto rounded-md bg-muted p-3 text-xs text-muted-foreground">
-            {`// ${t("agent.editor.monaco_todo")}
-// bytes:        ${selected ? formatBytes(selected.bytes) : ""}
-// last modified ${selected ? formatTime(selected.last_modified) : ""}
-//
-// M6: wire up @monaco-editor/react + GET /admin/agents/:name`}
-          </pre>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setSelected(null)}>
-              {t("action.cancel")}
-            </Button>
-            <Button disabled>{t("action.save")}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </>
   );
 }

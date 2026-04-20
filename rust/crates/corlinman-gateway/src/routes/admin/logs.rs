@@ -181,6 +181,8 @@ mod tests {
             session_store: None,
             config_path: None,
             log_broadcast: tx,
+            rag_store: None,
+            scheduler_history: None,
         };
         router(state)
     }

@@ -21,6 +21,7 @@ use arc_swap::ArcSwap;
 use axum::{routing::any, Router};
 use corlinman_core::config::Config;
 use corlinman_plugins::registry::PluginRegistry;
+use corlinman_vector::SqliteStore;
 use tokio::sync::broadcast;
 
 use crate::log_broadcast::LogRecord;
@@ -33,9 +34,13 @@ use super::not_implemented;
 pub mod agents;
 pub mod approvals;
 pub mod auth;
+pub mod channels;
 pub mod config;
 pub mod logs;
+pub mod models;
 pub mod plugins;
+pub mod rag;
+pub mod scheduler;
 
 /// Shared read-only state passed to every admin handler.
 ///
@@ -66,6 +71,14 @@ pub struct AdminState {
     /// harnesses that don't install the tracing layer; the endpoint
     /// then returns 503 `logs_disabled`.
     pub log_broadcast: Option<broadcast::Sender<LogRecord>>,
+    /// Sprint 6 T1: SQLite handle for the RAG corpus. `None` on boots
+    /// without the vector store (stripped-down test harness); the
+    /// `/admin/rag/*` routes then return 503 `rag_disabled`.
+    pub rag_store: Option<Arc<SqliteStore>>,
+    /// Sprint 6 T3: in-memory scheduler run history. `None` until the
+    /// cron runtime lands in M7 (see `corlinman-scheduler`); the
+    /// admin routes degrade gracefully to empty-list.
+    pub scheduler_history: Option<Arc<scheduler::SchedulerHistory>>,
 }
 
 impl AdminState {
@@ -77,6 +90,8 @@ impl AdminState {
             session_store: None,
             config_path: None,
             log_broadcast: None,
+            rag_store: None,
+            scheduler_history: None,
         }
     }
 
@@ -108,6 +123,20 @@ impl AdminState {
         self.log_broadcast = Some(tx);
         self
     }
+
+    /// Fluent: attach the RAG SQLite store so `/admin/rag/*` routes can
+    /// read stats, run BM25 debug queries, and rebuild the FTS index.
+    pub fn with_rag_store(mut self, store: Arc<SqliteStore>) -> Self {
+        self.rag_store = Some(store);
+        self
+    }
+
+    /// Fluent: attach the scheduler history buffer so
+    /// `/admin/scheduler/history` has a non-empty source of truth.
+    pub fn with_scheduler_history(mut self, history: Arc<scheduler::SchedulerHistory>) -> Self {
+        self.scheduler_history = Some(history);
+        self
+    }
 }
 
 /// Legacy stub — kept so `routes::router()` compiles before a state-bearing
@@ -131,6 +160,10 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(approvals::router(state.clone()))
         .merge(config::router(state.clone()))
         .merge(logs::router(state.clone()))
+        .merge(models::router(state.clone()))
+        .merge(rag::router(state.clone()))
+        .merge(channels::router(state.clone()))
+        .merge(scheduler::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             require_admin,

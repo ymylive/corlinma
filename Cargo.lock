@@ -706,6 +706,7 @@ dependencies = [
  "once_cell",
  "prometheus",
  "reqwest",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "tempfile",
