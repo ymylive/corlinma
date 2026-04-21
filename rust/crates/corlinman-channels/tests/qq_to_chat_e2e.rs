@@ -119,6 +119,8 @@ async fn qq_message_triggers_chat_and_replies_via_send_group_msg() {
         self_ids: vec![100],
         group_keywords,
         rate_limit: Default::default(),
+        napcat_url: None,
+        napcat_access_token: None,
     };
 
     let chat_service: Arc<dyn ChatService> = Arc::new(FakeChatService);

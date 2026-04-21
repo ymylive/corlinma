@@ -480,6 +480,8 @@ default = "{default_model}"
             self_ids: vec![1],
             group_keywords: HashMap::new(),
             rate_limit: Default::default(),
+            napcat_url: None,
+            napcat_access_token: None,
         });
         // old has no qq; new has enabled qq — toggle.
         let fields = detect_restart_fields(&old, &new);

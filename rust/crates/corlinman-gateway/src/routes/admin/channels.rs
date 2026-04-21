@@ -44,6 +44,19 @@ pub fn router(state: AdminState) -> Router {
         .route("/admin/channels/qq/status", get(status))
         .route("/admin/channels/qq/reconnect", post(reconnect))
         .route("/admin/channels/qq/keywords", post(update_keywords))
+        // v0.3 — QQ scan-login proxy against NapCat's webui. See
+        // `super::napcat` for the API-version assumption + account
+        // history file format.
+        .route("/admin/channels/qq/qrcode", post(super::napcat::qrcode))
+        .route(
+            "/admin/channels/qq/qrcode/status",
+            get(super::napcat::qrcode_status),
+        )
+        .route("/admin/channels/qq/accounts", get(super::napcat::accounts))
+        .route(
+            "/admin/channels/qq/quick-login",
+            post(super::napcat::quick_login),
+        )
         .with_state(state)
 }
 
@@ -256,6 +269,8 @@ mod tests {
             self_ids: vec![42],
             group_keywords: HashMap::new(),
             rate_limit: QqRateLimit::default(),
+            napcat_url: None,
+            napcat_access_token: None,
         });
         cfg
     }

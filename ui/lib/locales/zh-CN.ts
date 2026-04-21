@@ -223,6 +223,22 @@ export const zhCN = {
     reconnecting: "连接中...",
     reconnectRequested: "已请求重新连接",
     remove: "移除",
+    qq: {
+      scanLogin: {
+        openButton: "扫码登录",
+        title: "QQ 扫码登录",
+        subtitle: "请使用手机 QQ 扫描下方二维码。",
+        statusWaiting: "等待扫码",
+        statusScanned: "已扫码，请在手机上确认",
+        statusConfirmed: "登录成功",
+        statusExpired: "二维码已过期",
+        statusError: "发生错误",
+        secondsLeft: "剩余 {{s}} 秒",
+        confirmed: "QQ 登录成功",
+        quickLogin: "历史登录账号",
+        quickLoginFailed: "快速登录失败",
+      },
+    },
   },
 
   scheduler: {
