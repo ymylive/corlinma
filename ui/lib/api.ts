@@ -480,3 +480,182 @@ export async function fetchHealth(): Promise<HealthStatus> {
   return apiFetch<HealthStatus>("/health");
 }
 
+// ---------------------------------------------------------------------------
+// Feature C (v0.2) — custom providers + per-alias params + embedding
+//
+// Contract: docs/feature-c contract (see Python/Rust counterparts). All
+// requests go through admin auth middleware. 503 from any of these
+// endpoints means the gateway is v0.1.x and has not been upgraded yet — the
+// UI renders a "backend feature pending" empty state (do not toast).
+// ---------------------------------------------------------------------------
+
+export type ProviderKind =
+  | "anthropic"
+  | "openai"
+  | "google"
+  | "deepseek"
+  | "qwen"
+  | "glm"
+  | "openai_compatible";
+
+/** Loose JSON Schema (draft 2020-12) — enough for the subset we render. */
+export type JSONSchema = {
+  type?: "string" | "number" | "integer" | "boolean" | "object" | "array";
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: unknown[];
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  format?: string;
+  properties?: Record<string, JSONSchema>;
+  required?: string[];
+  additionalProperties?: boolean | JSONSchema;
+  items?: JSONSchema;
+  // Tolerate other fields without breaking.
+  [key: string]: unknown;
+};
+
+export type ProviderCapabilities = {
+  embedding?: boolean;
+  chat?: boolean;
+};
+
+export interface ProviderView {
+  name: string;
+  kind: ProviderKind;
+  enabled: boolean;
+  base_url: string | null;
+  api_key_source: "env" | "value" | "unset";
+  api_key_env_name: string | null;
+  params: Record<string, unknown>;
+  params_schema: JSONSchema;
+  capabilities?: ProviderCapabilities;
+}
+
+export interface ProviderUpsert {
+  name: string;
+  kind: ProviderKind;
+  enabled?: boolean;
+  base_url?: string;
+  api_key?: { env: string } | { value: string } | null;
+  params?: Record<string, unknown>;
+}
+
+export interface ProvidersResponse {
+  providers: ProviderView[];
+}
+
+export async function fetchProviders(): Promise<ProviderView[]> {
+  const res = await apiFetch<ProvidersResponse>("/admin/providers");
+  return res.providers ?? [];
+}
+
+export async function upsertProvider(
+  body: ProviderUpsert,
+): Promise<ProviderView> {
+  return apiFetch<ProviderView>("/admin/providers", {
+    method: "POST",
+    body,
+  });
+}
+
+export async function deleteProvider(name: string): Promise<void> {
+  await apiFetch<void>(`/admin/providers/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
+/** Server returns 409 with `{ error, references: string[] }` when a
+ * provider is still referenced by an alias or by embedding. Surface the list
+ * so the UI can explain why the delete was refused. */
+export interface ProviderConflict {
+  error: string;
+  references: string[];
+}
+
+export interface AliasView {
+  name: string;
+  provider: string;
+  model: string;
+  params: Record<string, unknown>;
+  effective_params_schema: JSONSchema;
+}
+
+export interface AliasUpsert {
+  name: string;
+  provider: string;
+  model: string;
+  params?: Record<string, unknown>;
+}
+
+/** Extended /admin/models response — aliases now carry params + the
+ * merged schema the UI should render. The legacy (string-map) shape is
+ * still served by v0.1 gateways and handled in ModelsPage. */
+export interface ModelsResponseV2 {
+  default: string;
+  providers: ProviderView[];
+  aliases: AliasView[];
+}
+
+export async function fetchModelsV2(): Promise<ModelsResponseV2> {
+  return apiFetch<ModelsResponseV2>("/admin/models");
+}
+
+export async function upsertAlias(body: AliasUpsert): Promise<AliasView> {
+  return apiFetch<AliasView>("/admin/models/aliases", {
+    method: "POST",
+    body,
+  });
+}
+
+export async function deleteAlias(name: string): Promise<void> {
+  await apiFetch<void>(
+    `/admin/models/aliases/${encodeURIComponent(name)}`,
+    { method: "DELETE" },
+  );
+}
+
+export interface EmbeddingView {
+  provider: string;
+  model: string;
+  dimension: number;
+  enabled: boolean;
+  params: Record<string, unknown>;
+  params_schema: JSONSchema;
+}
+
+export type EmbeddingUpsert = EmbeddingView;
+
+export async function fetchEmbedding(): Promise<EmbeddingView> {
+  return apiFetch<EmbeddingView>("/admin/embedding");
+}
+
+export async function upsertEmbedding(
+  body: EmbeddingUpsert,
+): Promise<EmbeddingView> {
+  return apiFetch<EmbeddingView>("/admin/embedding", {
+    method: "POST",
+    body,
+  });
+}
+
+export interface BenchmarkView {
+  dimension: number;
+  latency_ms_p50: number;
+  latency_ms_p99: number;
+  similarity_matrix: number[][];
+  warnings: string[];
+}
+
+export async function benchmarkEmbedding(
+  samples: string[],
+): Promise<BenchmarkView> {
+  return apiFetch<BenchmarkView>("/admin/embedding/benchmark", {
+    method: "POST",
+    body: { samples },
+  });
+}
+

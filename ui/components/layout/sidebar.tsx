@@ -16,8 +16,10 @@ import {
   FileTerminal,
   LogOut,
   MessageCircle,
+  Plug,
   Route,
   Settings,
+  Sparkles,
   Timer,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -41,6 +43,8 @@ const ITEMS: NavItem[] = [
   { href: "/scheduler", labelKey: "nav.scheduler", icon: Timer },
   { href: "/approvals", labelKey: "nav.approvals", icon: ClipboardCheck },
   { href: "/models", labelKey: "nav.models", icon: Route },
+  { href: "/providers", labelKey: "nav.providers", icon: Plug },
+  { href: "/embedding", labelKey: "nav.embedding", icon: Sparkles },
   { href: "/config", labelKey: "nav.config", icon: Settings },
   { href: "/logs", labelKey: "nav.logs", icon: FileTerminal },
 ];

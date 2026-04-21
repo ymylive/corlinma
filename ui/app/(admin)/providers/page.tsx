@@ -1,0 +1,657 @@
+"use client";
+
+/**
+ * Providers admin page (Feature C).
+ *
+ * Table of every entry in `[providers.*]` plus an Add/Edit/Delete modal.
+ * - Add / Edit: POST /admin/providers (upsert) with a dynamic params form
+ *   driven by the provider's `params_schema`.
+ * - Delete: DELETE /admin/providers/:name; a 409 surfaces the list of
+ *   referencing aliases/embedding so the user can unbind them first.
+ *
+ * When the gateway returns 503 we render a dedicated empty state rather
+ * than toasting — the v0.1.x gateway simply does not ship this surface yet.
+ */
+
+import * as React from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
+import { motion } from "framer-motion";
+import { Pencil, Plug, Plus, Trash2 } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  CorlinmanApiError,
+  deleteProvider,
+  fetchProviders,
+  upsertProvider,
+  type ProviderKind,
+  type ProviderUpsert,
+  type ProviderView,
+} from "@/lib/api";
+import { DynamicParamsForm } from "@/components/dynamic-params-form";
+import { cn } from "@/lib/utils";
+
+const KINDS: ProviderKind[] = [
+  "anthropic",
+  "openai",
+  "google",
+  "deepseek",
+  "qwen",
+  "glm",
+  "openai_compatible",
+];
+
+type KeySource = "env" | "value" | "unset";
+
+type DraftProvider = {
+  name: string;
+  kind: ProviderKind;
+  enabled: boolean;
+  base_url: string;
+  api_key_source: KeySource;
+  api_key_env_name: string;
+  api_key_value: string;
+  params: Record<string, unknown>;
+};
+
+const BLANK_DRAFT: DraftProvider = {
+  name: "",
+  kind: "openai_compatible",
+  enabled: true,
+  base_url: "",
+  api_key_source: "env",
+  api_key_env_name: "",
+  api_key_value: "",
+  params: {},
+};
+
+function toDraft(p: ProviderView): DraftProvider {
+  return {
+    name: p.name,
+    kind: p.kind,
+    enabled: p.enabled,
+    base_url: p.base_url ?? "",
+    api_key_source: p.api_key_source,
+    api_key_env_name: p.api_key_env_name ?? "",
+    api_key_value: "",
+    params: p.params ?? {},
+  };
+}
+
+function toUpsert(d: DraftProvider): ProviderUpsert {
+  let api_key: ProviderUpsert["api_key"] = null;
+  if (d.api_key_source === "env" && d.api_key_env_name.trim()) {
+    api_key = { env: d.api_key_env_name.trim() };
+  } else if (d.api_key_source === "value" && d.api_key_value.trim()) {
+    api_key = { value: d.api_key_value.trim() };
+  }
+  return {
+    name: d.name.trim(),
+    kind: d.kind,
+    enabled: d.enabled,
+    base_url: d.base_url.trim() || undefined,
+    api_key,
+    params: d.params,
+  };
+}
+
+export default function ProvidersPage() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const providers = useQuery<ProviderView[]>({
+    queryKey: ["admin", "providers"],
+    queryFn: fetchProviders,
+    retry: false,
+  });
+
+  const [editorOpen, setEditorOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState<ProviderView | null>(null);
+  const [deleting, setDeleting] = React.useState<ProviderView | null>(null);
+  const [deleteBlock, setDeleteBlock] = React.useState<string[] | null>(null);
+
+  const backendPending =
+    providers.isError &&
+    providers.error instanceof CorlinmanApiError &&
+    providers.error.status === 503;
+
+  const deleteMutation = useMutation({
+    mutationFn: (name: string) => deleteProvider(name),
+    onSuccess: () => {
+      toast.success(t("providers.deleteSuccess"));
+      setDeleting(null);
+      setDeleteBlock(null);
+      qc.invalidateQueries({ queryKey: ["admin", "providers"] });
+    },
+    onError: (err) => {
+      if (err instanceof CorlinmanApiError && err.status === 409) {
+        // The server wraps references in the body; extract + surface.
+        const parsed = parseReferences(err.message);
+        setDeleteBlock(parsed);
+        return;
+      }
+      toast.error(
+        t("providers.deleteFailed", {
+          msg: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    },
+  });
+
+  return (
+    <>
+      <header className="flex items-end justify-between gap-3">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {t("providers.title")}
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            {t("providers.subtitle")}
+          </p>
+        </div>
+        <Button
+          size="sm"
+          onClick={() => {
+            setEditing(null);
+            setEditorOpen(true);
+          }}
+          data-testid="providers-add-btn"
+        >
+          <Plus className="h-3 w-3" />
+          {t("providers.add")}
+        </Button>
+      </header>
+
+      <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
+        {providers.isPending ? (
+          <Skeleton className="h-24 w-full" />
+        ) : backendPending ? (
+          <BackendPendingBanner label={t("providers.backendPending")} />
+        ) : providers.isError ? (
+          <p className="text-xs text-destructive">
+            {t("providers.loadFailed")}:{" "}
+            {(providers.error as Error).message}
+          </p>
+        ) : (providers.data ?? []).length === 0 ? (
+          <EmptyProviders
+            title={t("providers.noneTitle")}
+            hint={t("providers.noneHint")}
+          />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow className="border-b border-border hover:bg-transparent">
+                <TableHead className="w-44 pl-3">
+                  {t("providers.colName")}
+                </TableHead>
+                <TableHead className="w-40">
+                  {t("providers.colKind")}
+                </TableHead>
+                <TableHead>{t("providers.colBaseUrl")}</TableHead>
+                <TableHead className="w-44">
+                  {t("providers.colKey")}
+                </TableHead>
+                <TableHead className="w-24">
+                  {t("providers.colEnabled")}
+                </TableHead>
+                <TableHead className="w-24"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {providers.data!.map((p) => (
+                <TableRow
+                  key={p.name}
+                  className="border-b border-border"
+                  data-testid={`provider-row-${p.name}`}
+                >
+                  <TableCell className="pl-3 font-mono text-xs">
+                    {p.name}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary" className="font-mono">
+                      {p.kind}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-[11px] text-muted-foreground">
+                    {p.base_url ?? t("providers.baseUrlDefault")}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {p.api_key_source === "env" ? (
+                      <span className="font-mono text-muted-foreground">
+                        {t("providers.keyFromEnv", {
+                          name: p.api_key_env_name ?? "?",
+                        })}
+                      </span>
+                    ) : p.api_key_source === "value" ? (
+                      <span className="text-muted-foreground">
+                        {t("providers.keyLiteral")}
+                      </span>
+                    ) : (
+                      <span className="text-destructive">
+                        {t("providers.keyUnset")}
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {p.enabled ? (
+                      <Badge className="border-transparent bg-ok/15 text-ok">
+                        {t("common.enabled")}
+                      </Badge>
+                    ) : (
+                      <Badge variant="secondary">
+                        {t("common.disabled")}
+                      </Badge>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={t("providers.edit")}
+                        onClick={() => {
+                          setEditing(p);
+                          setEditorOpen(true);
+                        }}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={t("providers.remove")}
+                        onClick={() => setDeleting(p)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </section>
+
+      <ProviderEditorDialog
+        open={editorOpen}
+        onOpenChange={(o) => {
+          setEditorOpen(o);
+          if (!o) setEditing(null);
+        }}
+        editing={editing}
+      />
+
+      <Dialog
+        open={!!deleting}
+        onOpenChange={(o) => {
+          if (!o) {
+            setDeleting(null);
+            setDeleteBlock(null);
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {deleteBlock
+                ? t("providers.deleteBlockedTitle", {
+                    name: deleting?.name ?? "",
+                  })
+                : t("providers.deleteConfirmTitle", {
+                    name: deleting?.name ?? "",
+                  })}
+            </DialogTitle>
+            <DialogDescription>
+              {deleteBlock
+                ? t("providers.deleteBlockedBody")
+                : t("providers.deleteConfirmBody")}
+            </DialogDescription>
+          </DialogHeader>
+          {deleteBlock ? (
+            <ul className="space-y-1 text-xs font-mono">
+              {deleteBlock.map((ref) => (
+                <li key={ref} className="text-destructive">
+                  • {ref}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDeleting(null);
+                setDeleteBlock(null);
+              }}
+            >
+              {t("providers.deleteCancel")}
+            </Button>
+            {!deleteBlock ? (
+              <Button
+                variant="destructive"
+                disabled={deleteMutation.isPending}
+                onClick={() =>
+                  deleting && deleteMutation.mutate(deleting.name)
+                }
+                data-testid="providers-confirm-delete-btn"
+              >
+                {t("providers.deleteConfirm")}
+              </Button>
+            ) : null}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+// ----------------------------- dialog -------------------------------------
+
+interface EditorProps {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  editing: ProviderView | null;
+}
+
+function ProviderEditorDialog({ open, onOpenChange, editing }: EditorProps) {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const [draft, setDraft] = React.useState<DraftProvider>(BLANK_DRAFT);
+  const [paramErrors, setParamErrors] = React.useState<
+    Record<string, string>
+  >({});
+
+  React.useEffect(() => {
+    if (open) {
+      setDraft(editing ? toDraft(editing) : { ...BLANK_DRAFT });
+      setParamErrors({});
+    }
+  }, [open, editing]);
+
+  const schema = editing?.params_schema ?? { type: "object", properties: {} };
+  const hasErrors = Object.keys(paramErrors).length > 0;
+  const nameOk = draft.name.trim().length > 0;
+  const baseUrlOk =
+    draft.kind !== "openai_compatible" || draft.base_url.trim().length > 0;
+
+  const saveMutation = useMutation({
+    mutationFn: () => upsertProvider(toUpsert(draft)),
+    onSuccess: () => {
+      toast.success(t("providers.saveSuccess"));
+      qc.invalidateQueries({ queryKey: ["admin", "providers"] });
+      onOpenChange(false);
+    },
+    onError: (err) =>
+      toast.error(
+        t("providers.saveFailed", {
+          msg: err instanceof Error ? err.message : String(err),
+        }),
+      ),
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl">
+        <motion.div
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.18, ease: "easeOut" }}
+        >
+          <DialogHeader>
+            <DialogTitle>
+              {editing
+                ? t("providers.modalEditTitle", { name: editing.name })
+                : t("providers.modalAddTitle")}
+            </DialogTitle>
+            <DialogDescription>
+              {t("providers.modalDesc")}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="provider-name" className="text-xs">
+                  {t("providers.fieldName")}
+                </Label>
+                <Input
+                  id="provider-name"
+                  value={draft.name}
+                  disabled={!!editing}
+                  onChange={(e) =>
+                    setDraft({ ...draft, name: e.target.value })
+                  }
+                  className="font-mono text-xs"
+                  placeholder="my-local-llm"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  {t("providers.fieldNameHint")}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="provider-kind" className="text-xs">
+                  {t("providers.fieldKind")}
+                </Label>
+                <select
+                  id="provider-kind"
+                  value={draft.kind}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      kind: e.target.value as ProviderKind,
+                    })
+                  }
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+                >
+                  {KINDS.map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="provider-base-url" className="text-xs">
+                {t("providers.fieldBaseUrl")}
+              </Label>
+              <Input
+                id="provider-base-url"
+                value={draft.base_url}
+                onChange={(e) =>
+                  setDraft({ ...draft, base_url: e.target.value })
+                }
+                className="font-mono text-xs"
+                placeholder="https://api.openai.com/v1"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {t("providers.fieldBaseUrlHint")}
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label className="text-xs">
+                {t("providers.fieldApiKeySource")}
+              </Label>
+              <div className="flex gap-2">
+                {(["env", "value", "unset"] as KeySource[]).map((src) => (
+                  <button
+                    key={src}
+                    type="button"
+                    onClick={() =>
+                      setDraft({ ...draft, api_key_source: src })
+                    }
+                    className={cn(
+                      "flex-1 rounded-md border px-3 py-1.5 text-xs transition-colors",
+                      draft.api_key_source === src
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border bg-transparent text-muted-foreground hover:bg-accent/40",
+                    )}
+                  >
+                    {src === "env"
+                      ? t("providers.fieldApiKeyEnv")
+                      : src === "value"
+                        ? t("providers.fieldApiKeyValue")
+                        : t("providers.fieldApiKeyNone")}
+                  </button>
+                ))}
+              </div>
+              {draft.api_key_source === "env" ? (
+                <Input
+                  value={draft.api_key_env_name}
+                  onChange={(e) =>
+                    setDraft({ ...draft, api_key_env_name: e.target.value })
+                  }
+                  placeholder={t("providers.fieldApiKeyEnvPlaceholder")}
+                  className="font-mono text-xs"
+                />
+              ) : null}
+              {draft.api_key_source === "value" ? (
+                <Input
+                  type="password"
+                  value={draft.api_key_value}
+                  onChange={(e) =>
+                    setDraft({ ...draft, api_key_value: e.target.value })
+                  }
+                  placeholder={t("providers.fieldApiKeyValuePlaceholder")}
+                  className="font-mono text-xs"
+                />
+              ) : null}
+            </div>
+
+            <div className="flex items-center gap-3">
+              <Label htmlFor="provider-enabled" className="text-xs">
+                {t("providers.fieldEnabled")}
+              </Label>
+              <button
+                id="provider-enabled"
+                type="button"
+                role="switch"
+                aria-checked={draft.enabled}
+                onClick={() =>
+                  setDraft({ ...draft, enabled: !draft.enabled })
+                }
+                className={cn(
+                  "inline-flex h-6 w-11 items-center rounded-full border border-input transition-colors",
+                  draft.enabled ? "bg-primary" : "bg-muted",
+                )}
+              >
+                <span
+                  className={cn(
+                    "inline-block h-4 w-4 transform rounded-full bg-background shadow transition-transform",
+                    draft.enabled
+                      ? "translate-x-[22px]"
+                      : "translate-x-[3px]",
+                  )}
+                />
+              </button>
+            </div>
+
+            <div className="space-y-2 rounded-md border border-border p-3">
+              <div>
+                <h3 className="text-sm font-semibold">
+                  {t("providers.fieldParams")}
+                </h3>
+                <p className="text-[11px] text-muted-foreground">
+                  {t("providers.fieldParamsHint")}
+                </p>
+              </div>
+              <DynamicParamsForm
+                schema={schema}
+                value={draft.params}
+                onChange={(next) => setDraft({ ...draft, params: next })}
+                onErrorsChange={setParamErrors}
+                testIdPrefix="provider-params"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              disabled={saveMutation.isPending}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              onClick={() => saveMutation.mutate()}
+              disabled={
+                !nameOk ||
+                !baseUrlOk ||
+                hasErrors ||
+                saveMutation.isPending
+              }
+              data-testid="providers-save-btn"
+            >
+              {saveMutation.isPending
+                ? t("providers.savingLabel")
+                : t("providers.saveLabel")}
+            </Button>
+          </DialogFooter>
+        </motion.div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ----------------------------- helpers ------------------------------------
+
+function EmptyProviders({ title, hint }: { title: string; hint: string }) {
+  return (
+    <div className="flex flex-col items-center gap-2 rounded-md border border-dashed border-border py-10 text-center">
+      <Plug className="h-6 w-6 text-muted-foreground/60" />
+      <p className="text-sm font-medium">{title}</p>
+      <p className="max-w-sm text-xs text-muted-foreground">{hint}</p>
+    </div>
+  );
+}
+
+function BackendPendingBanner({ label }: { label: string }) {
+  return (
+    <div
+      className="rounded-md border border-dashed border-border bg-surface/40 px-4 py-6 text-center text-xs text-muted-foreground"
+      data-testid="backend-pending"
+    >
+      {label}
+    </div>
+  );
+}
+
+/** The server conflict body may be JSON-ish (`{"error": "...", "references":
+ *  ["alias.smart", "embedding"]}`) or a plain string. Be liberal in what we
+ *  accept so a mis-shaped 409 doesn't crash the page. */
+function parseReferences(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as { references?: unknown };
+    if (Array.isArray(parsed.references)) {
+      return parsed.references.map((r) => String(r));
+    }
+  } catch {
+    /* not JSON */
+  }
+  return [raw];
+}
