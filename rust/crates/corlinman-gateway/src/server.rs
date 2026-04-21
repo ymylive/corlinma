@@ -23,6 +23,7 @@ use crate::metrics;
 use crate::middleware::admin_session::AdminSessionStore;
 use crate::middleware::trace;
 use crate::routes;
+use crate::middleware::approval::ApprovalGate;
 use crate::routes::admin::scheduler::SchedulerHistory;
 use crate::routes::admin::{self as admin_routes, AdminState};
 use crate::routes::chat::{grpc::GrpcBackend, ChatBackend, ChatState};
@@ -121,6 +122,11 @@ pub fn build_router_with_backend_registry_and_health(
 /// Default idle TTL for admin web sessions — 24h. Mirrors
 /// `routes::admin::auth::DEFAULT_SESSION_TTL_SECS`.
 const DEFAULT_ADMIN_SESSION_TTL_SECS: u64 = 86_400;
+
+/// How long a `mode = "prompt"` tool call parks waiting for a human
+/// decision before `ApprovalGate` auto-denies. 5 minutes matches the
+/// gate's test-path default and is surfaced via the admin UI timer.
+const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
 
 /// Build the `AdminState` for the admin REST routes. Loads config from
 /// `$CORLINMAN_CONFIG` (same logic as `main.rs`), attaches a brand-new
@@ -262,13 +268,26 @@ pub async fn build_runtime_with_logs(
     // `/admin/rag/*` has real data to read, and construct a fresh
     // in-memory `SchedulerHistory` so `/admin/scheduler/history` has a
     // sink for records when the cron runtime lands in M7.
+    //
+    // 0.1.4 wire-up: when the SQLite store opened (it carries the
+    // `pending_approvals` table since vector migration v3), also
+    // construct an `ApprovalGate` sourced from the current config so
+    // `/admin/approvals*` stop returning 503 `approvals_disabled`.
     let rag_store = open_rag_store().await;
     let scheduler_history = Some(SchedulerHistory::new());
+    let approval_gate = rag_store.as_ref().map(|store| {
+        Arc::new(ApprovalGate::new(
+            config_handle.load().approvals.rules.clone(),
+            store.clone(),
+            StdDuration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
+        ))
+    });
     let admin_state = build_admin_state_with_config(
         registry.clone(),
         log_tx,
         rag_store,
         scheduler_history,
+        approval_gate,
         config_handle,
         cfg_path,
     );
@@ -284,6 +303,7 @@ fn build_admin_state_with_config(
     log_tx: Option<broadcast::Sender<LogRecord>>,
     rag_store: Option<Arc<SqliteStore>>,
     scheduler_history: Option<Arc<SchedulerHistory>>,
+    approval_gate: Option<Arc<ApprovalGate>>,
     config_handle: Arc<ArcSwap<Config>>,
     cfg_path: Option<PathBuf>,
 ) -> AdminState {
@@ -305,6 +325,9 @@ fn build_admin_state_with_config(
     }
     if let Some(history) = scheduler_history {
         admin = admin.with_scheduler_history(history);
+    }
+    if let Some(gate) = approval_gate {
+        admin = admin.with_approval_gate(gate);
     }
     admin
 }
