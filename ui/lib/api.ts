@@ -304,6 +304,57 @@ export function updateQqKeywords(
   });
 }
 
+// v0.3 — QQ scan-login (NapCat proxy). Four endpoints:
+//   POST /admin/channels/qq/qrcode         → { token, image_base64?, qrcode_url?, expires_at }
+//   GET  /admin/channels/qq/qrcode/status  → { status, account?, message? }
+//   GET  /admin/channels/qq/accounts       → { accounts: QqAccount[] }
+//   POST /admin/channels/qq/quick-login    → { status, account?, message? }
+export interface QqAccount {
+  uin: string;
+  nickname?: string;
+  avatar_url?: string;
+  /** epoch-ms */
+  last_login_at: number;
+}
+export interface QqQrcode {
+  token: string;
+  /** Base64 PNG (no data: prefix) when NapCat returned an image. */
+  image_base64: string | null;
+  /** ptqrshow URL when NapCat returned a URL instead of an image. */
+  qrcode_url: string | null;
+  /** epoch-ms expiry. */
+  expires_at: number;
+}
+export type QqLoginStatus =
+  | "waiting"
+  | "scanned"
+  | "confirmed"
+  | "expired"
+  | "error";
+export interface QqQrcodeStatus {
+  status: QqLoginStatus;
+  account?: QqAccount;
+  message?: string;
+}
+export function requestQqQrcode(): Promise<QqQrcode> {
+  return apiFetch<QqQrcode>("/admin/channels/qq/qrcode", { method: "POST" });
+}
+export function fetchQqQrcodeStatus(token: string): Promise<QqQrcodeStatus> {
+  const qs = new URLSearchParams({ token });
+  return apiFetch<QqQrcodeStatus>(
+    `/admin/channels/qq/qrcode/status?${qs.toString()}`,
+  );
+}
+export function fetchQqAccounts(): Promise<{ accounts: QqAccount[] }> {
+  return apiFetch<{ accounts: QqAccount[] }>("/admin/channels/qq/accounts");
+}
+export function qqQuickLogin(uin: string): Promise<QqQrcodeStatus> {
+  return apiFetch<QqQrcodeStatus>("/admin/channels/qq/quick-login", {
+    method: "POST",
+    body: { uin },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // S6 T3 — Scheduler admin surface
 // ---------------------------------------------------------------------------

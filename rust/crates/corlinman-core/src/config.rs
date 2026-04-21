@@ -440,6 +440,18 @@ pub struct QqChannelConfig {
     /// field disables that dimension.
     #[serde(default)]
     pub rate_limit: QqRateLimit,
+    /// Base URL of NapCat's webui HTTP API used for scan-login + quick-login
+    /// proxying from `/admin/channels/qq/qrcode*` / `/accounts` /
+    /// `/quick-login`. `None` means scan-login is disabled (the admin UI
+    /// shows "NapCat not configured" and the routes return 503). A typical
+    /// local value is `http://127.0.0.1:6099` (NapCat webui default).
+    #[serde(default)]
+    pub napcat_url: Option<String>,
+    /// Optional Bearer token forwarded as `Authorization: Bearer <token>`
+    /// on every NapCat webui call. Resolved like other [`SecretRef`]s so
+    /// operators can keep it in an env var.
+    #[serde(default)]
+    pub napcat_access_token: Option<SecretRef>,
 }
 
 /// QQ channel rate-limit knobs.

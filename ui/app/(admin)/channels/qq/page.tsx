@@ -16,6 +16,7 @@ import {
   updateQqKeywords,
   type QqStatus,
 } from "@/lib/api";
+import { ScanLoginDialog } from "./ScanLoginDialog";
 
 /**
  * QQ channel admin. /admin/channels/qq/status · /keywords · /reconnect.
@@ -75,16 +76,29 @@ export default function QqChannelPage() {
     setDraft(next);
   };
 
+  const [scanLoginOpen, setScanLoginOpen] = React.useState(false);
+
   return (
     <>
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {t("channels.title")}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {t("channels.subtitle")}
-        </p>
+      <header className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {t("channels.title")}
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            {t("channels.subtitle")}
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setScanLoginOpen(true)}
+          data-testid="qq-scan-login-btn"
+        >
+          {t("channels.qq.scanLogin.openButton")}
+        </Button>
       </header>
+      <ScanLoginDialog open={scanLoginOpen} onOpenChange={setScanLoginOpen} />
 
       {status.isPending ? (
         <Skeleton className="h-28 w-full" />

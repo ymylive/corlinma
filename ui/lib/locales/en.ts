@@ -223,6 +223,22 @@ export const en = {
     reconnecting: "Reconnecting...",
     reconnectRequested: "Reconnect requested",
     remove: "Remove",
+    qq: {
+      scanLogin: {
+        openButton: "Scan login",
+        title: "QQ scan-login",
+        subtitle: "Point your phone's QQ app at the QR below.",
+        statusWaiting: "Waiting for scan",
+        statusScanned: "Scanned — confirm on your phone",
+        statusConfirmed: "Login confirmed",
+        statusExpired: "QR expired",
+        statusError: "Something went wrong",
+        secondsLeft: "{{s}}s left",
+        confirmed: "QQ login confirmed",
+        quickLogin: "Previously logged-in accounts",
+        quickLoginFailed: "Quick-login failed",
+      },
+    },
   },
 
   scheduler: {

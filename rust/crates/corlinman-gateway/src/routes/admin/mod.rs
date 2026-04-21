@@ -39,6 +39,7 @@ pub mod config;
 pub mod embedding;
 pub mod logs;
 pub mod models;
+pub mod napcat;
 pub mod plugins;
 pub mod providers;
 pub mod rag;
