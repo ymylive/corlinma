@@ -100,8 +100,7 @@ COPY pnpm-workspace.yaml package.json* pnpm-lock.yaml* ./
 COPY ui ./ui
 
 RUN pnpm install --frozen-lockfile \
- && pnpm -C ui build \
- && pnpm -C ui export
+ && pnpm -C ui build
 
 # ---------------------------------------------------------------------------
 # Stage 5: runtime — slim final image
