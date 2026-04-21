@@ -35,14 +35,22 @@ RUN cargo chef prepare --recipe-path /recipe.json
 FROM rust:1.95-slim AS rust-builder
 WORKDIR /build
 
+# `binutils` brings `ld.bfd`; we force it via RUSTFLAGS below because
+# `lld` (rust's default for x86_64-linux-gnu) SIGSEGVs under Rosetta 2
+# / QEMU user-mode emulation on Apple Silicon hosts. BFD is slower but
+# stable under emulation and produces identical binaries.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config \
       libssl-dev \
       protobuf-compiler \
       ca-certificates \
+      binutils \
+      g++ \
  && rm -rf /var/lib/apt/lists/* \
  && cargo install cargo-chef --locked --version ^0.1
+
+ENV RUSTFLAGS="-C link-arg=-fuse-ld=bfd"
 
 # Cook dependencies (cached layer unless deps change)
 COPY --from=rust-planner /recipe.json /recipe.json
@@ -122,7 +130,7 @@ RUN apt-get update \
 
 # Rust binaries
 COPY --from=rust-builder /build/target/release/corlinman-gateway /usr/local/bin/corlinman-gateway
-COPY --from=rust-builder /build/target/release/corlinman-cli     /usr/local/bin/corlinman
+COPY --from=rust-builder /build/target/release/corlinman         /usr/local/bin/corlinman
 
 # Python venv (uv-managed)
 COPY --from=py-builder /opt/venv /opt/venv
