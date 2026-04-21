@@ -4,7 +4,17 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { Check, Key, Pencil, Plus, Trash2, X } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Key,
+  Pencil,
+  Plus,
+  Trash2,
+  X,
+} from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,32 +29,65 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import { fetchModels, updateAliases, type ModelsResponse } from "@/lib/api";
+import {
+  fetchModels,
+  updateAliases,
+  upsertAlias,
+  type AliasView,
+  type JSONSchema,
+  type ModelsResponse,
+  type ProviderRow,
+  type ProviderView,
+} from "@/lib/api";
+import { DynamicParamsForm } from "@/components/dynamic-params-form";
 
 /**
- * Models admin page. Providers rendered as cards (enabled toggle is
- * informational — the actual provider on/off flips in the config editor).
- * Aliases are an inline-edit table: click the alias cell to rename, click
- * the target cell to point it elsewhere.
+ * Models admin page.
+ *
+ * v0.1 behaviour preserved: `aliases: Record<string, alias-target>` edited
+ * inline, saved via `POST /admin/models/aliases { aliases, default }`.
+ *
+ * v0.2 (Feature C) additions:
+ *   - The gateway may return `aliases: AliasView[]` and `providers:
+ *     ProviderView[]` (richer shape, with `params` + `params_schema`).
+ *     When detected, the table renders a provider column + a row-expander
+ *     that drops open the per-alias params editor driven by
+ *     `<DynamicParamsForm>`.
+ *   - The legacy save-all flow still fires on the top-right Save button;
+ *     per-alias params save independently via `POST /admin/models/aliases`
+ *     with the full `AliasUpsert` body.
  */
 export default function ModelsPage() {
   const { t } = useTranslation();
   const qc = useQueryClient();
+  // `fetchModels` is typed against the v0.1 shape, but v0.2 gateways reply
+  // with the extended shape in the same slot. Treat the response loosely
+  // and branch on the observed fields.
   const models = useQuery<ModelsResponse>({
     queryKey: ["admin", "models"],
     queryFn: fetchModels,
   });
 
+  const shape = React.useMemo(
+    () => detectShape(models.data),
+    [models.data],
+  );
+
   const [aliases, setAliases] = React.useState<Array<[string, string]>>([]);
   const [defaultModel, setDefaultModel] = React.useState("");
   const [initialized, setInitialized] = React.useState(false);
   React.useEffect(() => {
-    if (models.data && !initialized) {
-      setAliases(Object.entries(models.data.aliases));
+    if (!models.data || initialized) return;
+    if (shape === "v2") {
+      const v2 = models.data as unknown as V2Models;
+      setAliases(v2.aliases.map((a) => [a.name, a.model] as [string, string]));
+      setDefaultModel(v2.default);
+    } else {
+      setAliases(Object.entries(models.data.aliases as Record<string, string>));
       setDefaultModel(models.data.default);
-      setInitialized(true);
     }
-  }, [models.data, initialized]);
+    setInitialized(true);
+  }, [models.data, initialized, shape]);
 
   const saveMutation = useMutation({
     mutationFn: () => {
@@ -66,6 +109,22 @@ export default function ModelsPage() {
       ),
   });
 
+  // Derive provider-name → params_schema + view for the v2 path.
+  const providersByName = React.useMemo(() => {
+    if (!models.data) return new Map<string, ProviderView>();
+    const arr = (models.data as unknown as V2Models).providers;
+    if (!arr || arr.length === 0) return new Map();
+    if (isV2Provider(arr[0]!)) {
+      return new Map(arr.map((p) => [p.name, p]));
+    }
+    return new Map();
+  }, [models.data]);
+
+  const aliasViews = React.useMemo<AliasView[] | null>(() => {
+    if (shape !== "v2" || !models.data) return null;
+    return (models.data as unknown as V2Models).aliases;
+  }, [shape, models.data]);
+
   return (
     <>
       <header className="space-y-1">
@@ -86,49 +145,7 @@ export default function ModelsPage() {
         ) : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {models.data?.providers.map((p) => (
-              <div
-                key={p.name}
-                className={cn(
-                  "flex flex-col gap-2 rounded-lg border p-4 transition-colors",
-                  p.enabled
-                    ? "border-border bg-panel hover:border-primary/40"
-                    : "border-border bg-surface/60",
-                )}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={cn(
-                        "inline-block h-2 w-2 rounded-full",
-                        p.enabled ? "bg-ok" : "bg-muted-foreground/40",
-                      )}
-                    />
-                    <span className="text-sm font-semibold">{p.name}</span>
-                  </div>
-                  {p.enabled ? (
-                    <Badge className="border-transparent bg-ok/15 text-ok">
-                      {t("common.enabled")}
-                    </Badge>
-                  ) : (
-                    <Badge variant="secondary">{t("common.disabled")}</Badge>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <Key className="h-3 w-3 text-muted-foreground" />
-                  {p.has_api_key ? (
-                    <span className="font-mono text-muted-foreground">
-                      {t("models.keyKind", { kind: p.api_key_kind })}
-                    </span>
-                  ) : (
-                    <span className="text-destructive">
-                      {t("models.keyMissing")}
-                    </span>
-                  )}
-                </div>
-                <div className="font-mono text-[11px] text-muted-foreground">
-                  {p.base_url ?? t("models.providerDefault")}
-                </div>
-              </div>
+              <ProviderCard key={p.name} provider={p} />
             ))}
           </div>
         )}
@@ -173,9 +190,15 @@ export default function ModelsPage() {
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border hover:bg-transparent">
-              <TableHead className="w-52 pl-3">
+              {aliasViews ? <TableHead className="w-8 pl-3"></TableHead> : null}
+              <TableHead className={cn("w-52", !aliasViews && "pl-3")}>
                 {t("models.aliasHeader")}
               </TableHead>
+              {aliasViews ? (
+                <TableHead className="w-40">
+                  {t("models.aliasProviderHeader")}
+                </TableHead>
+              ) : null}
               <TableHead>{t("models.aliasTargetHeader")}</TableHead>
               <TableHead className="w-16"></TableHead>
             </TableRow>
@@ -184,12 +207,33 @@ export default function ModelsPage() {
             {aliases.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={3}
+                  colSpan={aliasViews ? 5 : 3}
                   className="py-6 text-center text-sm text-muted-foreground"
                 >
                   {t("models.noAliases")}
                 </TableCell>
               </TableRow>
+            ) : aliasViews ? (
+              aliases.map(([alias, target], idx) => {
+                const av = aliasViews.find((a) => a.name === alias);
+                return (
+                  <AliasRowV2
+                    key={`${idx}-${alias}`}
+                    alias={alias}
+                    target={target}
+                    view={av}
+                    providersByName={providersByName}
+                    onChange={(next) => {
+                      const all = [...aliases];
+                      all[idx] = next;
+                      setAliases(all);
+                    }}
+                    onRemove={() =>
+                      setAliases(aliases.filter((_, i) => i !== idx))
+                    }
+                  />
+                );
+              })
             ) : (
               aliases.map(([alias, target], idx) => (
                 <AliasRow
@@ -218,6 +262,288 @@ export default function ModelsPage() {
         ) : null}
       </section>
     </>
+  );
+}
+
+// --------------------------- shape detection ------------------------------
+
+/** The v0.2 gateway returns `aliases: AliasView[]` + richer `providers`;
+ * the v0.1 gateway returns `aliases: Record<string, string>`. Keep a single
+ * state shape internally and branch on detection. */
+type V2Models = {
+  default: string;
+  providers: ProviderView[];
+  aliases: AliasView[];
+};
+
+function detectShape(data: ModelsResponse | undefined): "v1" | "v2" {
+  if (!data) return "v1";
+  const raw = data as unknown as { aliases: unknown };
+  return Array.isArray(raw.aliases) ? "v2" : "v1";
+}
+
+function isV2Provider(p: ProviderRow | ProviderView): p is ProviderView {
+  return (
+    typeof (p as ProviderView).params_schema !== "undefined" ||
+    typeof (p as ProviderView).api_key_source !== "undefined"
+  );
+}
+
+// --------------------------- provider card --------------------------------
+
+function ProviderCard({ provider }: { provider: ProviderRow | ProviderView }) {
+  const { t } = useTranslation();
+  const enabled = provider.enabled;
+  const v2 = isV2Provider(provider) ? provider : null;
+  const v1 = !v2 ? (provider as ProviderRow) : null;
+
+  // The v2 "has_api_key" is inferred from api_key_source.
+  const keyKindLabel = v2
+    ? v2.api_key_source === "env"
+      ? "env"
+      : v2.api_key_source === "value"
+        ? "literal"
+        : null
+    : v1?.has_api_key
+      ? v1.api_key_kind
+      : null;
+
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-2 rounded-lg border p-4 transition-colors",
+        enabled
+          ? "border-border bg-panel hover:border-primary/40"
+          : "border-border bg-surface/60",
+      )}
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span
+            className={cn(
+              "inline-block h-2 w-2 rounded-full",
+              enabled ? "bg-ok" : "bg-muted-foreground/40",
+            )}
+          />
+          <span className="text-sm font-semibold">{provider.name}</span>
+          {v2 ? (
+            <Badge variant="secondary" className="font-mono text-[10px]">
+              {v2.kind}
+            </Badge>
+          ) : null}
+        </div>
+        {enabled ? (
+          <Badge className="border-transparent bg-ok/15 text-ok">
+            {t("common.enabled")}
+          </Badge>
+        ) : (
+          <Badge variant="secondary">{t("common.disabled")}</Badge>
+        )}
+      </div>
+      <div className="flex items-center gap-2 text-xs">
+        <Key className="h-3 w-3 text-muted-foreground" />
+        {keyKindLabel ? (
+          <span className="font-mono text-muted-foreground">
+            {t("models.keyKind", { kind: keyKindLabel })}
+          </span>
+        ) : (
+          <span className="text-destructive">
+            {t("models.keyMissing")}
+          </span>
+        )}
+      </div>
+      <div className="font-mono text-[11px] text-muted-foreground">
+        {provider.base_url ?? t("models.providerDefault")}
+      </div>
+    </div>
+  );
+}
+
+// --------------------------- alias rows -----------------------------------
+
+function AliasRowV2({
+  alias,
+  target,
+  view,
+  providersByName,
+  onChange,
+  onRemove,
+}: {
+  alias: string;
+  target: string;
+  view: AliasView | undefined;
+  providersByName: Map<string, ProviderView>;
+  onChange: (next: [string, string]) => void;
+  onRemove: () => void;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = React.useState(false);
+  const providerName = view?.provider ?? "";
+  const provider = providersByName.get(providerName);
+  const schema: JSONSchema | null =
+    view?.effective_params_schema ?? provider?.params_schema ?? null;
+
+  return (
+    <>
+      <TableRow className="border-b border-border">
+        <TableCell className="w-8 pl-3">
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            aria-label={expanded ? t("models.collapse") : t("models.expand")}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+            data-testid={`alias-expand-${alias}`}
+          >
+            {expanded ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
+          </button>
+        </TableCell>
+        <TableCell>
+          <InlineEdit
+            value={alias}
+            onCommit={(v) => onChange([v, target])}
+            placeholder="smart"
+            mono
+          />
+        </TableCell>
+        <TableCell className="font-mono text-[11px] text-muted-foreground">
+          {providerName || "—"}
+        </TableCell>
+        <TableCell>
+          <InlineEdit
+            value={target}
+            onCommit={(v) => onChange([alias, v])}
+            placeholder="claude-opus-4-7"
+            mono
+          />
+        </TableCell>
+        <TableCell>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={onRemove}
+            aria-label={t("models.remove")}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </TableCell>
+      </TableRow>
+      <AnimatePresence initial={false}>
+        {expanded ? (
+          <TableRow
+            className="border-b border-border bg-surface/40"
+            data-testid={`alias-params-row-${alias}`}
+          >
+            <TableCell colSpan={5} className="p-0">
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.18, ease: "easeOut" }}
+                className="overflow-hidden"
+              >
+                <div className="space-y-3 px-4 py-3">
+                  {view ? (
+                    <AliasParamsEditor
+                      alias={view}
+                      provider={provider}
+                      schema={schema}
+                    />
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      {t("models.paramsBackendPending")}
+                    </p>
+                  )}
+                </div>
+              </motion.div>
+            </TableCell>
+          </TableRow>
+        ) : null}
+      </AnimatePresence>
+    </>
+  );
+}
+
+function AliasParamsEditor({
+  alias,
+  provider,
+  schema,
+}: {
+  alias: AliasView;
+  provider: ProviderView | undefined;
+  schema: JSONSchema | null;
+}) {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const [params, setParams] = React.useState<Record<string, unknown>>(
+    alias.params ?? {},
+  );
+  const [errors, setErrors] = React.useState<Record<string, string>>({});
+  const hasErrors = Object.keys(errors).length > 0;
+
+  React.useEffect(() => {
+    setParams(alias.params ?? {});
+  }, [alias.params]);
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      upsertAlias({
+        name: alias.name,
+        provider: alias.provider,
+        model: alias.model,
+        params,
+      }),
+    onSuccess: () => {
+      toast.success(t("models.paramsSaved"));
+      qc.invalidateQueries({ queryKey: ["admin", "models"] });
+    },
+    onError: (err) =>
+      toast.error(
+        t("models.paramsSaveFailed", {
+          msg: err instanceof Error ? err.message : String(err),
+        }),
+      ),
+  });
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold">{t("models.paramsTitle")}</h3>
+        <p className="text-[11px] text-muted-foreground">
+          {t("models.paramsHint")}
+        </p>
+      </div>
+      {schema ? (
+        <DynamicParamsForm
+          schema={schema}
+          value={params}
+          onChange={setParams}
+          onErrorsChange={setErrors}
+          testIdPrefix={`alias-${alias.name}`}
+        />
+      ) : (
+        <p className="text-xs italic text-muted-foreground">
+          {t("models.paramsNone")}
+        </p>
+      )}
+      <div className="flex items-center justify-end">
+        <Button
+          size="sm"
+          onClick={() => saveMutation.mutate()}
+          disabled={hasErrors || saveMutation.isPending || !schema}
+          data-testid={`alias-save-${alias.name}`}
+        >
+          {saveMutation.isPending
+            ? t("models.saving")
+            : t("models.paramsSave")}
+        </Button>
+      </div>
+      {provider ? null : null}
+    </div>
   );
 }
 

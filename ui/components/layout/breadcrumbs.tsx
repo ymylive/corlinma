@@ -17,6 +17,8 @@ const SEGMENT_KEY: Record<string, string> = {
   scheduler: "breadcrumbs.scheduler",
   approvals: "breadcrumbs.approvals",
   models: "breadcrumbs.models",
+  providers: "breadcrumbs.providers",
+  embedding: "breadcrumbs.embedding",
   config: "breadcrumbs.config",
   logs: "breadcrumbs.logs",
 };
