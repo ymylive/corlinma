@@ -4,6 +4,53 @@ All notable changes to corlinman are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-04-21
+
+Major release. Dynamic provider registry, per-alias model params,
+first-class embedding config, and admin UI to manage all of it.
+Full notes: [`docs/release-notes-v0.2.0.md`](docs/release-notes-v0.2.0.md).
+
+### Added
+
+- **Config**: `[providers.<name>].kind` enum + `params` map;
+  `[models.aliases.<name>].params`; new `[embedding]` section.
+  Backward-compatible — configs without `kind` on first-party
+  providers still parse via inferred-kind defaults.
+- **Rust admin routes**: `/admin/providers` (CRUD + 409 reference
+  guard); `/admin/embedding` (GET/POST, benchmark stubbed to 501);
+  `/admin/models/aliases` extended with single-row upsert + delete.
+- **Python**: dynamic `ProviderRegistry` driven by `[providers.*]`
+  specs; `params_schema()` on every provider; new
+  `CorlinmanEmbeddingProvider` ABC with OpenAI-compatible + Google
+  implementations; `benchmark_embedding()` helper (p50/p99 latency +
+  cosine matrix).
+- **UI**: `/providers` + `/embedding` pages, `/models` inline-accordion
+  for params, hand-rolled `<DynamicParamsForm>` JSON-Schema renderer,
+  ~145 new i18n keys across zh-CN + en.
+
+### Fixed
+
+- `/admin/approvals` returned 503 in production because `ApprovalGate`
+  was never constructed at boot. `build_runtime_with_logs` now wires
+  it from the live config handle + the RAG SQLite.
+
+### Changed
+
+- Docker image drops the `ui-builder` stage. Production serves the
+  Next.js static export via nginx from `/opt/corlinman/ui-static/`;
+  bundling it was dead weight and segfaulted node under Rosetta 2
+  cross-builds.
+
+### Known issues
+
+- `/admin/embedding/benchmark` is a 501 stub until the Python helper
+  is reachable over gRPC from Rust. UI handles the fallback.
+- Rust gateway doesn't yet export `CORLINMAN_PY_CONFIG` to the Python
+  subprocess; the legacy prefix-matching path keeps chats working
+  while the config-driven registry integration lands.
+
+[0.2.0]: https://github.com/ymylive/corlinman/releases/tag/v0.2.0
+
 ## [0.1.3] — 2026-04-21
 
 zh-CN / en internationalisation + static-bundle API fix. Pure frontend
