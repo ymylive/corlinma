@@ -1,29 +1,50 @@
 # QQ (OneBot v11) profile — overlay on docker-compose.yml.
-# TODO (M5): pick a concrete go-cqhttp image; current upstream is archived.
-#   Candidates: LagrangeDev/Lagrange.OneBot, NapNeko/NapCatQQ.
-# For now this file documents the network contract: gocq WS exposed on 3001,
-# corlinman-channels connects to ws://gocq:3001 inside corlinman-net.
+#
+# Usage:
+#   cd docker/compose
+#   docker compose -f docker-compose.yml -f docker-compose.qq.yml \
+#       --profile qq up -d
+#
+# Services:
+#   napcat   — NapCat QQ client: OneBot v11 forward-WS on :3001, webui +
+#              scan-login HTTP API on :6099.
+#   corlinman — (override) points at the in-network NapCat so the admin
+#              scan-login flow + channel message bus both work without
+#              any host-machine config.
 
 services:
-  gocq:
-    # Placeholder — replace during M5 (channels QQ/OneBot).
-    image: ghcr.io/ymylive/corlinman-gocq:placeholder
-    container_name: corlinman-gocq
+  napcat:
+    # Community-maintained NapCat docker image (MLikiowa). Pin a concrete
+    # tag on a production deploy; `latest` tracks the edge channel.
+    image: mlikiowa/napcat-docker:latest
+    container_name: corlinman-napcat
     profiles: ["qq"]
     restart: unless-stopped
     ports:
-      # WS listener that corlinman-channels dials
+      # 6099: NapCat webui + HTTP login API
+      #       (consumed by POST /admin/channels/qq/qrcode and friends).
+      - "6099:6099"
+      # 3001: OneBot v11 forward-WS
+      #       (consumed by corlinman-channels' dispatcher).
       - "3001:3001"
-    volumes:
-      - ../../.gocq:/data
     environment:
-      # Typical OneBot v11 knobs; resolve in M5.
-      ONEBOT_WS_PORT: "3001"
+      NAPCAT_UID: "1000"
+      NAPCAT_GID: "1000"
+      # Leave QQ_ACCOUNT unset — users sign in via the admin UI scan flow.
+    volumes:
+      # Authoritative NapCat state: QQ session, WebUI users, OneBot config.
+      # Persist across container recreations so users don't re-scan every
+      # redeploy.
+      - ../../.napcat/app:/app/napcat
+      - ../../.napcat/ntqq:/app/.config/QQ
     networks:
       - corlinman-net
 
   corlinman:
     environment:
-      QQ_WS_URL: ws://gocq:3001
+      # Admin REST scan-login flow dials NapCat webui here.
+      CORLINMAN_NAPCAT_URL: http://napcat:6099
+      # OneBot v11 forward-WS bridge for the channel dispatcher.
+      QQ_WS_URL: ws://napcat:3001
     depends_on:
-      - gocq
+      - napcat

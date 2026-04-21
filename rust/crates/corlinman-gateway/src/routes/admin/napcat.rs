@@ -163,11 +163,25 @@ impl NapcatContext {
                 ))
             }
         };
-        let url = match qq.napcat_url.as_ref() {
-            Some(u) if !u.trim().is_empty() => u.trim_end_matches('/').to_string(),
+        // Resolution order:
+        //   1. `[channels.qq].napcat_url` in config.toml (explicit)
+        //   2. `$CORLINMAN_NAPCAT_URL` env (container defaults, e.g. the
+        //      docker-compose.qq.yml profile sets this to http://napcat:6099
+        //      so operators don't have to edit config.toml to enable the
+        //      scan-login flow)
+        //   3. 503 `napcat_not_configured`
+        let url = qq
+            .napcat_url
+            .as_ref()
+            .filter(|u| !u.trim().is_empty())
+            .cloned()
+            .or_else(|| std::env::var("CORLINMAN_NAPCAT_URL").ok())
+            .map(|u| u.trim_end_matches('/').to_string());
+        let url = match url {
+            Some(u) if !u.is_empty() => u,
             _ => return Err(service_unavailable(
                 "napcat_not_configured",
-                "[channels.qq].napcat_url is empty; set it to NapCat's webui base URL (e.g. http://127.0.0.1:6099) to enable scan-login",
+                "[channels.qq].napcat_url is empty; set it in config.toml or export CORLINMAN_NAPCAT_URL (e.g. http://127.0.0.1:6099) to enable scan-login",
             )),
         };
         let access_token = match qq.napcat_access_token.as_ref() {
