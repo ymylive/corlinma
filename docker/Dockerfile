@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: rust-planner — prepare cargo-chef recipe
 # ---------------------------------------------------------------------------
-FROM rust:1.85-slim AS rust-planner
+FROM rust:1.95-slim AS rust-planner
 WORKDIR /build
 
 RUN apt-get update \
@@ -32,7 +32,7 @@ RUN cargo chef prepare --recipe-path /recipe.json
 # ---------------------------------------------------------------------------
 # Stage 2: rust-builder — cook deps, build release binaries
 # ---------------------------------------------------------------------------
-FROM rust:1.85-slim AS rust-builder
+FROM rust:1.95-slim AS rust-builder
 WORKDIR /build
 
 RUN apt-get update \
