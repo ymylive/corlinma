@@ -124,7 +124,7 @@ export default function EmbeddingPage() {
           <h1 className="text-2xl font-semibold tracking-tight">
             {t("embedding.title")}
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-tp-ink-3">
             {t("embedding.subtitle")}
           </p>
         </header>
@@ -141,12 +141,12 @@ export default function EmbeddingPage() {
         <h1 className="text-2xl font-semibold tracking-tight">
           {t("embedding.title")}
         </h1>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-sm text-tp-ink-3">
           {t("embedding.subtitle")}
         </p>
       </header>
 
-      <section className="space-y-4 rounded-lg border border-border bg-panel p-4">
+      <section className="space-y-4 rounded-lg border border-tp-glass-edge bg-tp-glass p-4">
         {loading ? (
           <Skeleton className="h-40 w-full" />
         ) : !draft ? (
@@ -156,7 +156,7 @@ export default function EmbeddingPage() {
         ) : (
           <>
             {capableProviders.length === 0 ? (
-              <p className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+              <p className="rounded-md border border-dashed border-tp-glass-edge p-4 text-center text-xs text-tp-ink-3">
                 {t("embedding.providerNoneCapable")}
               </p>
             ) : null}
@@ -214,7 +214,7 @@ export default function EmbeddingPage() {
                   }
                   className="font-mono text-xs"
                 />
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-[11px] text-tp-ink-3">
                   {t("embedding.dimensionHint")}
                 </p>
               </div>
@@ -234,7 +234,7 @@ export default function EmbeddingPage() {
                 }
                 className={cn(
                   "inline-flex h-6 w-11 items-center rounded-full border border-input transition-colors",
-                  draft.enabled ? "bg-primary" : "bg-muted",
+                  draft.enabled ? "bg-primary" : "bg-tp-glass-inner",
                 )}
               >
                 <span
@@ -248,7 +248,7 @@ export default function EmbeddingPage() {
               </button>
             </div>
 
-            <div className="space-y-2 rounded-md border border-border p-3">
+            <div className="space-y-2 rounded-md border border-tp-glass-edge p-3">
               <h3 className="text-sm font-semibold">
                 {t("embedding.paramsTitle")}
               </h3>
@@ -320,14 +320,14 @@ function BenchmarkPanel() {
   const empty = samples.length === 0;
 
   return (
-    <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
+    <section className="space-y-3 rounded-lg border border-tp-glass-edge bg-tp-glass p-4">
       <div className="flex items-center gap-2">
-        <Sparkles className="h-4 w-4 text-muted-foreground" />
+        <Sparkles className="h-4 w-4 text-tp-ink-3" />
         <h2 className="text-sm font-semibold">
           {t("embedding.benchmarkTitle")}
         </h2>
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-xs text-tp-ink-3">
         {t("embedding.benchmarkHint")}
       </p>
 
@@ -340,7 +340,7 @@ function BenchmarkPanel() {
       />
 
       <div className="flex items-center justify-between">
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-[11px] text-tp-ink-3">
           {empty
             ? t("embedding.benchmarkEmpty")
             : tooMany
@@ -364,7 +364,7 @@ function BenchmarkPanel() {
           initial={{ opacity: 0, y: 4 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.18, ease: "easeOut" }}
-          className="space-y-4 border-t border-border pt-4"
+          className="space-y-4 border-t border-tp-glass-edge pt-4"
         >
           <div className="grid grid-cols-3 gap-3">
             <Stat
@@ -386,7 +386,7 @@ function BenchmarkPanel() {
               <h3 className="text-sm font-semibold">
                 {t("embedding.benchmarkHeatmap")}
               </h3>
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-[11px] text-tp-ink-3">
                 {t("embedding.benchmarkHeatmapHint")}
               </p>
             </div>
@@ -398,7 +398,7 @@ function BenchmarkPanel() {
               {t("embedding.benchmarkWarnings")}
             </h3>
             {result.warnings.length === 0 ? (
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-[11px] text-tp-ink-3">
                 {t("embedding.benchmarkNoWarnings")}
               </p>
             ) : (
@@ -417,8 +417,8 @@ function BenchmarkPanel() {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-border bg-surface/40 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+    <div className="rounded-md border border-tp-glass-edge bg-tp-glass/40 px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wider text-tp-ink-3">
         {label}
       </div>
       <div className="font-mono text-sm">{value}</div>
@@ -434,7 +434,7 @@ function SimilarityHeatmap({ matrix }: { matrix: number[][] }) {
   // embeddings but we still want the diagonal to stand out).
   return (
     <div
-      className="inline-grid rounded-md border border-border p-1"
+      className="inline-grid rounded-md border border-tp-glass-edge p-1"
       style={{
         gridTemplateColumns: `repeat(${n}, minmax(22px, 1fr))`,
         gridTemplateRows: `repeat(${n}, minmax(22px, 1fr))`,
@@ -467,7 +467,7 @@ function SimilarityHeatmap({ matrix }: { matrix: number[][] }) {
 function BackendPendingBanner({ label }: { label: string }) {
   return (
     <div
-      className="rounded-md border border-dashed border-border bg-surface/40 px-4 py-6 text-center text-xs text-muted-foreground"
+      className="rounded-md border border-dashed border-tp-glass-edge bg-tp-glass/40 px-4 py-6 text-center text-xs text-tp-ink-3"
       data-testid="backend-pending"
     >
       {label}

@@ -50,7 +50,7 @@ export default function LoginPage() {
 function HeroColumn() {
   const { t } = useTranslation();
   return (
-    <aside className="relative hidden overflow-hidden border-r border-border bg-surface/60 md:flex md:flex-col md:justify-between md:p-10">
+    <aside className="relative hidden overflow-hidden border-r border-tp-glass-edge bg-tp-glass-inner md:flex md:flex-col md:justify-between md:p-10">
       <div className="flex items-center gap-2">
         <BrandMark />
       </div>
@@ -58,11 +58,11 @@ function HeroColumn() {
         <h2 className="text-lg font-semibold tracking-tight">
           {t("auth.heroTitle")}
         </h2>
-        <p className="max-w-xs text-sm text-muted-foreground">
+        <p className="max-w-xs text-sm text-tp-ink-3">
           {t("auth.heroBody")}
         </p>
       </div>
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <div className="flex items-center gap-2 text-xs text-tp-ink-3">
         <span className="font-mono">v0.1.1</span>
         <span>·</span>
         <span>M6 admin</span>
@@ -171,7 +171,7 @@ function LoginForm() {
         <h1 className="text-xl font-semibold tracking-tight">
           {t("auth.signIn")}
         </h1>
-        <p className="text-sm text-muted-foreground">{t("auth.subtitle")}</p>
+        <p className="text-sm text-tp-ink-3">{t("auth.subtitle")}</p>
       </div>
       <form
         onSubmit={onSubmit}
@@ -218,7 +218,7 @@ function LoginForm() {
           {submitting ? t("auth.submitting") : t("auth.submit")}
         </Button>
       </form>
-      <p className="text-center text-xs text-muted-foreground">
+      <p className="text-center text-xs text-tp-ink-3">
         {t("auth.sessionHint")}
       </p>
     </div>
@@ -233,7 +233,7 @@ function LoginFormShell({ disabled }: { disabled?: boolean }) {
         <h1 className="text-xl font-semibold tracking-tight">
           {t("auth.signIn")}
         </h1>
-        <p className="text-sm text-muted-foreground">{t("auth.subtitle")}</p>
+        <p className="text-sm text-tp-ink-3">{t("auth.subtitle")}</p>
       </div>
       <div className="space-y-4">
         <div className="space-y-2">

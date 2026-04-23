@@ -45,13 +45,13 @@ export default function AgentsPage() {
         <h1 className="text-2xl font-semibold tracking-tight">
           {t("agents.title")}
         </h1>
-        <p className="text-sm text-muted-foreground">{t("agents.subtitle")}</p>
+        <p className="text-sm text-tp-ink-3">{t("agents.subtitle")}</p>
       </header>
 
-      <section className="overflow-hidden rounded-lg border border-border bg-panel">
+      <section className="overflow-hidden rounded-lg border border-tp-glass-edge bg-tp-glass">
         <Table>
           <TableHeader>
-            <TableRow className="border-b border-border hover:bg-transparent">
+            <TableRow className="border-b border-tp-glass-edge hover:bg-transparent">
               <TableHead className="pl-4">{t("agents.colName")}</TableHead>
               <TableHead>{t("agents.colPath")}</TableHead>
               <TableHead className="w-32">{t("agents.colBytes")}</TableHead>
@@ -63,7 +63,7 @@ export default function AgentsPage() {
           <TableBody>
             {query.isPending ? (
               Array.from({ length: 3 }).map((_, i) => (
-                <TableRow key={`sk-${i}`} className="border-b border-border">
+                <TableRow key={`sk-${i}`} className="border-b border-tp-glass-edge">
                   {Array.from({ length: 4 }).map((_, j) => (
                     <TableCell key={j} className={j === 0 ? "pl-4" : undefined}>
                       <Skeleton className="h-4 w-24" />
@@ -84,7 +84,7 @@ export default function AgentsPage() {
               <TableRow>
                 <TableCell
                   colSpan={4}
-                  className="py-10 text-center text-sm text-muted-foreground"
+                  className="py-10 text-center text-sm text-tp-ink-3"
                 >
                   {t("agents.empty")}
                 </TableCell>
@@ -93,7 +93,7 @@ export default function AgentsPage() {
               query.data.map((a) => (
                 <TableRow
                   key={a.name}
-                  className="border-b border-border transition-colors hover:bg-accent/30"
+                  className="border-b border-tp-glass-edge transition-colors hover:bg-tp-glass-inner-hover"
                 >
                   <TableCell className="pl-4 font-medium">
                     <Link
@@ -101,20 +101,20 @@ export default function AgentsPage() {
                         pathname: "/agents/detail",
                         query: { name: a.name },
                       }}
-                      className="inline-flex items-center gap-2 hover:text-primary"
+                      className="inline-flex items-center gap-2 hover:text-tp-amber"
                       data-testid={`agent-link-${a.name}`}
                     >
-                      <FileText className="h-3.5 w-3.5 text-muted-foreground" />
+                      <FileText className="h-3.5 w-3.5 text-tp-ink-3" />
                       {a.name}
                     </Link>
                   </TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
+                  <TableCell className="font-mono text-xs text-tp-ink-3">
                     {a.file_path}
                   </TableCell>
                   <TableCell className="font-mono text-xs">
                     {formatBytes(a.bytes)}
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
+                  <TableCell className="text-xs text-tp-ink-3">
                     {formatTime(a.last_modified)}
                   </TableCell>
                 </TableRow>

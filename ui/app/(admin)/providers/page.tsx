@@ -166,7 +166,7 @@ export default function ProvidersPage() {
           <h1 className="text-2xl font-semibold tracking-tight">
             {t("providers.title")}
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-tp-ink-3">
             {t("providers.subtitle")}
           </p>
         </div>
@@ -183,7 +183,7 @@ export default function ProvidersPage() {
         </Button>
       </header>
 
-      <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
+      <section className="space-y-3 rounded-lg border border-tp-glass-edge bg-tp-glass p-4">
         {providers.isPending ? (
           <Skeleton className="h-24 w-full" />
         ) : backendPending ? (
@@ -201,7 +201,7 @@ export default function ProvidersPage() {
         ) : (
           <Table>
             <TableHeader>
-              <TableRow className="border-b border-border hover:bg-transparent">
+              <TableRow className="border-b border-tp-glass-edge hover:bg-transparent">
                 <TableHead className="w-44 pl-3">
                   {t("providers.colName")}
                 </TableHead>
@@ -222,7 +222,7 @@ export default function ProvidersPage() {
               {providers.data!.map((p) => (
                 <TableRow
                   key={p.name}
-                  className="border-b border-border"
+                  className="border-b border-tp-glass-edge"
                   data-testid={`provider-row-${p.name}`}
                 >
                   <TableCell className="pl-3 font-mono text-xs">
@@ -233,18 +233,18 @@ export default function ProvidersPage() {
                       {p.kind}
                     </Badge>
                   </TableCell>
-                  <TableCell className="font-mono text-[11px] text-muted-foreground">
+                  <TableCell className="font-mono text-[11px] text-tp-ink-3">
                     {p.base_url ?? t("providers.baseUrlDefault")}
                   </TableCell>
                   <TableCell className="text-xs">
                     {p.api_key_source === "env" ? (
-                      <span className="font-mono text-muted-foreground">
+                      <span className="font-mono text-tp-ink-3">
                         {t("providers.keyFromEnv", {
                           name: p.api_key_env_name ?? "?",
                         })}
                       </span>
                     ) : p.api_key_source === "value" ? (
-                      <span className="text-muted-foreground">
+                      <span className="text-tp-ink-3">
                         {t("providers.keyLiteral")}
                       </span>
                     ) : (
@@ -446,7 +446,7 @@ function ProviderEditorDialog({ open, onOpenChange, editing }: EditorProps) {
                   className="font-mono text-xs"
                   placeholder="my-local-llm"
                 />
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-[11px] text-tp-ink-3">
                   {t("providers.fieldNameHint")}
                 </p>
               </div>
@@ -487,7 +487,7 @@ function ProviderEditorDialog({ open, onOpenChange, editing }: EditorProps) {
                 className="font-mono text-xs"
                 placeholder="https://api.openai.com/v1"
               />
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-[11px] text-tp-ink-3">
                 {t("providers.fieldBaseUrlHint")}
               </p>
             </div>
@@ -507,8 +507,8 @@ function ProviderEditorDialog({ open, onOpenChange, editing }: EditorProps) {
                     className={cn(
                       "flex-1 rounded-md border px-3 py-1.5 text-xs transition-colors",
                       draft.api_key_source === src
-                        ? "border-primary bg-primary/10 text-foreground"
-                        : "border-border bg-transparent text-muted-foreground hover:bg-accent/40",
+                        ? "border-primary bg-tp-amber-soft text-tp-ink"
+                        : "border-tp-glass-edge bg-transparent text-tp-ink-3 hover:bg-tp-glass-inner-hover",
                     )}
                   >
                     {src === "env"
@@ -556,7 +556,7 @@ function ProviderEditorDialog({ open, onOpenChange, editing }: EditorProps) {
                 }
                 className={cn(
                   "inline-flex h-6 w-11 items-center rounded-full border border-input transition-colors",
-                  draft.enabled ? "bg-primary" : "bg-muted",
+                  draft.enabled ? "bg-primary" : "bg-tp-glass-inner",
                 )}
               >
                 <span
@@ -570,12 +570,12 @@ function ProviderEditorDialog({ open, onOpenChange, editing }: EditorProps) {
               </button>
             </div>
 
-            <div className="space-y-2 rounded-md border border-border p-3">
+            <div className="space-y-2 rounded-md border border-tp-glass-edge p-3">
               <div>
                 <h3 className="text-sm font-semibold">
                   {t("providers.fieldParams")}
                 </h3>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-[11px] text-tp-ink-3">
                   {t("providers.fieldParamsHint")}
                 </p>
               </div>
@@ -622,10 +622,10 @@ function ProviderEditorDialog({ open, onOpenChange, editing }: EditorProps) {
 
 function EmptyProviders({ title, hint }: { title: string; hint: string }) {
   return (
-    <div className="flex flex-col items-center gap-2 rounded-md border border-dashed border-border py-10 text-center">
-      <Plug className="h-6 w-6 text-muted-foreground/60" />
+    <div className="flex flex-col items-center gap-2 rounded-md border border-dashed border-tp-glass-edge py-10 text-center">
+      <Plug className="h-6 w-6 text-tp-ink-3/60" />
       <p className="text-sm font-medium">{title}</p>
-      <p className="max-w-sm text-xs text-muted-foreground">{hint}</p>
+      <p className="max-w-sm text-xs text-tp-ink-3">{hint}</p>
     </div>
   );
 }
@@ -633,7 +633,7 @@ function EmptyProviders({ title, hint }: { title: string; hint: string }) {
 function BackendPendingBanner({ label }: { label: string }) {
   return (
     <div
-      className="rounded-md border border-dashed border-border bg-surface/40 px-4 py-6 text-center text-xs text-muted-foreground"
+      className="rounded-md border border-dashed border-tp-glass-edge bg-tp-glass/40 px-4 py-6 text-center text-xs text-tp-ink-3"
       data-testid="backend-pending"
     >
       {label}
