@@ -9,7 +9,18 @@ import { BookOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
+import { GlassPanel } from "@/components/ui/glass-panel";
 import { useMotion } from "@/components/ui/motion-safe";
+
+function timeAgo(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
 import {
   fetchDiary,
   groupByDate,
@@ -113,49 +124,83 @@ export default function DiaryPage() {
 
   const hasActiveFilter = tag !== "" || from !== "" || to !== "";
 
+  const entryCount = filtered.length;
+  const dayCount = groups.length;
+  const latest = filtered[0];
+  const latestLabel = latest
+    ? timeAgo(Date.now() - latest.created_at_ms)
+    : null;
+
   return (
     <>
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Diary · 会话日记
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          Scroll-driven recap timeline. Click any entry to expand into the full
-          reader. Filter by tag or date range — the URL stays in sync.
-        </p>
-      </header>
+      <GlassPanel
+        as="section"
+        variant="strong"
+        className="relative overflow-hidden p-7"
+      >
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -bottom-20 -right-10 h-[240px] w-[360px] rounded-full opacity-60 blur-3xl"
+          style={{
+            background:
+              "radial-gradient(closest-side, var(--tp-amber-glow), transparent 70%)",
+          }}
+        />
+        <div className="relative flex flex-col gap-2">
+          <h1 className="font-serif text-[36px] font-normal leading-[1.1] tracking-[-0.02em] text-tp-ink">
+            Diary · <span className="italic">会话日记</span>
+          </h1>
+          <p className="max-w-[64ch] text-[14px] leading-relaxed text-tp-ink-2">
+            {entryCount > 0 ? (
+              <>
+                <b className="font-medium text-tp-ink">{entryCount}</b> entries across{" "}
+                <b className="font-medium text-tp-ink">{dayCount}</b> day
+                {dayCount === 1 ? "" : "s"}.{" "}
+                {latestLabel ? (
+                  <>The last was <span className="text-tp-amber">{latestLabel}</span>.</>
+                ) : null}{" "}
+                Scroll-driven recap timeline — click any entry to expand into the full reader.
+              </>
+            ) : (
+              <>No entries {hasActiveFilter ? "match the current filter" : "yet"}. Filter by tag or date range — the URL stays in sync.</>
+            )}
+          </p>
+        </div>
+      </GlassPanel>
 
       {/* Filters -------------------------------------------------------- */}
-      <section
+      <GlassPanel
+        as="section"
+        variant="soft"
         aria-label="Diary filters"
-        className="flex flex-col gap-3 rounded-lg border border-border bg-card/30 px-4 py-3"
+        className="flex flex-col gap-3 px-4 py-3"
       >
         <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <label className="flex items-center gap-2 text-[12px] text-tp-ink-3">
             From
             <input
               type="date"
               value={from}
               onChange={onFromChange}
               data-testid="diary-filter-from"
-              className="rounded border border-border bg-background px-2 py-1 font-mono text-xs"
+              className="rounded-md border border-tp-glass-edge bg-tp-glass-inner px-2 py-1 font-mono text-[11.5px] text-tp-ink-2 focus:border-tp-amber/40 focus:outline-none"
             />
           </label>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <label className="flex items-center gap-2 text-[12px] text-tp-ink-3">
             To
             <input
               type="date"
               value={to}
               onChange={onToChange}
               data-testid="diary-filter-to"
-              className="rounded border border-border bg-background px-2 py-1 font-mono text-xs"
+              className="rounded-md border border-tp-glass-edge bg-tp-glass-inner px-2 py-1 font-mono text-[11.5px] text-tp-ink-2 focus:border-tp-amber/40 focus:outline-none"
             />
           </label>
           {hasActiveFilter ? (
             <button
               type="button"
               onClick={onClearFilters}
-              className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              className="text-[12px] text-tp-ink-3 underline-offset-2 hover:text-tp-ink hover:underline"
               data-testid="diary-filter-clear"
             >
               Clear
@@ -176,8 +221,8 @@ export default function DiaryPage() {
                   className={cn(
                     "rounded-full border px-2.5 py-0.5 font-mono text-[11px] transition-colors",
                     active
-                      ? "border-primary bg-primary/15 text-primary"
-                      : "border-border text-muted-foreground hover:bg-accent hover:text-foreground",
+                      ? "border-tp-amber/35 bg-tp-amber-soft text-tp-amber"
+                      : "border-tp-glass-edge bg-tp-glass-inner text-tp-ink-3 hover:bg-tp-glass-inner-hover hover:text-tp-ink-2",
                   )}
                 >
                   #{t}
@@ -186,7 +231,7 @@ export default function DiaryPage() {
             })}
           </div>
         ) : null}
-      </section>
+      </GlassPanel>
 
       {/* Timeline ------------------------------------------------------- */}
       {query.isPending ? (
@@ -271,21 +316,21 @@ function DateGroup({ group, onOpen }: DateGroupProps) {
   return (
     <section ref={ref} data-testid={`diary-date-${group.date}`}>
       <motion.div
-        className="sticky top-0 z-10 -mx-2 flex items-center bg-background/85 px-2 py-2 backdrop-blur"
+        className="sticky top-0 z-10 -mx-2 flex items-center bg-tp-glass-inner px-2 py-2 backdrop-blur-glass"
         style={
           reduced
             ? undefined
             : { scale, opacity, transformOrigin: "left center" }
         }
       >
-        <h2 className="font-mono text-sm font-semibold tabular-nums text-foreground">
+        <h2 className="font-mono text-[13px] font-semibold tabular-nums text-tp-ink">
           {group.date}
         </h2>
-        <span className="ml-3 rounded bg-accent/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+        <span className="ml-3 rounded bg-tp-glass-inner-strong px-1.5 py-0.5 font-mono text-[10px] text-tp-ink-3">
           {group.entries.length}
         </span>
       </motion.div>
-      <div className="relative mt-2 border-l border-border pl-0">
+      <div className="relative mt-2 border-l border-tp-glass-edge pl-0">
         <div className="flex flex-col gap-3 py-1">
           {group.entries.map((e, i) => (
             <DiaryEntryCard

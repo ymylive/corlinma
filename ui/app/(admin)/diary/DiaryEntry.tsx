@@ -75,14 +75,19 @@ export function DiaryEntryCard({
         delay,
       }}
       className={cn(
-        "relative ml-6 rounded-lg border border-border bg-card/40 px-4 py-3",
+        "relative ml-6 rounded-lg border border-tp-glass-edge bg-tp-glass-inner px-4 py-3 transition-colors hover:bg-tp-glass-inner-hover",
         shouldAnimate && "diary-entry-animated",
       )}
     >
-      {/* Timeline dot — sits in the gutter, anchored to the left rail. */}
+      {/* Timeline dot — sits in the gutter, amber accent against the rail. */}
       <span
         aria-hidden
-        className="absolute -left-[22px] top-4 h-2.5 w-2.5 rounded-full border-2 border-background bg-primary"
+        className="absolute -left-[22px] top-4 h-2.5 w-2.5 rounded-full border-2"
+        style={{
+          background: "linear-gradient(135deg, var(--tp-amber), var(--tp-ember))",
+          borderColor: "var(--tp-bg-a)",
+          boxShadow: "0 0 6px var(--tp-amber-glow)",
+        }}
       />
       <div
         role="button"
@@ -90,16 +95,16 @@ export function DiaryEntryCard({
         aria-label={`${entry.title} — open full entry`}
         onClick={onClick}
         onKeyDown={onKeyDown}
-        className="cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        className="cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40 focus-visible:ring-offset-2"
       >
         <div className="flex items-baseline gap-2">
-          <span className="font-mono text-[11px] tabular-nums text-muted-foreground">
+          <span className="font-mono text-[11px] tabular-nums text-tp-ink-4">
             {timeLabel(entry.created_at_ms)}
           </span>
-          <h3 className="text-sm font-medium text-foreground">{entry.title}</h3>
+          <h3 className="text-[14px] font-medium text-tp-ink">{entry.title}</h3>
         </div>
         {previewLine ? (
-          <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+          <p className="mt-1 line-clamp-2 text-[12px] text-tp-ink-3">
             {previewLine}
           </p>
         ) : null}
@@ -108,7 +113,7 @@ export function DiaryEntryCard({
             {entry.tags.map((t) => (
               <span
                 key={t}
-                className="rounded bg-accent/50 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                className="rounded bg-tp-glass-inner-strong px-1.5 py-0.5 font-mono text-[10px] text-tp-ink-3"
               >
                 #{t}
               </span>
