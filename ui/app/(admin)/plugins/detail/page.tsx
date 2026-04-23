@@ -6,24 +6,26 @@ import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import { ArrowLeft } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { useMotion } from "@/components/ui/motion-safe";
 import { cn } from "@/lib/utils";
+import { useMotionVariants } from "@/lib/motion";
 import {
   fetchPluginDetail,
   invokePlugin,
   type PluginDetail,
   type PluginInvokeResponse,
 } from "@/lib/api";
+import { GlassPanel } from "@/components/ui/glass-panel";
+import { JsonView } from "@/components/ui/json-view";
+import { PluginDetailHeader } from "@/components/plugins/plugin-detail-header";
 
 /**
- * Plugin detail page — two-column. Left: metadata summary. Right: tool
- * list + invoke form + JSON result. Keeps `?name=` query routing for the
- * static export path.
+ * Plugin detail — Tidepool cutover.
+ *
+ * Keeps the existing `?name=` URL param contract and the invoke form's
+ * logic unchanged. Every section is now a GlassPanel; the doctor output
+ * uses the `<JsonView>` primitive. Sandbox config renders only when the
+ * manifest declares one.
  */
 
 interface JsonSchemaLike {
@@ -43,7 +45,7 @@ interface ToolManifest {
 
 export default function PluginDetailPage() {
   const { t } = useTranslation();
-  const { reduced } = useMotion();
+  const variants = useMotionVariants();
   const search = useSearchParams();
   const name = search?.get("name") ?? "";
 
@@ -51,6 +53,7 @@ export default function PluginDetailPage() {
     queryKey: ["admin", "plugins", name],
     queryFn: () => fetchPluginDetail(name),
     enabled: !!name,
+    retry: false,
   });
 
   const tools = extractTools(detail.data);
@@ -63,107 +66,181 @@ export default function PluginDetailPage() {
 
   if (!name) {
     return (
-      <p className="text-sm text-muted-foreground">
+      <GlassPanel variant="soft" className="p-6 text-[13px] text-tp-ink-2">
         {t("plugins.missingName")}{" "}
-        <Link href="/plugins" className="underline">
+        <Link href="/plugins" className="text-tp-amber underline-offset-2 hover:underline">
           {t("plugins.pluginListLink")}
         </Link>
-      </p>
+      </GlassPanel>
     );
   }
 
+  const summary = detail.data?.summary;
+  const offline = detail.isError;
+  const sandboxConfig = extractSandbox(detail.data);
+  const diagnostics = detail.data?.diagnostics;
+  const manifestMeta = extractManifestMeta(detail.data);
+
   return (
-    <>
-      <motion.header
-        layoutId={reduced ? undefined : `plugin-card-${name}`}
-        className="space-y-1"
-      >
-        <Link
-          href="/plugins"
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="h-3 w-3" />
-          {t("plugins.backToList")}
-        </Link>
-        <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
-      </motion.header>
+    <motion.div
+      className="flex flex-col gap-4"
+      variants={variants.fadeUp}
+      initial="hidden"
+      animate="visible"
+    >
+      <PluginDetailHeader
+        name={name}
+        version={summary?.version}
+        status={summary?.status}
+        description={summary?.description}
+        errorMessage={
+          offline
+            ? `${t("plugins.loadFailed")}: ${(detail.error as Error | undefined)?.message ?? ""}`
+            : summary?.error
+        }
+      />
 
       {detail.isPending ? (
-        <Skeleton className="h-40 w-full" />
-      ) : detail.isError ? (
-        <p className="text-sm text-destructive">
-          {t("plugins.loadFailed")}: {(detail.error as Error).message}
-        </p>
-      ) : detail.data ? (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[320px_1fr]">
-          <Summary detail={detail.data} />
-          <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold">{t("plugins.testInvoke")}</h2>
-              {tools.length > 1 ? (
-                <select
-                  value={selectedTool}
-                  onChange={(e) => setSelectedTool(e.target.value)}
-                  className="h-8 rounded-md border border-input bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                >
-                  {tools.map((t) => (
-                    <option key={t.name} value={t.name}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
-              ) : tools.length === 1 ? (
-                <code className="font-mono text-xs text-muted-foreground">
-                  {tools[0]!.name}
-                </code>
-              ) : null}
-            </div>
-            {tools.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                {t("plugins.noTools")}
-              </p>
-            ) : (
-              <InvokeForm
-                pluginName={name}
-                tool={tools.find((t) => t.name === selectedTool) ?? tools[0]!}
+        <GlassPanel variant="soft" className="h-40 animate-pulse p-6" aria-hidden />
+      ) : offline ? null : detail.data ? (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,360px)_1fr]">
+          {/* LEFT — manifest summary */}
+          <GlassPanel variant="soft" className="flex flex-col gap-3 p-5">
+            <SectionHeading>{t("plugins.tp.detailManifestLabel")}</SectionHeading>
+            <dl className="flex flex-col gap-2 text-[13px]">
+              <Field label={t("plugins.summaryType")} value={summary?.plugin_type} />
+              <Field label={t("plugins.summaryOrigin")} value={summary?.origin} />
+              <Field
+                label={t("plugins.summaryManifest")}
+                value={summary?.manifest_path}
+                mono
               />
-            )}
-          </section>
+              {manifestMeta.entrypoint ? (
+                <Field label="entrypoint" value={manifestMeta.entrypoint} mono />
+              ) : null}
+              {manifestMeta.protocols.length > 0 ? (
+                <Field label="protocols" value={manifestMeta.protocols.join(", ")} mono />
+              ) : null}
+              {manifestMeta.hooks.length > 0 ? (
+                <Field label="hooks" value={manifestMeta.hooks.join(", ")} mono />
+              ) : null}
+              {manifestMeta.skillRefs.length > 0 ? (
+                <Field
+                  label="skill refs"
+                  value={manifestMeta.skillRefs.join(", ")}
+                  mono
+                />
+              ) : null}
+            </dl>
+            {summary && summary.capabilities.length > 0 ? (
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {summary.capabilities.map((c) => (
+                  <span
+                    key={c}
+                    className="rounded-full border border-tp-glass-edge bg-tp-glass-inner px-2 py-[3px] font-mono text-[10.5px] tracking-wide text-tp-ink-3"
+                  >
+                    {c}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </GlassPanel>
+
+          {/* RIGHT — tools · invoke · doctor · sandbox */}
+          <div className="flex flex-col gap-4">
+            <GlassPanel variant="soft" className="flex flex-col gap-3 p-5">
+              <SectionHeading>{t("plugins.tp.detailToolsLabel")}</SectionHeading>
+              {tools.length === 0 ? (
+                <p className="text-[13px] text-tp-ink-3">
+                  {t("plugins.tp.detailToolsEmpty")}
+                </p>
+              ) : (
+                <ul className="flex flex-col divide-y divide-tp-glass-edge">
+                  {tools.map((tool) => (
+                    <li key={tool.name} className="flex flex-col gap-1 py-2 first:pt-0 last:pb-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <code className="font-mono text-[12.5px] text-tp-ink">{tool.name}</code>
+                        {tool.input_schema?.required?.length ? (
+                          <span className="rounded-full border border-tp-glass-edge bg-tp-glass-inner px-1.5 py-0 font-mono text-[9.5px] text-tp-ink-4">
+                            {tool.input_schema.required.length} required
+                          </span>
+                        ) : null}
+                      </div>
+                      {tool.description ? (
+                        <p className="text-[12.5px] leading-[1.5] text-tp-ink-2">
+                          {tool.description}
+                        </p>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </GlassPanel>
+
+            <GlassPanel variant="soft" className="flex flex-col gap-3 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <SectionHeading>{t("plugins.tp.detailInvokeLabel")}</SectionHeading>
+                {tools.length > 1 ? (
+                  <select
+                    value={selectedTool}
+                    onChange={(e) => setSelectedTool(e.target.value)}
+                    className="h-8 rounded-md border border-tp-glass-edge bg-tp-glass-inner px-2 font-mono text-[11px] text-tp-ink-2 outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40"
+                  >
+                    {tools.map((tool) => (
+                      <option key={tool.name} value={tool.name}>
+                        {tool.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : tools.length === 1 ? (
+                  <code className="font-mono text-[11px] text-tp-ink-3">{tools[0]!.name}</code>
+                ) : null}
+              </div>
+              {tools.length === 0 ? (
+                <p className="text-[13px] text-tp-ink-3">{t("plugins.noTools")}</p>
+              ) : (
+                <InvokeForm
+                  pluginName={name}
+                  tool={tools.find((tool) => tool.name === selectedTool) ?? tools[0]!}
+                />
+              )}
+            </GlassPanel>
+
+            <GlassPanel variant="soft" className="flex flex-col gap-3 p-5">
+              <SectionHeading>{t("plugins.tp.detailDoctorLabel")}</SectionHeading>
+              {!diagnostics || (Array.isArray(diagnostics) && diagnostics.length === 0) ? (
+                <p className="text-[13px] text-tp-ink-3">
+                  {t("plugins.tp.detailDoctorEmpty")}
+                </p>
+              ) : (
+                <JsonView value={diagnostics} />
+              )}
+            </GlassPanel>
+
+            <GlassPanel variant="soft" className="flex flex-col gap-3 p-5">
+              <SectionHeading>{t("plugins.tp.detailSandboxLabel")}</SectionHeading>
+              {sandboxConfig ? (
+                <JsonView value={sandboxConfig} />
+              ) : (
+                <p className="text-[13px] text-tp-ink-3">
+                  {t("plugins.tp.detailSandboxEmpty")}
+                </p>
+              )}
+            </GlassPanel>
+          </div>
         </div>
       ) : null}
-    </>
+    </motion.div>
   );
 }
 
-function Summary({ detail }: { detail: PluginDetail }) {
-  const { t } = useTranslation();
+// ─── Sub-components ────────────────────────────────────────────────────
+
+function SectionHeading({ children }: { children: React.ReactNode }) {
   return (
-    <section className="space-y-3 rounded-lg border border-border bg-panel p-4 text-sm">
-      <div className="space-y-2">
-        <Field label={t("plugins.summaryVersion")} value={detail.summary.version} mono />
-        <Field label={t("plugins.summaryType")} value={detail.summary.plugin_type} />
-        <Field label={t("plugins.summaryOrigin")} value={detail.summary.origin} />
-        <Field
-          label={t("plugins.summaryTools")}
-          value={String(detail.summary.capabilities.length)}
-        />
-        <Field label={t("plugins.summaryManifest")} value={detail.summary.manifest_path} mono />
-      </div>
-      {detail.summary.description ? (
-        <p className="text-xs text-muted-foreground">
-          {detail.summary.description}
-        </p>
-      ) : null}
-      {detail.summary.capabilities.length > 0 ? (
-        <div className="flex flex-wrap gap-1">
-          {detail.summary.capabilities.map((c) => (
-            <Badge key={c} variant="outline" className="font-mono text-[10px]">
-              {c}
-            </Badge>
-          ))}
-        </div>
-      ) : null}
-    </section>
+    <h2 className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-tp-ink-4">
+      {children}
+    </h2>
   );
 }
 
@@ -173,32 +250,25 @@ function Field({
   mono,
 }: {
   label: string;
-  value: string;
+  value: string | undefined;
   mono?: boolean;
 }) {
+  if (!value) return null;
   return (
     <div className="flex items-start justify-between gap-3">
-      <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+      <dt className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-4">
         {label}
-      </span>
-      <span
+      </dt>
+      <dd
         className={cn(
-          "text-right",
-          mono ? "break-all font-mono text-xs" : "text-xs",
+          "min-w-0 flex-1 break-all text-right",
+          mono ? "font-mono text-[11.5px] text-tp-ink-2" : "text-[12.5px] text-tp-ink",
         )}
       >
         {value}
-      </span>
+      </dd>
     </div>
   );
-}
-
-function extractTools(detail: PluginDetail | undefined): ToolManifest[] {
-  if (!detail) return [];
-  const manifest = detail.manifest as {
-    capabilities?: { tools?: ToolManifest[] };
-  };
-  return manifest?.capabilities?.tools ?? [];
 }
 
 function InvokeForm({
@@ -218,15 +288,12 @@ function InvokeForm({
     Object.keys(props).length > 0 &&
     simpleFields.length < Object.keys(props).length;
 
-  const [simpleValues, setSimpleValues] = React.useState<
-    Record<string, unknown>
-  >({});
+  const [simpleValues, setSimpleValues] = React.useState<Record<string, unknown>>({});
   const [rawJson, setRawJson] = React.useState<string>("{}");
   const [useRaw, setUseRaw] = React.useState<boolean>(
     simpleFields.length === 0 || hasRichFields,
   );
-  const [lastResponse, setLastResponse] =
-    React.useState<PluginInvokeResponse | null>(null);
+  const [lastResponse, setLastResponse] = React.useState<PluginInvokeResponse | null>(null);
 
   React.useEffect(() => {
     setSimpleValues({});
@@ -260,23 +327,23 @@ function InvokeForm({
 
   return (
     <form
-      className="space-y-3"
+      className="flex flex-col gap-3"
       onSubmit={handleSubmit}
       data-testid="plugin-invoke-form"
     >
       {tool.description ? (
-        <p className="text-xs text-muted-foreground">{tool.description}</p>
+        <p className="text-[12.5px] text-tp-ink-2">{tool.description}</p>
       ) : null}
 
       {!useRaw && simpleFields.length > 0 ? (
         <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
           {simpleFields.map(([key, fieldSchema]) => (
             <label key={key} className="flex flex-col gap-1 text-sm">
-              <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+              <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-tp-ink-4">
                 {key}
                 {(schema.required ?? []).includes(key) ? " *" : ""}
                 {fieldSchema.description ? (
-                  <span className="ml-2 normal-case tracking-normal text-[10px]">
+                  <span className="ml-2 normal-case tracking-normal">
                     — {fieldSchema.description}
                   </span>
                 ) : null}
@@ -284,49 +351,51 @@ function InvokeForm({
               <SimpleFieldInput
                 schema={fieldSchema}
                 value={simpleValues[key]}
-                onChange={(v) =>
-                  setSimpleValues({ ...simpleValues, [key]: v })
-                }
+                onChange={(v) => setSimpleValues({ ...simpleValues, [key]: v })}
               />
             </label>
           ))}
         </div>
       ) : (
         <label className="flex flex-col gap-1 text-sm">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-tp-ink-4">
             {t("plugins.argumentsJson")}
           </span>
           <textarea
             value={rawJson}
             onChange={(e) => setRawJson(e.target.value)}
             rows={6}
-            className="rounded-md border border-input bg-background p-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="rounded-lg border border-tp-glass-edge bg-tp-glass-inner p-2 font-mono text-[11.5px] text-tp-ink-2 outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40"
           />
         </label>
       )}
 
       {simpleFields.length > 0 && !hasRichFields ? (
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+        <label className="inline-flex items-center gap-2 text-[11.5px] text-tp-ink-3">
           <input
             type="checkbox"
             checked={useRaw}
             onChange={(e) => setUseRaw(e.target.checked)}
+            className="h-3 w-3"
           />
           {t("plugins.editRawJson")}
         </label>
       ) : null}
 
-      <Button
-        type="submit"
-        size="sm"
-        disabled={invoke.isPending}
-        data-testid="plugin-invoke-submit"
-      >
-        {invoke.isPending ? t("plugins.invoking") : t("plugins.invoke")}
-      </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="submit"
+          disabled={invoke.isPending}
+          data-testid="plugin-invoke-submit"
+          className="inline-flex items-center gap-2 rounded-lg border border-tp-amber/35 bg-tp-amber-soft px-3 py-2 text-[13px] font-medium text-tp-amber transition-colors hover:bg-[color-mix(in_oklch,var(--tp-amber)_22%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/50 disabled:cursor-not-allowed disabled:opacity-70"
+        >
+          {invoke.isPending ? t("plugins.invoking") : t("plugins.invoke")}
+        </button>
+        <span className="text-[11.5px] text-tp-ink-4">{t("plugins.tp.detailInvokeHint")}</span>
+      </div>
 
       {invoke.isError ? (
-        <p className="text-sm text-destructive">
+        <p className="rounded-lg border border-tp-err/30 bg-tp-err-soft px-3 py-2 font-mono text-[11.5px] text-tp-err">
           {(invoke.error as Error).message}
         </p>
       ) : null}
@@ -351,7 +420,7 @@ function SimpleFieldInput({
       <select
         value={String(value ?? "")}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 rounded-md border border-input bg-transparent px-2 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="h-9 rounded-lg border border-tp-glass-edge bg-tp-glass-inner px-2 text-[13px] text-tp-ink outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40"
       >
         <option value="">(select)</option>
         {schema.enum.map((e) => (
@@ -379,7 +448,7 @@ function SimpleFieldInput({
         onChange={(e) =>
           onChange(e.target.value === "" ? undefined : Number(e.target.value))
         }
-        className="h-9 rounded-md border border-input bg-transparent px-2 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="h-9 rounded-lg border border-tp-glass-edge bg-tp-glass-inner px-2 text-[13px] text-tp-ink outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40"
       />
     );
   }
@@ -388,43 +457,105 @@ function SimpleFieldInput({
       type="text"
       value={typeof value === "string" ? value : ""}
       onChange={(e) => onChange(e.target.value)}
-      className="h-9 rounded-md border border-input bg-transparent px-2 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      className="h-9 rounded-lg border border-tp-glass-edge bg-tp-glass-inner px-2 text-[13px] text-tp-ink outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40"
     />
   );
 }
 
 function ResponseBlock({ response }: { response: PluginInvokeResponse }) {
+  const tone =
+    response.status === "success"
+      ? { ring: "border-tp-ok/30 bg-tp-ok-soft", text: "text-tp-ok" }
+      : response.status === "accepted"
+        ? { ring: "border-tp-glass-edge bg-tp-glass-inner", text: "text-tp-ink-2" }
+        : { ring: "border-tp-err/30 bg-tp-err-soft", text: "text-tp-err" };
   return (
-    <div className="rounded-md border border-border bg-surface p-3 text-xs">
-      <div className="flex items-center gap-2">
-        {response.status === "success" ? (
-          <Badge className="border-transparent bg-ok/15 text-ok">success</Badge>
-        ) : response.status === "accepted" ? (
-          <Badge variant="outline">accepted</Badge>
-        ) : (
-          <Badge variant="destructive">error</Badge>
-        )}
-        <span className="font-mono text-muted-foreground">
+    <div className="flex flex-col gap-2 rounded-lg border border-tp-glass-edge bg-tp-glass-inner p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className={cn(
+            "rounded-full border px-2 py-[2px] font-mono text-[10.5px] tracking-wide",
+            tone.ring,
+            tone.text,
+          )}
+        >
+          {response.status}
+        </span>
+        <span className="font-mono text-[11px] text-tp-ink-3">
           {response.duration_ms} ms
         </span>
         {response.task_id ? (
-          <code className="font-mono text-muted-foreground">
+          <code className="font-mono text-[11px] text-tp-ink-4">
             task_id: {response.task_id}
           </code>
         ) : null}
       </div>
       {response.message ? (
-        <p className="mt-2 text-destructive">{response.message}</p>
+        <p className="font-mono text-[11.5px] text-tp-err">{response.message}</p>
       ) : null}
       {response.result !== undefined && response.result !== null ? (
-        <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap font-mono">
-          {JSON.stringify(response.result, null, 2)}
-        </pre>
+        <JsonView value={response.result} className="max-h-64 overflow-auto" />
       ) : response.result_raw ? (
-        <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap font-mono">
-          {response.result_raw}
-        </pre>
+        <JsonView raw={response.result_raw} className="max-h-64 overflow-auto" />
       ) : null}
     </div>
   );
+}
+
+// ─── Manifest helpers ──────────────────────────────────────────────────
+
+function extractTools(detail: PluginDetail | undefined): ToolManifest[] {
+  if (!detail) return [];
+  const manifest = detail.manifest as {
+    capabilities?: { tools?: ToolManifest[] };
+  };
+  return manifest?.capabilities?.tools ?? [];
+}
+
+function extractSandbox(detail: PluginDetail | undefined): unknown {
+  if (!detail) return undefined;
+  const manifest = detail.manifest as {
+    sandbox?: unknown;
+    runtime?: { sandbox?: unknown };
+  };
+  return manifest?.sandbox ?? manifest?.runtime?.sandbox ?? undefined;
+}
+
+interface ManifestMeta {
+  entrypoint: string | undefined;
+  protocols: string[];
+  hooks: string[];
+  skillRefs: string[];
+}
+
+function extractManifestMeta(detail: PluginDetail | undefined): ManifestMeta {
+  const empty: ManifestMeta = {
+    entrypoint: undefined,
+    protocols: [],
+    hooks: [],
+    skillRefs: [],
+  };
+  if (!detail) return empty;
+  const m = detail.manifest as {
+    entrypoint?: string;
+    runtime?: { entrypoint?: string; protocol?: string | string[] };
+    protocol?: string | string[];
+    protocols?: string[];
+    hooks?: string[] | Record<string, unknown>;
+    capabilities?: { hooks?: string[] | Record<string, unknown> };
+    skill_refs?: string[];
+    skills?: string[];
+  };
+  const asArray = (v: unknown): string[] => {
+    if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string");
+    if (typeof v === "string") return [v];
+    if (v && typeof v === "object") return Object.keys(v as Record<string, unknown>);
+    return [];
+  };
+  return {
+    entrypoint: m.entrypoint ?? m.runtime?.entrypoint,
+    protocols: asArray(m.protocols ?? m.protocol ?? m.runtime?.protocol),
+    hooks: asArray(m.hooks ?? m.capabilities?.hooks),
+    skillRefs: asArray(m.skill_refs ?? m.skills),
+  };
 }
