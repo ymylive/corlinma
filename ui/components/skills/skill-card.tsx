@@ -1,7 +1,6 @@
 "use client";
 
 import * as React from "react";
-import { motion } from "framer-motion";
 import {
   Database,
   Globe,
@@ -12,61 +11,49 @@ import {
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { TiltCard } from "@/components/ui/tilt-card";
-import { useMotionVariants } from "@/lib/motion";
+import { GlassPanel } from "@/components/ui/glass-panel";
+import { useMotion } from "@/components/ui/motion-safe";
 import type { Skill } from "@/lib/mocks/skills";
 
-// ---------- categorization --------------------------------------------------
+/**
+ * `<SkillCard>` — Tidepool skill grid cell.
+ *
+ * A `GlassPanel variant="soft"` styled as a button. Click anywhere (or Enter /
+ * Space) to open the detail drawer. Under pointer hover, the card lifts 2px
+ * and escalates to `shadow-tp-primary`. Under `prefers-reduced-motion: reduce`
+ * the translate is suppressed.
+ *
+ * Layout (three rows + optional pill):
+ *   row 1 — emoji (amber-soft circle) + skill name (h3, medium)
+ *   row 2 — description, `line-clamp-2`
+ *   row 3 — up to 3 tool chips (mono) + `+N more` overflow
+ *   footer — `requires X` pill in amber-soft if the skill declares `install`
+ *
+ * The card preserves the public API of the pre-cutover version:
+ *   - `categorize()` and `CATEGORY_META` still exported for any callers that
+ *     classify skills outside the card (legacy filters, telemetry, etc.).
+ *   - `role="button"`, `aria-label="Open {name} skill details"`, `data-testid`,
+ *     and the `data-category` attribute are stable so the existing test suite
+ *     continues to pass.
+ */
+
+// ---------- categorization (unchanged public API) --------------------------
 
 export type SkillCategory = "dev-tools" | "integrations" | "search" | "memory" | "other";
 
 interface CategoryMeta {
   id: SkillCategory;
   label: string;
-  /** Tailwind class for the 4px left rail. */
-  railClass: string;
-  /** Tailwind class for the emoji badge tint. */
-  badgeClass: string;
-  /** Lucide icon used as fallback + colour-blind safe cue. */
+  /** Lucide icon used as fallback glyph when the skill carries no emoji. */
   icon: LucideIcon;
 }
 
 export const CATEGORY_META: Record<SkillCategory, CategoryMeta> = {
-  "dev-tools": {
-    id: "dev-tools",
-    label: "Dev tools",
-    railClass: "bg-accent-2",
-    badgeClass: "bg-accent-2/15 text-accent-2",
-    icon: Wrench,
-  },
-  integrations: {
-    id: "integrations",
-    label: "Integrations",
-    railClass: "bg-accent-3",
-    badgeClass: "bg-accent-3/15 text-accent-3",
-    icon: Plug,
-  },
-  search: {
-    id: "search",
-    label: "Search",
-    railClass: "bg-ok",
-    badgeClass: "bg-ok/15 text-ok",
-    icon: Search,
-  },
-  memory: {
-    id: "memory",
-    label: "Memory",
-    railClass: "bg-primary",
-    badgeClass: "bg-primary/15 text-primary",
-    icon: Database,
-  },
-  other: {
-    id: "other",
-    label: "Other",
-    railClass: "bg-muted-foreground/50",
-    badgeClass: "bg-muted text-muted-foreground",
-    icon: Globe,
-  },
+  "dev-tools": { id: "dev-tools", label: "Dev tools", icon: Wrench },
+  integrations: { id: "integrations", label: "Integrations", icon: Plug },
+  search: { id: "search", label: "Search", icon: Search },
+  memory: { id: "memory", label: "Memory", icon: Database },
+  other: { id: "other", label: "Other", icon: Globe },
 };
 
 const DEV_TOOL_PREFIXES = ["file_ops", "canvas", "coding_agent", "browser"];
@@ -106,13 +93,24 @@ export function categorize(skillName: string, tools: string[]): SkillCategory {
 
 export interface SkillCardProps {
   skill: Skill;
-  /** Extra Tailwind classes — typically `col-span-*` / `row-span-*` for bento. */
+  /** Extra classes — typically not needed since the grid owns layout. */
   className?: string;
   onOpen: (skill: Skill) => void;
+  /**
+   * Truncated "requires" target (e.g. the first package / `install` line) to
+   * render as a pill. The parent page supplies this so the card stays
+   * presentation-only.
+   */
+  requiresLabel?: string;
 }
 
-export function SkillCard({ skill, className, onOpen }: SkillCardProps) {
-  const { listItem } = useMotionVariants();
+export function SkillCard({
+  skill,
+  className,
+  onOpen,
+  requiresLabel,
+}: SkillCardProps) {
+  const { reduced } = useMotion();
   const category = React.useMemo(
     () => categorize(skill.name, skill.allowed_tools),
     [skill.name, skill.allowed_tools],
@@ -131,89 +129,102 @@ export function SkillCard({ skill, className, onOpen }: SkillCardProps) {
   };
 
   return (
-    <motion.div
-      variants={listItem}
-      className={cn("h-full min-h-[148px]", className)}
+    <div
+      className={cn(
+        "group block focus-visible:outline-none",
+        !reduced &&
+          "transition-transform duration-200 ease-tp-ease-out hover:-translate-y-0.5",
+        className,
+      )}
       data-testid={`skill-card-${skill.name}`}
       data-category={category}
     >
-      <TiltCard
-        maxTiltDeg={3}
+      <GlassPanel
+        variant="soft"
         role="button"
         tabIndex={0}
         aria-label={`Open ${skill.name} skill details`}
         onClick={() => onOpen(skill)}
         onKeyDown={handleKeyDown}
         className={cn(
-          "group relative flex h-full cursor-pointer flex-col overflow-hidden rounded-lg border border-border bg-panel shadow-1 transition-shadow duration-200",
-          "hover:shadow-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+          "flex h-full cursor-pointer flex-col gap-3 p-4",
+          "transition-[box-shadow,border-color] duration-200 ease-tp-ease-out",
+          "group-hover:shadow-tp-primary",
+          "focus-visible:shadow-tp-primary focus-visible:ring-2 focus-visible:ring-tp-amber/50",
         )}
       >
-        {/* category left-rail (4px) */}
-        <span
-          aria-hidden="true"
-          className={cn(
-            "absolute left-0 top-0 h-full w-[4px]",
-            meta.railClass,
-          )}
-        />
-
-        <div className="flex flex-1 flex-col gap-3 p-4 pl-5">
-          <div className="flex items-start justify-between gap-2">
-            <div
-              className={cn(
-                "flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-lg",
-                meta.badgeClass,
-              )}
-              aria-hidden="true"
-            >
-              {skill.emoji ? (
-                <span>{skill.emoji}</span>
-              ) : (
-                <CategoryIcon className="h-4 w-4" />
-              )}
-            </div>
-            <span
-              className={cn(
-                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium",
-                meta.badgeClass,
-              )}
-            >
-              <CategoryIcon className="h-3 w-3" aria-hidden="true" />
-              {meta.label}
-            </span>
+        {/* Row 1 — emoji/glyph badge + name + version-ish meta line */}
+        <div className="flex items-start gap-2.5">
+          <div
+            aria-hidden
+            className={cn(
+              "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
+              "border border-tp-amber/25 bg-tp-amber-soft text-[17px] leading-none",
+            )}
+          >
+            {skill.emoji ? (
+              // Subtle tint so the legacy emoji reads as accent, not as a
+              // dominant visual element.
+              <span className="opacity-85">{skill.emoji}</span>
+            ) : (
+              <CategoryIcon className="h-4 w-4 text-tp-amber" />
+            )}
           </div>
-
-          <div className="min-w-0 space-y-1">
-            <h3 className="truncate text-sm font-semibold text-foreground">
+          <div className="min-w-0 flex-1">
+            <h3 className="truncate text-[15px] font-medium leading-tight text-tp-ink">
               {skill.name}
             </h3>
-            <p className="line-clamp-2 text-xs text-muted-foreground">
-              {skill.description}
-            </p>
-          </div>
-
-          <div className="mt-auto flex flex-wrap gap-1.5 pt-2">
-            {visibleTools.map((tool) => (
-              <span
-                key={tool}
-                className="inline-flex items-center rounded-md bg-state-hover px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
-              >
-                {tool}
-              </span>
-            ))}
-            {overflowCount > 0 ? (
-              <span
-                className="inline-flex items-center rounded-md bg-state-hover px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
-                aria-label={`${overflowCount} more tools`}
-              >
-                +{overflowCount} more
-              </span>
-            ) : null}
+            <div className="mt-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.08em] text-tp-ink-4">
+              <CategoryIcon className="h-3 w-3" aria-hidden />
+              <span>{meta.label}</span>
+            </div>
           </div>
         </div>
-      </TiltCard>
-    </motion.div>
+
+        {/* Row 2 — description, clamped */}
+        <p className="line-clamp-2 text-[12.5px] leading-[1.5] text-tp-ink-2">
+          {skill.description}
+        </p>
+
+        {/* Row 3 — tool chips */}
+        <div className="mt-auto flex flex-wrap items-center gap-1.5 pt-1">
+          {visibleTools.map((tool) => (
+            <span
+              key={tool}
+              className="inline-flex items-center rounded-md border border-tp-glass-edge bg-tp-glass-inner px-1.5 py-0.5 font-mono text-[10.5px] text-tp-ink-3"
+            >
+              {tool}
+            </span>
+          ))}
+          {overflowCount > 0 ? (
+            <span
+              className="inline-flex items-center rounded-md border border-tp-glass-edge bg-tp-glass-inner px-1.5 py-0.5 font-mono text-[10.5px] text-tp-ink-4"
+              aria-label={`${overflowCount} more tools`}
+            >
+              +{overflowCount} more
+            </span>
+          ) : null}
+          {visibleTools.length === 0 && overflowCount === 0 ? (
+            <span className="font-mono text-[10.5px] text-tp-ink-4">
+              no allowed-tools
+            </span>
+          ) : null}
+        </div>
+
+        {/* Optional "requires install" pill */}
+        {requiresLabel ? (
+          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full border border-tp-amber/30 bg-tp-amber-soft px-2 py-[2px] font-mono text-[10.5px] text-tp-amber"
+              title={requiresLabel}
+            >
+              <span aria-hidden className="h-[5px] w-[5px] rounded-full bg-tp-amber" />
+              <span className="max-w-[220px] truncate">requires {requiresLabel}</span>
+            </span>
+          </div>
+        ) : null}
+      </GlassPanel>
+    </div>
   );
 }
 

@@ -2,201 +2,250 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import { Search, Wrench, X } from "lucide-react";
+import { Search } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
 import { useMotionVariants } from "@/lib/motion";
+import { GlassPanel } from "@/components/ui/glass-panel";
+import { StatChip } from "@/components/ui/stat-chip";
+import {
+  FilterChipGroup,
+  type FilterChipOption,
+} from "@/components/ui/filter-chip-group";
 import { MOCK_SKILLS, type Skill } from "@/lib/mocks/skills";
 import { SkillCard } from "@/components/skills/skill-card";
 import { SkillDrawer } from "@/components/skills/skill-drawer";
+import { SkillsHeader } from "@/components/skills/skills-header";
 
 /**
- * Skills Gallery (B2-FE3).
+ * Skills admin page — Tidepool cutover.
  *
- * Bento-style grid of installed agent skills. Data is currently served from a
- * static mock module; real fetch wires in once B2-BE5 lands.
+ * Layout mirrors the Plugins / Approvals rhythm:
+ *   ┌─────────── glass-strong hero ──────────────┐
+ *   │ lead pill · title · prose · ⌘K CTA         │
+ *   └────────────────────────────────────────────┘
+ *   [ StatChip × 4 — total · ready · requires · with-tools ]
+ *   [ SearchInput ]  [ FilterChipGroup — all|ready|requires|tagged ]
+ *   ┌─ card grid — minmax(280px,1fr) ────────────┐
+ *   │ <SkillCard> × N (GlassPanel soft)          │
+ *   └────────────────────────────────────────────┘
+ *   <SkillDrawer> opens on card click (modal, right-anchored)
+ *
+ * The gateway endpoint (/admin/skills) isn't wired yet — today we serve from
+ * a static mock module. The query still uses `retry: false` so the offline
+ * branch paints immediately when the real endpoint lands but is missing.
  */
 
-// TODO(B2-BE5): replace with real /admin/skills fetch.
+const SPARK_TOTAL =
+  "M0 28 L30 24 L60 26 L90 20 L120 22 L150 16 L180 18 L210 12 L240 14 L270 8 L300 10 L300 36 L0 36 Z";
+const SPARK_READY =
+  "M0 22 L30 22 L60 20 L90 22 L120 18 L150 20 L180 18 L210 20 L240 16 L270 18 L300 16 L300 36 L0 36 Z";
+const SPARK_REQUIRES =
+  "M0 10 L30 14 L60 16 L90 20 L120 22 L150 24 L180 26 L210 28 L240 30 L270 30 L300 32 L300 36 L0 36 Z";
+const SPARK_TOOLS =
+  "M0 28 L30 26 L60 24 L90 22 L120 20 L150 16 L180 14 L210 10 L240 8 L270 6 L300 4 L300 36 L0 36 Z";
+
+type FilterValue = "all" | "ready" | "requires" | "tagged";
+
 async function fetchSkills(): Promise<Skill[]> {
+  // TODO(B2-BE5): replace with `apiFetch<Skill[]>("/admin/skills")`.
   return MOCK_SKILLS;
 }
 
 /**
- * Size variants applied to each card to create the bento rhythm. The pattern
- * loops every 7 cards: {big, small, tall, small, small, wide, small}. Indices
- * that produce `col-span-2` / `row-span-2` only activate at `sm+` / `md+`
- * breakpoints so the mobile layout stays a predictable 1-col stream.
+ * Clip an install blurb down to a one-line pill label. We take the first
+ * non-empty word the reader actually cares about — typically an env var
+ * (`SERPER_API_KEY`) or a CLI (`playwright install`). Falls back to "install".
  */
-const BENTO_VARIANTS = [
-  "sm:col-span-2 lg:col-span-2", // 0: wide
-  "",                              // 1: standard
-  "lg:row-span-2",                 // 2: tall
-  "",                              // 2
-  "",                              // 4
-  "sm:col-span-2",                 // 5: wide on tablet
-  "",                              // 6
-];
-
-function bentoClass(index: number): string {
-  return BENTO_VARIANTS[index % BENTO_VARIANTS.length] ?? "";
+function requiresLabelFor(skill: Skill): string | undefined {
+  const install = skill.install.trim();
+  if (install.length === 0) return undefined;
+  const firstLine = install.split(/\r?\n/)[0]?.trim() ?? "";
+  const match = firstLine.match(/`([^`]+)`/);
+  if (match && match[1]) return match[1];
+  // Otherwise take the first couple of words so the pill stays compact.
+  const words = firstLine.split(/\s+/).slice(0, 3).join(" ");
+  return words.length > 0 ? words : "install";
 }
 
 export default function SkillsPage() {
-  const { stagger } = useMotionVariants();
+  const { t } = useTranslation();
+  const variants = useMotionVariants();
   const [search, setSearch] = React.useState("");
-  const [activeTool, setActiveTool] = React.useState<string | null>(null);
+  const [filter, setFilter] = React.useState<FilterValue>("all");
   const [drawerSkill, setDrawerSkill] = React.useState<Skill | null>(null);
 
   const query = useQuery<Skill[]>({
-    queryKey: ["skills"],
+    queryKey: ["admin", "skills"],
     queryFn: fetchSkills,
+    retry: false,
   });
 
-  const skills = React.useMemo(() => query.data ?? [], [query.data]);
+  const skills = query.data ?? [];
+  // The mock never errors. Treat the query as "offline" only once the real
+  // backend is wired and it raises an error — i.e. `isError`.
+  const offline = query.isError;
 
-  // Compute distinct tool list for the filter-pill row.
-  const toolUniverse = React.useMemo(() => {
-    const seen = new Set<string>();
+  const counts = React.useMemo(() => {
+    const c = { total: skills.length, ready: 0, requires: 0, withTools: 0 };
     for (const s of skills) {
-      for (const t of s.allowed_tools) seen.add(t);
+      const hasInstall = s.install.trim().length > 0;
+      if (hasInstall) c.requires += 1;
+      else c.ready += 1;
+      if (s.allowed_tools.length > 0) c.withTools += 1;
     }
-    return Array.from(seen).sort();
+    return c;
   }, [skills]);
 
   const filtered = React.useMemo(() => {
     const q = search.trim().toLowerCase();
     return skills.filter((s) => {
-      if (activeTool && !s.allowed_tools.includes(activeTool)) return false;
+      const hasInstall = s.install.trim().length > 0;
+      if (filter === "ready" && hasInstall) return false;
+      if (filter === "requires" && !hasInstall) return false;
+      if (filter === "tagged" && s.allowed_tools.length === 0) return false;
       if (!q) return true;
       return (
         s.name.toLowerCase().includes(q) ||
         s.description.toLowerCase().includes(q) ||
-        s.allowed_tools.some((t) => t.toLowerCase().includes(q))
+        s.allowed_tools.some((tt) => tt.toLowerCase().includes(q))
       );
     });
-  }, [skills, search, activeTool]);
+  }, [skills, search, filter]);
 
-  const openSkill = React.useCallback((skill: Skill) => {
+  const filterOptions: FilterChipOption[] = [
+    { value: "all", label: t("skills.tp.filterAll"), count: counts.total },
+    {
+      value: "ready",
+      label: t("skills.tp.filterReady"),
+      count: counts.ready,
+      tone: "ok",
+    },
+    {
+      value: "requires",
+      label: t("skills.tp.filterRequires"),
+      count: counts.requires,
+      tone: "warn",
+    },
+    {
+      value: "tagged",
+      label: t("skills.tp.filterTagged"),
+      count: counts.withTools,
+      tone: "info",
+    },
+  ];
+
+  const handleOpen = React.useCallback((skill: Skill) => {
     setDrawerSkill(skill);
   }, []);
 
   return (
-    <>
-      <header className="flex flex-col gap-3">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">Skills</h1>
-          <p className="text-sm text-muted-foreground">
-            Installed agent skills discovered under <code className="font-mono text-xs">skills/</code>.
-            Click a card for install + tool details.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative">
-            <Search
-              className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
-              aria-hidden="true"
-            />
-            <Input
-              placeholder="Filter skills by name, description or tool..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              aria-label="Search skills"
-              className="h-9 w-full pl-8 text-xs sm:w-80"
-            />
-          </div>
-          {activeTool ? (
-            <button
-              type="button"
-              onClick={() => setActiveTool(null)}
-              className="inline-flex h-7 items-center gap-1 rounded-full bg-primary/15 px-2 font-mono text-[10px] text-primary transition-colors hover:bg-primary/25"
-              aria-label={`Clear filter ${activeTool}`}
-            >
-              {activeTool}
-              <X className="h-3 w-3" aria-hidden="true" />
-            </button>
-          ) : null}
-        </div>
+    <motion.div
+      className="flex flex-col gap-4"
+      variants={variants.fadeUp}
+      initial="hidden"
+      animate="visible"
+    >
+      <SkillsHeader counts={offline ? undefined : counts} offline={offline} />
 
-        {toolUniverse.length > 0 ? (
-          <div
-            className="flex flex-wrap items-center gap-1.5"
-            role="group"
-            aria-label="Filter by tool"
-          >
-            {toolUniverse.slice(0, 16).map((tool) => {
-              const active = tool === activeTool;
-              return (
-                <button
-                  key={tool}
-                  type="button"
-                  onClick={() => setActiveTool(active ? null : tool)}
-                  aria-pressed={active}
-                  className={cn(
-                    "inline-flex items-center rounded-full px-2 py-0.5 font-mono text-[10px] transition-colors",
-                    active
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-state-hover text-muted-foreground hover:bg-state-press hover:text-foreground",
-                  )}
-                >
-                  {tool}
-                </button>
-              );
-            })}
-            {toolUniverse.length > 16 ? (
-              <span className="font-mono text-[10px] text-muted-foreground">
-                +{toolUniverse.length - 16} more
-              </span>
-            ) : null}
-          </div>
-        ) : null}
-      </header>
+      {/* Stat chips row */}
+      <motion.section
+        className="grid grid-cols-1 gap-3.5 md:grid-cols-2 xl:grid-cols-4"
+        variants={variants.stagger}
+        initial="hidden"
+        animate="visible"
+      >
+        <StatChip
+          variant="primary"
+          live={!offline}
+          label={t("skills.tp.statTotal")}
+          value={offline ? "—" : counts.total}
+          foot={offline ? t("skills.tp.offlineTitle") : t("skills.tp.statFootTotal")}
+          sparkPath={SPARK_TOTAL}
+          sparkTone="amber"
+        />
+        <StatChip
+          label={t("skills.tp.statReady")}
+          value={offline ? "—" : counts.ready}
+          delta={
+            !offline && counts.total > 0
+              ? {
+                  label: `${counts.ready} / ${counts.total}`,
+                  tone: counts.requires === 0 ? "up" : "flat",
+                }
+              : undefined
+          }
+          foot={offline ? t("skills.tp.offlineTitle") : t("skills.tp.statFootReady")}
+          sparkPath={SPARK_READY}
+          sparkTone="ember"
+        />
+        <StatChip
+          label={t("skills.tp.statRequires")}
+          value={offline ? "—" : counts.requires}
+          foot={offline ? t("skills.tp.offlineTitle") : t("skills.tp.statFootRequires")}
+          sparkPath={SPARK_REQUIRES}
+          sparkTone="ember"
+        />
+        <StatChip
+          label={t("skills.tp.statWithTools")}
+          value={offline ? "—" : counts.withTools}
+          foot={offline ? t("skills.tp.offlineTitle") : t("skills.tp.statFootWithTools")}
+          sparkPath={SPARK_TOOLS}
+          sparkTone="peach"
+        />
+      </motion.section>
 
+      {/* Search + filter chips */}
+      <section className="flex flex-wrap items-center justify-between gap-3">
+        <label className="relative flex min-w-[220px] flex-1 items-center sm:max-w-[360px]">
+          <Search
+            className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-tp-ink-4"
+            aria-hidden
+          />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={t("skills.tp.searchPlaceholder")}
+            aria-label={t("skills.tp.searchPlaceholder")}
+            className="h-9 w-full rounded-lg border border-tp-glass-edge bg-tp-glass-inner pl-8 pr-3 text-[13px] text-tp-ink placeholder:text-tp-ink-4 transition-colors hover:bg-tp-glass-inner-hover focus:outline-none focus:ring-2 focus:ring-tp-amber/40"
+          />
+        </label>
+        <FilterChipGroup
+          options={filterOptions}
+          value={filter}
+          onChange={(next) => setFilter(next as FilterValue)}
+          label={t("skills.tp.filterLabel")}
+        />
+      </section>
+
+      {/* Card grid / offline / empty */}
       {query.isPending ? (
-        <div className="grid auto-rows-[148px] grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <Skeleton key={i} className={cn("h-full w-full", bentoClass(i))} />
-          ))}
-        </div>
-      ) : query.isError ? (
-        <EmptyState
-          icon={<Wrench />}
-          title="Could not load skills"
-          description={(query.error as Error)?.message ?? "Unknown error."}
-        />
+        <CardGridSkeleton />
+      ) : offline ? (
+        <OfflineBlock message={(query.error as Error | undefined)?.message} />
       ) : filtered.length === 0 ? (
-        <EmptyState
-          icon={<Wrench />}
-          title={
-            search || activeTool ? "No skills match" : "No skills installed"
-          }
-          description={
-            search || activeTool
-              ? "Try clearing the search or tool filter."
-              : "Add a skill under skills/ in your config dir."
-          }
-        />
+        <EmptyBlock hasAnySkills={skills.length > 0} />
       ) : (
-        <motion.div
-          initial="hidden"
-          animate="visible"
-          variants={stagger}
-          className="grid auto-rows-[minmax(148px,1fr)] grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4"
+        <section
+          aria-label={t("nav.skills")}
+          className={cn(
+            "grid gap-3",
+            "grid-cols-[repeat(auto-fill,minmax(280px,1fr))]",
+          )}
           data-testid="skills-grid"
         >
-          {filtered.map((skill, i) => (
+          {filtered.map((skill) => (
             <SkillCard
               key={skill.name}
               skill={skill}
-              className={bentoClass(i)}
-              onOpen={openSkill}
+              onOpen={handleOpen}
+              requiresLabel={requiresLabelFor(skill)}
             />
           ))}
-        </motion.div>
+        </section>
       )}
 
       <SkillDrawer
@@ -206,6 +255,86 @@ export default function SkillsPage() {
           if (!next) setDrawerSkill(null);
         }}
       />
-    </>
+    </motion.div>
+  );
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────
+
+function CardGridSkeleton() {
+  return (
+    <section
+      aria-hidden
+      className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]"
+    >
+      {Array.from({ length: 6 }).map((_, i) => (
+        <GlassPanel
+          key={i}
+          variant="soft"
+          className="flex h-[148px] flex-col gap-3 p-4"
+        >
+          <div className="flex items-center gap-2.5">
+            <div className="h-9 w-9 rounded-full bg-tp-glass-inner-strong" />
+            <div className="flex-1 space-y-1.5">
+              <div className="h-3.5 w-2/3 rounded bg-tp-glass-inner-strong" />
+              <div className="h-2.5 w-1/3 rounded bg-tp-glass-inner" />
+            </div>
+          </div>
+          <div className="h-3 w-5/6 rounded bg-tp-glass-inner" />
+          <div className="mt-auto flex gap-1.5">
+            <div className="h-4 w-16 rounded bg-tp-glass-inner" />
+            <div className="h-4 w-20 rounded bg-tp-glass-inner" />
+            <div className="h-4 w-12 rounded bg-tp-glass-inner" />
+          </div>
+        </GlassPanel>
+      ))}
+    </section>
+  );
+}
+
+function OfflineBlock({ message }: { message?: string }) {
+  const { t } = useTranslation();
+  // Truncate diagnostic messages — a raw fetch error can be the gateway's
+  // full 404 HTML body, which blows up the layout. Cap to a single line.
+  const firstLine = message?.split(/\r?\n/).find((ln) => ln.trim().length > 0)?.trim();
+  const short =
+    firstLine && firstLine.length > 180
+      ? firstLine.slice(0, 180) + "…"
+      : firstLine;
+  return (
+    <GlassPanel variant="soft" className="flex flex-col items-center gap-2 p-8 text-center">
+      <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-tp-err">
+        {t("skills.tp.offlineTitle")}
+      </div>
+      <p className="max-w-prose text-[13px] text-tp-ink-2">
+        {t("skills.tp.offlineHint")}
+      </p>
+      {short ? (
+        <p
+          className="max-w-full truncate font-mono text-[11px] text-tp-ink-4"
+          title={message}
+        >
+          {short}
+        </p>
+      ) : null}
+    </GlassPanel>
+  );
+}
+
+function EmptyBlock({ hasAnySkills }: { hasAnySkills: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <GlassPanel variant="subtle" className="flex flex-col items-center gap-2 p-8 text-center">
+      <div className="text-[14px] font-medium text-tp-ink">
+        {hasAnySkills
+          ? t("skills.tp.emptyTitle")
+          : t("skills.tp.emptyInstalledTitle")}
+      </div>
+      <p className="text-[13px] text-tp-ink-3">
+        {hasAnySkills
+          ? t("skills.tp.emptyHint")
+          : t("skills.tp.emptyInstalledHint")}
+      </p>
+    </GlassPanel>
   );
 }
