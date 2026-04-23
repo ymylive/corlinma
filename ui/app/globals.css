@@ -383,4 +383,27 @@
       opacity: 0;
     }
   }
+
+  /* JSON syntax highlighting tokens used by <JsonView>. Number color is a
+     cool violet that reads against both the warm cream (day) and warm dark
+     (night) backgrounds without needing a theme-specific override. */
+  .tp-json-k {
+    color: var(--tp-amber);
+  }
+  .tp-json-s {
+    color: var(--tp-ok);
+  }
+  .tp-json-n {
+    color: oklch(0.78 0.14 280);
+  }
+  :root[data-theme="light"] .tp-json-n {
+    color: oklch(0.45 0.2 280);
+  }
+  .tp-json-b {
+    color: var(--tp-ember);
+  }
+  .tp-json-c {
+    color: var(--tp-ink-4);
+    font-style: italic;
+  }
 }
