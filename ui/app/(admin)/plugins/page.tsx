@@ -275,6 +275,13 @@ function CardGridSkeleton() {
 
 function OfflineBlock({ message }: { message?: string }) {
   const { t } = useTranslation();
+  // Truncate diagnostic messages — a raw fetch error can be the gateway's
+  // full 404 HTML body, which blows up the layout. Cap to a single line.
+  const firstLine = message?.split(/\r?\n/).find((ln) => ln.trim().length > 0)?.trim();
+  const short =
+    firstLine && firstLine.length > 180
+      ? firstLine.slice(0, 180) + "…"
+      : firstLine;
   return (
     <GlassPanel variant="soft" className="flex flex-col items-center gap-2 p-8 text-center">
       <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-tp-err">
@@ -283,8 +290,13 @@ function OfflineBlock({ message }: { message?: string }) {
       <p className="max-w-prose text-[13px] text-tp-ink-2">
         {t("plugins.tp.offlineHint")}
       </p>
-      {message ? (
-        <p className="font-mono text-[11px] text-tp-ink-4">{message}</p>
+      {short ? (
+        <p
+          className="max-w-full truncate font-mono text-[11px] text-tp-ink-4"
+          title={message}
+        >
+          {short}
+        </p>
       ) : null}
     </GlassPanel>
   );
