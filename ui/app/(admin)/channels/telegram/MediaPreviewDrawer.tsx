@@ -2,19 +2,26 @@
 
 import * as React from "react";
 import { toast } from "sonner";
-import { Copy } from "lucide-react";
+import { Copy, FileText, Mic } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
 import type { TelegramMessage } from "@/lib/api/telegram";
+import { formatBytes } from "./MessageList";
 
 /**
- * Full-size photo preview for a Telegram message. Reuses the shared
- * `<Drawer>` primitive (B4-FE4) with a `lg` width so the image has room to
- * breathe on typical admin viewports.
+ * Full-size media preview for a Telegram update — Phase 5e Tidepool retoken.
  *
- * The metadata rail beneath the image echoes the row context (chat, sender,
- * time) so the user does not have to context-switch back to the list.
+ * Reuses the shared `<Drawer>` (Radix-Dialog backed) so the dialog role and
+ * focus trap are preserved. Visual chrome is rewritten around warm-glass
+ * tokens: media sits in a `bg-tp-glass-inner` frame with a dashed amber
+ * divider separating the metadata rail.
+ *
+ * Supports all three media kinds so non-photo updates can still be inspected
+ * from the updates feed: `photo` → hero `<img>`; `voice` → waveform stub
+ * with `<audio controls>`; `document` → FileText link + filename.
  */
 export function MediaPreviewDrawer({
   message,
@@ -27,6 +34,7 @@ export function MediaPreviewDrawer({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const src = React.useMemo(() => {
     if (!message?.media) return null;
     return resolveMediaUrl(mediaBaseUrl, message.media.local_path);
@@ -38,19 +46,23 @@ export function MediaPreviewDrawer({
     try {
       if (typeof navigator !== "undefined" && navigator.clipboard) {
         await navigator.clipboard.writeText(path);
-        toast.success("Local path copied");
+        toast.success(t("channels.telegram.tp.photoPreviewCopied"));
       } else {
         toast.message(path);
       }
     } catch {
-      toast.error("Copy failed");
+      toast.error(t("channels.telegram.tp.photoPreviewCopyFail"));
     }
-  }, [message]);
+  }, [message, t]);
+
+  const kind = message?.media?.kind ?? null;
 
   return (
     <Drawer
       open={open}
       onOpenChange={onOpenChange}
+      // Test-load-bearing literal: preview dialog title is asserted by the
+      // page test against the English string regardless of locale.
       title="Photo preview"
       width="lg"
       footer={
@@ -62,69 +74,125 @@ export function MediaPreviewDrawer({
             data-testid="tg-media-copy-path"
           >
             <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-            Copy local path
+            {t("channels.telegram.tp.photoPreviewCopyPath")}
           </Button>
         ) : null
       }
     >
-      <div className="flex flex-col gap-4 p-5">
+      <div className="flex flex-col gap-5 p-5">
         {src ? (
-          <div className="flex items-center justify-center rounded-md border border-border bg-muted/30 p-2">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={src}
-              alt={message?.content ?? "Telegram photo preview"}
-              className="max-h-[60vh] w-auto max-w-full rounded"
-              data-testid="tg-media-preview-img"
-            />
-          </div>
+          kind === "voice" ? (
+            <div
+              className={cn(
+                "flex flex-col items-center gap-3 rounded-2xl border border-tp-glass-edge",
+                "bg-tp-glass-inner p-6",
+              )}
+            >
+              <Mic className="h-8 w-8 text-tp-amber" aria-hidden="true" />
+              {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+              <audio controls src={src} className="w-full max-w-lg" />
+            </div>
+          ) : kind === "document" ? (
+            <a
+              href={src}
+              target="_blank"
+              rel="noreferrer"
+              className={cn(
+                "flex items-center gap-3 rounded-2xl border border-tp-glass-edge",
+                "bg-tp-glass-inner p-5 text-[13px] text-tp-ink",
+                "transition-colors hover:bg-tp-glass-inner-hover",
+              )}
+            >
+              <FileText className="h-6 w-6 text-tp-amber" aria-hidden="true" />
+              <span className="truncate font-mono">
+                {message?.media?.filename ??
+                  message?.media?.local_path.split("/").pop() ??
+                  "file"}
+              </span>
+            </a>
+          ) : (
+            <div
+              className={cn(
+                "flex items-center justify-center rounded-2xl border border-tp-glass-edge",
+                "bg-tp-glass-inner p-2",
+              )}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={src}
+                alt={
+                  message?.content ??
+                  t("channels.telegram.tp.photoPreviewTitle")
+                }
+                className="max-h-[60vh] w-auto max-w-full rounded-lg"
+                data-testid="tg-media-preview-img"
+              />
+            </div>
+          )
         ) : (
-          <p className="text-sm text-muted-foreground">No image selected.</p>
+          <p className="text-[13px] text-tp-ink-3">
+            {t("channels.telegram.tp.photoPreviewNone")}
+          </p>
         )}
 
         {message ? (
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-xs">
-            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-              Chat
-            </dt>
-            <dd className="font-mono">
+          <div className="grid grid-cols-[max-content_1fr] gap-x-5 gap-y-2 text-[12.5px]">
+            <MetaLabel>{t("channels.telegram.tp.photoPreviewChat")}</MetaLabel>
+            <div className="font-mono text-tp-ink">
               {message.chat_title ?? message.chat_id}
-            </dd>
+            </div>
 
-            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-              Sender
-            </dt>
-            <dd className="font-mono">{message.from_username ?? "—"}</dd>
+            <MetaLabel>
+              {t("channels.telegram.tp.photoPreviewSender")}
+            </MetaLabel>
+            <div className="font-mono text-tp-ink">
+              {message.from_username ?? "—"}
+            </div>
 
-            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-              Time
-            </dt>
-            <dd className="font-mono">{formatTime(message.timestamp_ms)}</dd>
+            <MetaLabel>{t("channels.telegram.tp.photoPreviewTime")}</MetaLabel>
+            <div className="font-mono text-tp-ink">
+              {formatTime(message.timestamp_ms)}
+            </div>
 
-            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-              Local path
-            </dt>
-            <dd
-              className="break-all font-mono text-[11px]"
+            <MetaLabel>{t("channels.telegram.tp.photoPreviewPath")}</MetaLabel>
+            <div
+              className="break-all font-mono text-[11.5px] text-tp-ink-2"
               data-testid="tg-media-path"
             >
               {message.media?.local_path ?? "—"}
-            </dd>
+            </div>
+
+            {message.media?.size_bytes ? (
+              <>
+                <MetaLabel>bytes</MetaLabel>
+                <div className="font-mono text-tp-ink-2">
+                  {formatBytes(message.media.size_bytes)}
+                </div>
+              </>
+            ) : null}
 
             {message.content ? (
               <>
-                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                  Caption
-                </dt>
-                <dd className="whitespace-pre-wrap break-words">
+                <MetaLabel>
+                  {t("channels.telegram.tp.photoPreviewCaption")}
+                </MetaLabel>
+                <div className="whitespace-pre-wrap break-words text-tp-ink-2">
                   {message.content}
-                </dd>
+                </div>
               </>
             ) : null}
-          </dl>
+          </div>
         ) : null}
       </div>
     </Drawer>
+  );
+}
+
+function MetaLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-4">
+      {children}
+    </div>
   );
 }
 

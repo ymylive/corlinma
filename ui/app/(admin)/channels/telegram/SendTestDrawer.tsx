@@ -4,10 +4,11 @@ import * as React from "react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Send } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   sendTelegramTestMessage,
@@ -15,16 +16,13 @@ import {
 } from "@/lib/api/telegram";
 
 /**
- * "Send test message" drawer for the Telegram admin page.
+ * "Send test message" drawer — Phase 5e Tidepool retoken.
  *
- * Opens as a `sm` drawer (reusing B4-FE4's primitive) with two fields —
- * `chat_id` and `text`. Send stays disabled until `chat_id.trim()` is
- * non-empty so there's a predictable pre-flight check.
- *
- * The mutation calls `sendTelegramTestMessage`, which returns a
- * `{ status: "not_deployed" }` sentinel if the gateway 404s instead of
- * throwing — so we can toast "admin endpoint pending" without a red error
- * banner when the ops endpoint is still missing.
+ * Fields reuse Tidepool's warm-glass inputs (matches the scheduler search +
+ * approvals deny-reason drawer dialect). The mutation is identical to the
+ * pre-retoken version: `{ status: "not_deployed" }` toasts as a neutral
+ * info message so the admin surface reads clean before `POST
+ * /admin/channels/telegram/send` ships.
  */
 export function SendTestDrawer({
   open,
@@ -33,6 +31,7 @@ export function SendTestDrawer({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const [chatId, setChatId] = React.useState("");
   const [text, setText] = React.useState("");
 
@@ -48,18 +47,21 @@ export function SendTestDrawer({
     mutationFn: (body: TelegramSendRequest) => sendTelegramTestMessage(body),
     onSuccess: (res) => {
       if (res.status === "not_deployed") {
-        toast.message("Admin send endpoint not deployed yet");
+        toast.message(t("channels.telegram.tp.sendTestNotDeployed"));
         return;
       }
       if (res.status === "ok") {
-        toast.success("Test message sent");
+        toast.success(t("channels.telegram.tp.sendTestSuccess"));
         onOpenChange(false);
       } else {
-        toast.error(res.error ?? "Send failed");
+        toast.error(res.error ?? t("channels.telegram.tp.sendTestFailed"));
       }
     },
     onError: (err) => {
-      const msg = err instanceof Error ? err.message : "Send failed";
+      const msg =
+        err instanceof Error
+          ? err.message
+          : t("channels.telegram.tp.sendTestFailed");
       toast.error(msg);
     },
   });
@@ -73,12 +75,19 @@ export function SendTestDrawer({
     mutation.mutate({ chat_id: trimmedChatId, text });
   };
 
+  const fieldClass = cn(
+    "w-full rounded-lg border border-tp-glass-edge bg-tp-glass-inner",
+    "px-3 py-2 text-[13px] text-tp-ink placeholder:text-tp-ink-4",
+    "transition-colors hover:bg-tp-glass-inner-hover",
+    "focus:outline-none focus:ring-2 focus:ring-tp-amber/40",
+  );
+
   return (
     <Drawer
       open={open}
       onOpenChange={onOpenChange}
-      title="Send test message"
-      description="Calls POST /admin/channels/telegram/send."
+      title={t("channels.telegram.tp.sendTestTitle")}
+      description={t("channels.telegram.tp.sendTestDescription")}
       width="sm"
       footer={
         <>
@@ -88,7 +97,7 @@ export function SendTestDrawer({
             size="sm"
             onClick={() => onOpenChange(false)}
           >
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button
             type="submit"
@@ -98,7 +107,9 @@ export function SendTestDrawer({
             data-testid="tg-send-test-submit"
           >
             <Send className="h-3.5 w-3.5" aria-hidden="true" />
-            {mutation.isPending ? "Sending…" : "Send"}
+            {mutation.isPending
+              ? t("channels.telegram.tp.sendTestSubmitting")
+              : t("channels.telegram.tp.sendTestSubmit")}
           </Button>
         </>
       }
@@ -109,30 +120,36 @@ export function SendTestDrawer({
         className="flex flex-col gap-4 p-5"
       >
         <div className="space-y-1.5">
-          <Label htmlFor="tg-send-chat-id">Chat ID</Label>
-          <Input
+          <Label htmlFor="tg-send-chat-id" className="text-tp-ink-2">
+            {t("channels.telegram.tp.sendTestChatId")}
+          </Label>
+          <input
             id="tg-send-chat-id"
-            placeholder="e.g. -100123 or @username"
+            type="text"
+            placeholder={t("channels.telegram.tp.sendTestChatIdPlaceholder")}
             value={chatId}
             onChange={(e) => setChatId(e.target.value)}
             autoComplete="off"
             data-testid="tg-send-chat-id"
             required
+            className={fieldClass}
           />
-          <p className="text-[11px] text-muted-foreground">
-            Numeric chat_id for groups (negative) or DMs, or `@username`.
+          <p className="text-[11px] text-tp-ink-4">
+            {t("channels.telegram.tp.sendTestChatIdHint")}
           </p>
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="tg-send-text">Message</Label>
+          <Label htmlFor="tg-send-text" className="text-tp-ink-2">
+            {t("channels.telegram.tp.sendTestMessage")}
+          </Label>
           <textarea
             id="tg-send-text"
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={5}
-            placeholder="Type the test message…"
-            className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            placeholder={t("channels.telegram.tp.sendTestMessagePlaceholder")}
+            className={cn(fieldClass, "resize-y")}
             data-testid="tg-send-text"
           />
         </div>

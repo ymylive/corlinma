@@ -7,47 +7,54 @@ import {
   EyeOff,
   FileText,
   MessageCircle,
-  MessageSquare,
   Mic,
   Reply,
-  Users,
 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
 import { useMotionVariants } from "@/lib/motion";
 import { CountdownRing } from "@/components/ui/countdown-ring";
-import type { TelegramMessage } from "@/lib/api/telegram";
+import type { TelegramMessage, TelegramMedia } from "@/lib/api/telegram";
 
 /**
- * Recent-message list for the Telegram channel page.
+ * Recent-update list for the Telegram channel page — Phase 5e Tidepool
+ * retoken.
  *
- * Each row shows:
- *   - A chat-kind glyph (DM vs group, preserved from B3-FE2).
- *   - A routing badge indicating how the gateway routed the update —
- *     private DM / group-mention / group-reply-to-bot / group-ignored.
- *     Ignored rows dim to 60% opacity to make the scan fast.
- *   - The message body, with an optional media affordance:
- *       * photo    → 64×64 thumbnail (click → `onPhotoClick`).
- *       * voice    → mic icon + duration + inline `<audio controls>`.
- *       * document → file icon + filename + human-readable size.
- *   - A `<CountdownRing/>` when a reply is still in flight.
+ * Each row is a warm-glass log line with:
+ *   - A routing badge (mention / reply / ignored / private) using the
+ *     severity-pill vocabulary from `<LogRow>`.
+ *   - The message body + optional media affordance:
+ *       * photo    → 56×56 thumbnail (click → `onPhotoClick`).
+ *       * voice    → mic + duration + non-functional play stub.
+ *       * document → file icon + filename + human-readable size (link-out).
+ *   - A `<CountdownRing/>` chip when a reply is still in flight.
+ *
+ * Ignored group rows dim to 60% opacity — load-bearing className
+ * (`opacity-60`) preserved for the page-level test suite.
  */
 export function MessageList({
   messages,
+  onMessageClick,
   onPhotoClick,
+  selectedId,
   mediaBaseUrl = "",
 }: {
   messages: TelegramMessage[];
+  /** Optional: called when any row is clicked (opens the detail drawer). */
+  onMessageClick?: (msg: TelegramMessage) => void;
   onPhotoClick?: (msg: TelegramMessage) => void;
+  selectedId?: string | null;
   /** Prefix prepended to `media.local_path` when rendering thumbnails. */
   mediaBaseUrl?: string;
 }) {
+  const { t } = useTranslation();
   const variants = useMotionVariants();
 
   if (messages.length === 0) {
     return (
-      <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-        No messages yet.
+      <p className="px-5 py-10 text-center text-[12.5px] text-tp-ink-3">
+        {t("channels.telegram.tp.noUpdates")}
       </p>
     );
   }
@@ -57,44 +64,56 @@ export function MessageList({
       initial="hidden"
       animate="visible"
       variants={variants.stagger}
-      className="space-y-2 p-4"
+      className="flex flex-col divide-y divide-tp-glass-edge"
     >
       {messages.map((msg) => {
         const ignored =
           msg.kind === "group" &&
           (msg.routing === "ignored" || msg.mention_reason === "none");
+        const selected = selectedId === msg.id;
         return (
           <motion.li
             key={msg.id}
             variants={variants.listItem}
+            data-testid={`tg-message-${msg.id}`}
             className={cn(
-              "flex items-start gap-3 rounded-md border border-border bg-surface p-3 transition-opacity",
+              "group flex items-start gap-3 px-4 py-3 transition-colors",
+              "hover:bg-tp-glass-inner-hover",
+              selected && "bg-tp-amber-soft",
               ignored && "opacity-60",
             )}
-            data-testid={`tg-message-${msg.id}`}
+            onClick={() => onMessageClick?.(msg)}
+            role={onMessageClick ? "button" : undefined}
+            tabIndex={onMessageClick ? 0 : undefined}
+            onKeyDown={(e) => {
+              if (!onMessageClick) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onMessageClick(msg);
+              }
+            }}
           >
-            <KindIcon kind={msg.kind} />
+            <span className="shrink-0 pt-0.5 font-mono text-[11px] tabular-nums text-tp-ink-4">
+              {formatTs(msg.timestamp_ms)}
+            </span>
             <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px]">
                 {msg.from_username ? (
-                  <span className="font-mono font-semibold">
+                  <span className="font-mono font-semibold text-tp-ink">
                     {msg.from_username}
                   </span>
                 ) : null}
-                {msg.chat_title ? (
-                  <span className="text-muted-foreground">
-                    (group: <span className="font-mono">{msg.chat_title}</span>)
-                  </span>
-                ) : (
-                  <span className="text-muted-foreground">(DM)</span>
-                )}
-                <span className="text-muted-foreground">
-                  • {formatTs(msg.timestamp_ms)}
+                <span className="text-tp-ink-3">
+                  {msg.chat_title
+                    ? t("channels.telegram.tp.groupContext", {
+                        name: msg.chat_title,
+                      })
+                    : t("channels.telegram.tp.dmContext")}
                 </span>
                 <RoutingBadge msg={msg} />
               </div>
               {msg.content ? (
-                <p className="mt-1 whitespace-pre-wrap break-words text-xs">
+                <p className="mt-1 line-clamp-2 whitespace-pre-wrap break-words text-[12.5px] text-tp-ink-2">
                   {msg.content}
                 </p>
               ) : null}
@@ -108,11 +127,13 @@ export function MessageList({
             </div>
             {msg.reply_deadline_ms && msg.reply_total_ms ? (
               <CountdownRing
-                size={14}
+                size={16}
                 strokeWidth={2}
                 remainingMs={msg.reply_deadline_ms}
                 totalMs={msg.reply_total_ms}
-                label={`reply due in ${Math.ceil(msg.reply_deadline_ms / 1000)}s`}
+                label={t("channels.telegram.tp.replyDueAria", {
+                  s: Math.ceil(msg.reply_deadline_ms / 1000),
+                })}
                 className="shrink-0"
                 data-testid={`tg-reply-ring-${msg.id}`}
               />
@@ -125,33 +146,15 @@ export function MessageList({
 }
 
 /* ------------------------------------------------------------------ */
-/*                          Kind / routing chrome                      */
+/*                          Routing badge                              */
 /* ------------------------------------------------------------------ */
 
-function KindIcon({ kind }: { kind: TelegramMessage["kind"] }) {
-  const isGroup = kind === "group";
-  const Icon = isGroup ? Users : MessageSquare;
-  const label = isGroup ? "group" : "direct message";
-  return (
-    <div
-      className={cn(
-        "flex h-7 w-7 shrink-0 items-center justify-center rounded-full",
-        isGroup
-          ? "bg-primary/15 text-primary"
-          : "bg-accent/50 text-accent-foreground",
-      )}
-      aria-label={label}
-      title={label}
-    >
-      <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-    </div>
-  );
-}
+type BadgeKind = "mention" | "reply" | "ignored" | "private";
 
 interface BadgeSpec {
   Icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  className: string;
+  labelKey: string;
+  tone: "ok" | "warn" | "info" | "amber";
   testId: string;
 }
 
@@ -159,48 +162,58 @@ function routingSpec(msg: TelegramMessage): BadgeSpec {
   if (msg.kind === "private") {
     return {
       Icon: MessageCircle,
-      label: "Private DM",
-      className: "border-accent/40 bg-accent/10 text-accent-foreground",
+      labelKey: "channels.telegram.tp.routePrivate",
+      tone: "amber",
       testId: "route-private",
     };
   }
   if (msg.mention_reason === "mention") {
     return {
       Icon: AtSign,
-      label: "Group · @mention",
-      className: "border-ok/40 bg-ok/10 text-ok",
+      labelKey: "channels.telegram.tp.routeMention",
+      tone: "ok",
       testId: "route-mention",
     };
   }
   if (msg.mention_reason === "reply_to_bot") {
     return {
       Icon: Reply,
-      label: "Group · reply-to-bot",
-      className: "border-ok/40 bg-ok/10 text-ok",
+      labelKey: "channels.telegram.tp.routeReply",
+      tone: "ok",
       testId: "route-reply",
     };
   }
   return {
     Icon: EyeOff,
-    label: "Group · ignored",
-    className: "border-border bg-muted/50 text-muted-foreground",
+    labelKey: "channels.telegram.tp.routeIgnored",
+    tone: "info",
     testId: "route-ignored",
   };
 }
 
-function RoutingBadge({ msg }: { msg: TelegramMessage }) {
+const badgeTone: Record<BadgeSpec["tone"], string> = {
+  ok: "bg-tp-ok-soft text-tp-ok border-tp-ok/25",
+  warn: "bg-tp-warn-soft text-tp-warn border-tp-warn/25",
+  info: "bg-tp-glass-inner-strong text-tp-ink-3 border-tp-glass-edge",
+  amber: "bg-tp-amber-soft text-tp-amber border-tp-amber/25",
+};
+
+function RoutingBadge({ msg }: { msg: TelegramMessage }): React.ReactElement {
+  const { t } = useTranslation();
   const spec = routingSpec(msg);
+  const label = t(spec.labelKey);
   return (
     <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider",
-        spec.className,
-      )}
       data-testid={`tg-${spec.testId}-${msg.id}`}
-      title={spec.label}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-[1px]",
+        "font-mono text-[10px] uppercase tracking-[0.08em]",
+        badgeTone[spec.tone],
+      )}
+      title={label}
     >
       <spec.Icon className="h-3 w-3" aria-hidden="true" />
-      {spec.label}
+      {label}
     </span>
   );
 }
@@ -218,6 +231,7 @@ function MediaPreview({
   baseUrl: string;
   onPhotoClick?: (msg: TelegramMessage) => void;
 }) {
+  const { t } = useTranslation();
   const media = message.media;
   if (!media) return null;
   const src = resolveMediaUrl(baseUrl, media.local_path);
@@ -226,16 +240,23 @@ function MediaPreview({
     return (
       <button
         type="button"
-        onClick={() => onPhotoClick?.(message)}
-        className="mt-2 inline-flex overflow-hidden rounded border border-border bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        aria-label="Open photo preview"
+        onClick={(e) => {
+          e.stopPropagation();
+          onPhotoClick?.(message);
+        }}
+        className={cn(
+          "mt-2 inline-flex overflow-hidden rounded-lg border border-tp-glass-edge bg-tp-glass-inner",
+          "transition-colors hover:bg-tp-glass-inner-hover",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+        )}
+        aria-label={t("channels.telegram.tp.photoPreviewTitle")}
         data-testid={`tg-photo-thumb-${message.id}`}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={src}
-          alt={message.content ?? "Telegram photo"}
-          className="h-16 w-16 object-cover"
+          alt={message.content ?? t("channels.telegram.tp.photoPreviewTitle")}
+          className="h-14 w-14 object-cover"
           loading="lazy"
         />
       </button>
@@ -248,12 +269,16 @@ function MediaPreview({
       : null;
     return (
       <div
-        className="mt-2 flex flex-wrap items-center gap-2 rounded border border-border bg-muted/30 px-2 py-1.5 text-xs"
+        className={cn(
+          "mt-2 inline-flex flex-wrap items-center gap-2 rounded-lg border border-tp-glass-edge",
+          "bg-tp-glass-inner px-2 py-1 text-[11.5px] text-tp-ink-2",
+        )}
         data-testid={`tg-voice-${message.id}`}
       >
-        <Mic className="h-3.5 w-3.5 text-accent-foreground" aria-hidden="true" />
-        <span className="font-mono text-[11px] text-muted-foreground">
-          voice{duration ? ` · ${duration}` : ""}
+        <Mic className="h-3.5 w-3.5 text-tp-amber" aria-hidden="true" />
+        <span className="font-mono text-[11px] text-tp-ink-3">
+          {t("channels.telegram.tp.voiceLabel")}
+          {duration ? ` · ${duration}` : ""}
         </span>
         {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
         <audio
@@ -266,20 +291,37 @@ function MediaPreview({
     );
   }
 
-  // document
+  return <DocChip media={media} src={src} messageId={message.id} />;
+}
+
+function DocChip({
+  media,
+  src,
+  messageId,
+}: {
+  media: TelegramMedia;
+  src: string;
+  messageId: string;
+}) {
   const label = media.filename ?? media.local_path.split("/").pop() ?? "file";
   return (
     <a
       href={src}
       target="_blank"
       rel="noreferrer"
-      className="mt-2 inline-flex items-center gap-2 rounded border border-border bg-muted/30 px-2 py-1.5 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      data-testid={`tg-doc-${message.id}`}
+      onClick={(e) => e.stopPropagation()}
+      className={cn(
+        "mt-2 inline-flex items-center gap-2 rounded-lg border border-tp-glass-edge",
+        "bg-tp-glass-inner px-2 py-1 text-[11.5px] text-tp-ink-2",
+        "transition-colors hover:bg-tp-glass-inner-hover hover:text-tp-ink",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+      )}
+      data-testid={`tg-doc-${messageId}`}
     >
-      <FileText className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+      <FileText className="h-3.5 w-3.5 text-tp-ink-3" aria-hidden="true" />
       <span className="truncate font-mono text-[11px]">{label}</span>
       {typeof media.size_bytes === "number" ? (
-        <span className="text-[10px] text-muted-foreground">
+        <span className="text-[10px] text-tp-ink-4">
           {formatBytes(media.size_bytes)}
         </span>
       ) : null}

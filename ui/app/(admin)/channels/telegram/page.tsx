@@ -2,14 +2,27 @@
 
 import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Eye, EyeOff, Send } from "lucide-react";
+import { motion } from "framer-motion";
+import {
+  AlertTriangle,
+  Eye,
+  EyeOff,
+  RefreshCw,
+  Send,
+} from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { AnimatedNumber } from "@/components/ui/animated-number";
+import { GlassPanel } from "@/components/ui/glass-panel";
+import { StatChip } from "@/components/ui/stat-chip";
+import { StreamPill, type StreamState } from "@/components/ui/stream-pill";
+import {
+  FilterChipGroup,
+  type FilterChipOption,
+} from "@/components/ui/filter-chip-group";
+import { JsonView } from "@/components/ui/json-view";
 import { useMotion } from "@/components/ui/motion-safe";
-import { ChannelShell } from "@/components/channels/channel-shell";
+import { useMotionVariants } from "@/lib/motion";
 import {
   fetchTelegramMessages,
   fetchTelegramStatus,
@@ -21,127 +34,168 @@ import { MediaPreviewDrawer } from "./MediaPreviewDrawer";
 import { SendTestDrawer } from "./SendTestDrawer";
 
 /**
- * Telegram channel admin page (B4-FE1).
+ * Telegram Channel — Phase 5e (Tidepool) retoken.
  *
- * Wires the B3-FE2 skeleton to the real API client (`lib/api/telegram.ts`),
- * which transparently falls back to the B3-FE2 mock when the admin surface
- * isn't deployed yet. Adds:
- *   - `last_error` banner (pulses on reduced-motion off)
- *   - Routing badges + media previews on the message list
- *   - Photo preview drawer (reuses `<Drawer>`)
- *   - Send-test drawer (reuses `<Drawer>`)
+ * Layout (mirrors the Scheduler / Approvals page dialect):
+ *
+ *   [ hero (glass strong) — prose + StreamPill + send-test CTA ]
+ *   [ StatChip × 4 — messages today · week · avg latency · active chats ]
+ *   [ config (glass soft, 2-col) — webhook + filters/routing ]
+ *   [ recent updates (glass soft) — filter chips + LogRow-style feed ]
+ *   [ last-webhook payload (glass soft) — JsonView ]
+ *
+ * Data flow preserved from the pre-retoken page:
+ *   - `/admin/channels/telegram/status`   (3s poll)
+ *   - `/admin/channels/telegram/messages` (3s poll, 20-cap)
+ *   - The 404-fallback path stays inside `fetchTelegramStatus/Messages`.
+ *
+ * A handful of strings are intentionally hardcoded in English (page `<h1>`,
+ * stat-chip labels, photo-preview dialog title) — those are asserted by
+ * `page.test.tsx` against English regex regardless of locale.
  */
+
+const UPDATE_FILTERS = ["all", "text", "photo", "voice", "doc"] as const;
+type UpdateFilter = (typeof UPDATE_FILTERS)[number];
+
+const UPDATES_SPARK =
+  "M0 22 L30 20 L60 16 L90 22 L120 14 L150 20 L180 18 L210 22 L240 16 L270 20 L300 14 L300 36 L0 36 Z";
+const LATENCY_SPARK =
+  "M0 10 L30 14 L60 16 L90 20 L120 22 L150 24 L180 26 L210 28 L240 30 L270 30 L300 32 L300 36 L0 36 Z";
+const CHATS_SPARK =
+  "M0 28 L30 26 L60 22 L90 24 L120 18 L150 22 L180 14 L210 18 L240 10 L270 14 L300 6 L300 36 L0 36 Z";
+const WEEK_SPARK =
+  "M0 18 L30 20 L60 16 L90 22 L120 14 L150 20 L180 18 L210 22 L240 16 L270 20 L300 14 L300 36 L0 36 Z";
+
+function deriveStreamState(
+  connected: boolean,
+  hasError: boolean,
+): StreamState {
+  if (!connected) return "paused";
+  if (hasError) return "throttled";
+  return "live";
+}
+
+function kindOfMessage(msg: TelegramMessage): UpdateFilter {
+  if (!msg.media) return "text";
+  if (msg.media.kind === "photo") return "photo";
+  if (msg.media.kind === "voice") return "voice";
+  return "doc";
+}
+
+function formatRelative(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "just now";
+  const delta = Math.max(0, Date.now() - ms);
+  const s = Math.floor(delta / 1000);
+  if (s < 10) return "just now";
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 export default function TelegramChannelPage() {
+  const variants = useMotionVariants();
+  const { reduced } = useMotion();
+
   const statusQuery = useQuery<TelegramStatusResponse>({
     queryKey: ["admin", "channels", "telegram", "status"],
     queryFn: fetchTelegramStatus,
     refetchInterval: 3_000,
+    retry: false,
   });
   const messagesQuery = useQuery<TelegramMessage[]>({
     queryKey: ["admin", "channels", "telegram", "messages"],
     queryFn: () => fetchTelegramMessages({ limit: 20 }),
     refetchInterval: 3_000,
+    retry: false,
   });
 
   const [sendOpen, setSendOpen] = React.useState(false);
-  const [previewMessage, setPreviewMessage] = React.useState<
-    TelegramMessage | null
-  >(null);
+  const [previewMessage, setPreviewMessage] =
+    React.useState<TelegramMessage | null>(null);
+  const [filter, setFilter] = React.useState<UpdateFilter>("all");
 
-  const connected = statusQuery.data?.connected ?? false;
-  const runtime = statusQuery.data?.runtime ?? "unknown";
-  const lastError = statusQuery.data?.last_error ?? null;
-
-  const runtimeChip = (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider",
-        connected
-          ? "border-ok/40 bg-ok/10 text-ok"
-          : "border-err/40 bg-err/10 text-err",
-      )}
-      data-testid="tg-connection-chip"
-    >
-      runtime={runtime}
-    </span>
-  );
-
-  const headerActions = (
-    <>
-      {runtimeChip}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => setSendOpen(true)}
-        data-testid="tg-send-test-open"
-      >
-        <Send className="h-3.5 w-3.5" aria-hidden="true" />
-        Send test message
-      </Button>
-    </>
-  );
-
+  const status = statusQuery.data;
+  const connected = status?.connected ?? false;
+  const lastError = status?.last_error ?? null;
+  const offline = statusQuery.isError;
   const messages = messagesQuery.data ?? [];
 
+  const streamState = deriveStreamState(connected, Boolean(lastError));
+
+  const filterCounts = React.useMemo(() => {
+    const counts: Record<UpdateFilter, number> = {
+      all: messages.length,
+      text: 0,
+      photo: 0,
+      voice: 0,
+      doc: 0,
+    };
+    for (const m of messages) counts[kindOfMessage(m)] += 1;
+    return counts;
+  }, [messages]);
+
+  const filteredMessages = React.useMemo(() => {
+    if (filter === "all") return messages;
+    return messages.filter((m) => kindOfMessage(m) === filter);
+  }, [messages, filter]);
+
+  const latest = messages[0];
+
   return (
-    <ChannelShell
-      channelId="telegram"
-      title="Telegram Channel"
-      subtitle="Webhook bridge · bot token + secret-token handshake · live dispatch stats."
-      connected={connected}
-      actions={headerActions}
+    <motion.div
+      className="flex flex-col gap-4"
+      variants={variants.fadeUp}
+      initial="hidden"
+      animate="visible"
     >
-      {lastError ? <ErrorBanner error={lastError} /> : null}
+      <TelegramHero
+        status={status}
+        offline={offline}
+        streamState={streamState}
+        latest={latest}
+        onSendTest={() => setSendOpen(true)}
+        onRefresh={() => {
+          statusQuery.refetch();
+          messagesQuery.refetch();
+        }}
+        fetching={statusQuery.isFetching}
+      />
 
-      {statusQuery.isPending ? (
-        <Skeleton className="h-28 w-full" />
-      ) : statusQuery.isError ? (
-        <p className="text-sm text-destructive">
-          Load failed: {(statusQuery.error as Error).message}
-        </p>
-      ) : statusQuery.data ? (
-        <>
-          <ConfigCard status={statusQuery.data} />
-          <StatsRow
-            messagesToday={statusQuery.data.stats.messages_today}
-            messagesWeek={statusQuery.data.stats.messages_week}
-            p50={statusQuery.data.stats.latency_p50_ms}
-            p95={statusQuery.data.stats.latency_p95_ms}
-            activeChats={statusQuery.data.stats.active_chats}
-          />
+      {lastError ? <ErrorBanner error={lastError} reduced={reduced} /> : null}
 
-          <section className="rounded-lg border border-border bg-panel">
-            <div className="border-b border-border px-4 py-3 text-sm font-semibold">
-              Recent messages
-            </div>
-            <div className="max-h-[420px] overflow-auto">
-              {messagesQuery.isPending ? (
-                <div className="space-y-2 p-4">
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-12 w-full" />
-                </div>
-              ) : messagesQuery.isError ? (
-                <p className="px-4 py-8 text-center text-sm text-destructive">
-                  Messages load failed:{" "}
-                  {(messagesQuery.error as Error).message}
-                </p>
-              ) : (
-                <MessageList
-                  messages={messages.slice(0, 10)}
-                  onPhotoClick={setPreviewMessage}
-                />
-              )}
-            </div>
-          </section>
+      <StatsRow status={status} live={!offline} />
 
-          <DebugPanel
-            payload={statusQuery.data.last_webhook_payload ?? null}
-            error={lastError}
-          />
-        </>
-      ) : null}
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <WebhookPanel status={status} />
+        <FiltersPanel status={status} />
+      </section>
+
+      <UpdatesFeed
+        filter={filter}
+        setFilter={setFilter}
+        counts={filterCounts}
+        isPending={messagesQuery.isPending}
+        isError={messagesQuery.isError}
+        errorMessage={(messagesQuery.error as Error | undefined)?.message}
+        messages={filteredMessages}
+        onPhotoClick={setPreviewMessage}
+      />
+
+      <DebugPanel
+        payload={status?.last_webhook_payload ?? null}
+        error={lastError}
+      />
 
       <MediaPreviewDrawer
         message={previewMessage}
@@ -152,28 +206,235 @@ export default function TelegramChannelPage() {
         }}
       />
       <SendTestDrawer open={sendOpen} onOpenChange={setSendOpen} />
-    </ChannelShell>
+    </motion.div>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*                           Error banner                              */
+/*                                Hero                                 */
 /* ------------------------------------------------------------------ */
 
-function ErrorBanner({ error }: { error: string }) {
-  const { reduced } = useMotion();
+function TelegramHero({
+  status,
+  offline,
+  streamState,
+  latest,
+  onSendTest,
+  onRefresh,
+  fetching,
+}: {
+  status: TelegramStatusResponse | undefined;
+  offline: boolean;
+  streamState: StreamState;
+  latest: TelegramMessage | undefined;
+  onSendTest: () => void;
+  onRefresh: () => void;
+  fetching: boolean;
+}) {
+  const host = status?.config.webhook_url
+    ? hostOf(status.config.webhook_url)
+    : "—";
+  const activeChats = status?.stats.active_chats ?? 0;
+
+  const latestLine = latest
+    ? (() => {
+        const kind = latest.media
+          ? latest.media.kind === "photo"
+            ? "photo"
+            : latest.media.kind === "voice"
+              ? "voice clip"
+              : "document"
+          : "message";
+        const who = latest.from_username ?? "unknown sender";
+        const chat = latest.chat_title ? ` in group ${latest.chat_title}` : "";
+        const when = formatRelative(latest.timestamp_ms);
+        return `Last update ${when} — ${kind} from ${who}${chat}.`;
+      })()
+    : "No inbound updates yet.";
+
+  return (
+    <GlassPanel
+      variant="strong"
+      as="section"
+      className="relative overflow-hidden p-7"
+    >
+      <div
+        aria-hidden
+        className="pointer-events-none absolute bottom-[-90px] right-[-40px] h-[240px] w-[360px] rounded-full opacity-60 blur-3xl"
+        style={{
+          background:
+            "radial-gradient(closest-side, var(--tp-amber-glow), transparent 70%)",
+        }}
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute top-[-60px] left-[-40px] h-[180px] w-[260px] rounded-full opacity-40 blur-[50px]"
+        style={{
+          background:
+            "radial-gradient(closest-side, color-mix(in oklch, var(--tp-ember) 35%, transparent), transparent 70%)",
+        }}
+      />
+
+      <div className="relative flex min-w-0 flex-col gap-4">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <StreamPill
+            state={offline ? "paused" : streamState}
+            rate={offline ? "offline" : host}
+            data-testid="tg-stream-pill"
+          />
+          <span className="font-mono text-[11px] text-tp-ink-3">
+            {status?.runtime
+              ? `runtime=${status.runtime}`
+              : "runtime=unknown"}
+          </span>
+        </div>
+
+        <h1 className="text-balance font-sans text-[28px] font-semibold leading-[1.15] tracking-[-0.025em] text-tp-ink sm:text-[32px]">
+          Telegram Channel
+        </h1>
+
+        <p className="max-w-[72ch] text-[14.5px] leading-[1.6] text-tp-ink-2">
+          {offline ? (
+            "Webhook is offline — the gateway is not answering. Panels below reflect cached data."
+          ) : (
+            <>
+              Webhook live at <span className="font-mono text-tp-ink">{host}</span>.
+              {" "}
+              {activeChats} {activeChats === 1 ? "conversation" : "conversations"} open.
+              {" "}
+              {latestLine}
+            </>
+          )}
+        </p>
+
+        <div className="mt-1 flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={onSendTest}
+            data-testid="tg-send-test-open"
+            className={cn(
+              "inline-flex items-center gap-2 rounded-lg border border-tp-amber/35 bg-tp-amber-soft px-3 py-2",
+              "text-[13px] font-medium text-tp-amber",
+              "transition-colors hover:bg-[color-mix(in_oklch,var(--tp-amber)_22%,transparent)]",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/50",
+            )}
+          >
+            <Send className="h-3.5 w-3.5" aria-hidden />
+            Send test message
+          </button>
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={fetching}
+            aria-label="Refresh Telegram channel state"
+            className={cn(
+              "inline-flex items-center gap-2 rounded-lg border border-tp-glass-edge bg-tp-glass-inner px-3 py-2",
+              "text-[13px] font-medium text-tp-ink-2",
+              "transition-colors hover:bg-tp-glass-inner-hover hover:text-tp-ink",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+              "disabled:cursor-not-allowed disabled:opacity-70",
+            )}
+          >
+            <RefreshCw
+              className={cn("h-3.5 w-3.5", fetching && "animate-spin")}
+              aria-hidden
+            />
+            Refresh
+          </button>
+        </div>
+      </div>
+    </GlassPanel>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*                              Stats row                              */
+/* ------------------------------------------------------------------ */
+
+function StatsRow({
+  status,
+  live,
+}: {
+  status: TelegramStatusResponse | undefined;
+  live: boolean;
+}) {
+  const stats = status?.stats;
+  const dash = "—";
+
+  return (
+    <section className="grid grid-cols-1 gap-3.5 md:grid-cols-2 xl:grid-cols-4">
+      <StatChip
+        variant="primary"
+        live={live}
+        label="Messages today"
+        value={live && stats ? stats.messages_today : dash}
+        foot={live ? "inbound webhook events" : "endpoint offline"}
+        sparkPath={UPDATES_SPARK}
+        sparkTone="amber"
+      />
+      <StatChip
+        label="Messages · week"
+        value={live && stats ? stats.messages_week : dash}
+        foot={live ? "trailing 7-day rollup" : "endpoint offline"}
+        sparkPath={WEEK_SPARK}
+        sparkTone="ember"
+      />
+      <StatChip
+        label="Avg latency"
+        value={
+          live && stats ? (
+            <span className="flex items-baseline gap-1">
+              <span className="tabular-nums">{stats.latency_p50_ms}</span>
+              <span className="font-mono text-[10px] text-tp-ink-4">p50ms</span>
+              <span className="mx-1 text-tp-ink-4">·</span>
+              <span className="tabular-nums text-[20px] text-tp-ink-3">
+                {stats.latency_p95_ms}
+              </span>
+              <span className="font-mono text-[10px] text-tp-ink-4">p95ms</span>
+            </span>
+          ) : (
+            dash
+          )
+        }
+        foot={live ? "handler dispatch" : "endpoint offline"}
+        sparkPath={LATENCY_SPARK}
+        sparkTone="ember"
+      />
+      <StatChip
+        label="Active chats"
+        value={live && stats ? stats.active_chats : dash}
+        foot={live ? "seen in the last 24h" : "endpoint offline"}
+        sparkPath={CHATS_SPARK}
+        sparkTone="peach"
+      />
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*                             Error banner                            */
+/* ------------------------------------------------------------------ */
+
+function ErrorBanner({
+  error,
+  reduced,
+}: {
+  error: string;
+  reduced: boolean;
+}) {
   return (
     <div
       role="alert"
       data-testid="tg-last-error-banner"
       className={cn(
-        "flex items-start gap-2 rounded-lg border border-err/40 bg-state-error/40 px-3 py-2 text-xs text-err",
+        "flex items-start gap-2 rounded-xl border border-tp-err/40 bg-tp-err-soft px-3 py-2",
+        "text-[12.5px] text-tp-err",
         !reduced && "animate-pulse-glow",
       )}
     >
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
       <div className="min-w-0 flex-1">
-        <div className="font-semibold uppercase tracking-wider">
+        <div className="font-mono text-[10.5px] uppercase tracking-[0.1em]">
           Last dispatch error
         </div>
         <p className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[11px]">
@@ -185,63 +446,84 @@ function ErrorBanner({ error }: { error: string }) {
 }
 
 /* ------------------------------------------------------------------ */
-/*                           Config card                              */
+/*                            Config panels                            */
 /* ------------------------------------------------------------------ */
 
-function ConfigCard({ status }: { status: TelegramStatusResponse }) {
-  const { bot_token, webhook_url, secret_token, drop_pending_updates } =
-    status.config;
+function WebhookPanel({
+  status,
+}: {
+  status: TelegramStatusResponse | undefined;
+}) {
   const [revealed, setRevealed] = React.useState(false);
-
-  const toggleReveal = React.useCallback(() => {
-    setRevealed((v) => !v);
-  }, []);
-
-  const onRevealKeyDown = React.useCallback(
-    (e: React.KeyboardEvent<HTMLButtonElement>) => {
-      if (e.key === " " || e.key === "Enter") {
-        e.preventDefault();
-        toggleReveal();
-      }
-    },
-    [toggleReveal],
-  );
+  // Don't render the token/URL testids until the config has landed — the
+  // page test uses `findByTestId("tg-bot-token")` and asserts on the masked
+  // pattern, which requires real bytes rather than an empty placeholder.
+  if (!status) {
+    return (
+      <GlassPanel
+        variant="soft"
+        as="section"
+        className="flex flex-col gap-3 p-5"
+        aria-label="Telegram bot webhook configuration"
+      >
+        <header>
+          <h2 className="text-[14px] font-medium text-tp-ink">Webhook</h2>
+          <p className="text-[12px] text-tp-ink-3">loading…</p>
+        </header>
+        <div className="space-y-2">
+          <div className="h-8 animate-pulse rounded-md border border-tp-glass-edge bg-tp-glass-inner/70" />
+          <div className="h-8 animate-pulse rounded-md border border-tp-glass-edge bg-tp-glass-inner/70" />
+        </div>
+      </GlassPanel>
+    );
+  }
+  const botToken = status.config.bot_token ?? "";
+  const webhookUrl = status.config.webhook_url ?? "—";
 
   return (
-    <section
-      className="space-y-3 rounded-lg border border-border bg-panel p-4"
-      aria-label="Telegram bot configuration"
+    <GlassPanel
+      variant="soft"
+      as="section"
+      className="flex flex-col gap-3 p-5"
+      aria-label="Telegram bot webhook configuration"
     >
-      <div className="flex items-center justify-between">
+      <header className="flex items-center justify-between">
         <div>
-          <h2 className="text-sm font-semibold">Bot configuration</h2>
-          <p className="text-xs text-muted-foreground">
-            Read-only for now. Mutations land with the webhook bridge.
+          <h2 className="text-[14px] font-medium text-tp-ink">Webhook</h2>
+          <p className="text-[12px] text-tp-ink-3">
+            bot token + callback URL · read-only for now.
           </p>
         </div>
-        <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+        <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-tp-ink-4">
           read-only
         </span>
-      </div>
+      </header>
 
-      <dl className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <div className="space-y-3">
         <ConfigField label="Bot token">
           <div className="flex items-center gap-2">
             <code
-              className="flex-1 truncate rounded bg-muted px-2 py-1 font-mono text-[11px]"
-              aria-readonly="true"
               data-testid="tg-bot-token"
+              aria-readonly="true"
+              className={cn(
+                "flex-1 truncate rounded-md border border-tp-glass-edge",
+                "bg-tp-glass-inner px-2 py-1 font-mono text-[11.5px] text-tp-ink-2",
+              )}
             >
-              {revealed ? bot_token : maskToken(bot_token)}
+              {revealed ? botToken : maskToken(botToken)}
             </code>
             <button
               type="button"
-              onClick={toggleReveal}
-              onKeyDown={onRevealKeyDown}
+              onClick={() => setRevealed((v) => !v)}
               aria-pressed={revealed}
               aria-label={revealed ? "Hide bot token" : "Reveal bot token"}
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="tg-reveal-token"
+              className={cn(
+                "inline-flex h-7 w-7 items-center justify-center rounded-md border border-tp-glass-edge",
+                "bg-tp-glass-inner text-tp-ink-3 transition-colors",
+                "hover:bg-tp-glass-inner-hover hover:text-tp-ink",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+              )}
             >
               {revealed ? (
                 <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
@@ -254,50 +536,76 @@ function ConfigCard({ status }: { status: TelegramStatusResponse }) {
 
         <ConfigField label="Webhook URL">
           <code
-            className="block truncate rounded bg-muted px-2 py-1 font-mono text-[11px]"
+            className={cn(
+              "block truncate rounded-md border border-tp-glass-edge",
+              "bg-tp-glass-inner px-2 py-1 font-mono text-[11.5px] text-tp-ink-2",
+            )}
             aria-readonly="true"
           >
-            {webhook_url}
+            {webhookUrl}
           </code>
         </ConfigField>
 
         <ConfigField label="Secret token">
           <code
-            className="block truncate rounded bg-muted px-2 py-1 font-mono text-[11px]"
+            className={cn(
+              "block truncate rounded-md border border-tp-glass-edge",
+              "bg-tp-glass-inner px-2 py-1 font-mono text-[11.5px] text-tp-ink-2",
+            )}
             aria-readonly="true"
           >
-            {maskToken(secret_token)}
+            {maskToken(status.config.secret_token)}
           </code>
         </ConfigField>
+      </div>
+    </GlassPanel>
+  );
+}
 
-        <ConfigField label="Drop pending updates on reconnect">
-          <div
-            className="flex items-center gap-2"
-            role="switch"
-            aria-checked={drop_pending_updates}
-            aria-readonly="true"
-          >
-            <span
-              className={cn(
-                "inline-flex h-4 w-7 items-center rounded-full border border-border p-0.5 transition-colors",
-                drop_pending_updates ? "bg-primary/30" : "bg-muted",
-              )}
-              aria-hidden="true"
-            >
-              <span
-                className={cn(
-                  "h-3 w-3 rounded-full bg-background shadow transition-transform",
-                  drop_pending_updates ? "translate-x-3" : "translate-x-0",
-                )}
-              />
-            </span>
-            <span className="font-mono text-[11px] text-muted-foreground">
-              {drop_pending_updates ? "on" : "off"}
-            </span>
-          </div>
-        </ConfigField>
-      </dl>
-    </section>
+function FiltersPanel({
+  status,
+}: {
+  status: TelegramStatusResponse | undefined;
+}) {
+  const messagesWeek = status?.stats.messages_week ?? 0;
+  const dropPending = status?.config.drop_pending_updates ?? false;
+
+  return (
+    <GlassPanel
+      variant="soft"
+      as="section"
+      className="flex flex-col gap-3 p-5"
+      aria-label="Telegram routing filters"
+    >
+      <header>
+        <h2 className="text-[14px] font-medium text-tp-ink">
+          Filters & routing
+        </h2>
+        <p className="text-[12px] text-tp-ink-3">
+          Group replies are gated on @mention or reply-to-bot; DMs pass
+          through.
+        </p>
+      </header>
+
+      <div className="grid grid-cols-2 gap-3 text-[12.5px]">
+        <FilterStatCell label="Week volume" value={messagesWeek} />
+        <FilterStatCell
+          label="Drop pending on reconnect"
+          value={dropPending ? "on" : "off"}
+        />
+      </div>
+
+      <div className="rounded-lg border border-dashed border-tp-glass-edge bg-tp-glass-inner p-3">
+        <div className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-4">
+          Routing gates
+        </div>
+        <ul className="space-y-1 text-[12px] text-tp-ink-2">
+          <li>• Group messages — only @mention or reply-to-bot are answered.</li>
+          <li>• DMs — every message is processed.</li>
+          <li>• Keyword filter — inherited from `corlinman-channels` config.</li>
+        </ul>
+      </div>
+    </GlassPanel>
   );
 }
 
@@ -310,15 +618,33 @@ function ConfigField({
 }) {
   return (
     <div className="space-y-1">
-      <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+      <div className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-4">
         {label}
-      </dt>
-      <dd>{children}</dd>
+      </div>
+      <div>{children}</div>
     </div>
   );
 }
 
-/** Keep only the last 4 chars of a token; mask the rest. */
+function FilterStatCell({
+  label,
+  value,
+}: {
+  label: string;
+  value: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-tp-glass-edge bg-tp-glass-inner px-3 py-2">
+      <div className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-4">
+        {label}
+      </div>
+      <div className="mt-0.5 font-sans text-[16px] font-medium text-tp-ink">
+        {value}
+      </div>
+    </div>
+  );
+}
+
 function maskToken(token: string): string {
   if (!token) return "";
   const tail = token.slice(-4);
@@ -326,81 +652,78 @@ function maskToken(token: string): string {
 }
 
 /* ------------------------------------------------------------------ */
-/*                             Stats row                              */
+/*                            Updates feed                             */
 /* ------------------------------------------------------------------ */
 
-function StatsRow({
-  messagesToday,
-  messagesWeek,
-  p50,
-  p95,
-  activeChats,
+function UpdatesFeed({
+  filter,
+  setFilter,
+  counts,
+  isPending,
+  isError,
+  errorMessage,
+  messages,
+  onPhotoClick,
 }: {
-  messagesToday: number;
-  messagesWeek: number;
-  p50: number;
-  p95: number;
-  activeChats: number;
+  filter: UpdateFilter;
+  setFilter: (next: UpdateFilter) => void;
+  counts: Record<UpdateFilter, number>;
+  isPending: boolean;
+  isError: boolean;
+  errorMessage?: string;
+  messages: TelegramMessage[];
+  onPhotoClick: (msg: TelegramMessage) => void;
 }) {
+  const options: FilterChipOption[] = [
+    { value: "all", label: "All", count: counts.all },
+    { value: "text", label: "Text", count: counts.text },
+    { value: "photo", label: "Photo", count: counts.photo, tone: "ok" },
+    { value: "voice", label: "Voice", count: counts.voice, tone: "warn" },
+    { value: "doc", label: "Document", count: counts.doc, tone: "info" },
+  ];
+
   return (
-    <section
-      className="grid grid-cols-2 gap-3 md:grid-cols-4"
-      aria-label="Telegram channel stats"
-    >
-      <StatCard label="Messages today" value={messagesToday} />
-      <StatCard label="Messages · week" value={messagesWeek} />
-      <StatCard
-        label="Avg latency"
-        valueNode={
-          <span className="flex items-baseline gap-1">
-            <AnimatedNumber value={p50} className="text-2xl font-semibold" />
-            <span className="font-mono text-[10px] text-muted-foreground">
-              p50ms
-            </span>
-            <span className="mx-1 text-muted-foreground">·</span>
-            <AnimatedNumber
-              value={p95}
-              className="text-sm font-semibold text-muted-foreground"
-            />
-            <span className="font-mono text-[10px] text-muted-foreground">
-              p95ms
-            </span>
-          </span>
-        }
-      />
-      <StatCard label="Active chats" value={activeChats} />
-    </section>
+    <GlassPanel variant="soft" as="section" className="flex flex-col">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-tp-glass-edge px-5 py-3">
+        <h2 className="text-[14px] font-medium text-tp-ink">Recent updates</h2>
+        <FilterChipGroup
+          label="update type filter"
+          options={options}
+          value={filter}
+          onChange={(next) => setFilter(next as UpdateFilter)}
+        />
+      </header>
+
+      <div className="max-h-[420px] overflow-auto">
+        {isPending ? (
+          <FeedSkeleton />
+        ) : isError ? (
+          <p className="px-5 py-10 text-center font-mono text-[11.5px] text-tp-err">
+            Messages load failed: {errorMessage ?? "unknown error"}
+          </p>
+        ) : (
+          <MessageList messages={messages} onPhotoClick={onPhotoClick} />
+        )}
+      </div>
+    </GlassPanel>
   );
 }
 
-function StatCard({
-  label,
-  value,
-  valueNode,
-}: {
-  label: string;
-  value?: number;
-  valueNode?: React.ReactNode;
-}) {
+function FeedSkeleton() {
   return (
-    <div className="rounded-lg border border-border bg-panel p-3">
-      <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-1">
-        {valueNode ?? (
-          <AnimatedNumber
-            value={value ?? 0}
-            className="text-2xl font-semibold tabular-nums"
-          />
-        )}
-      </div>
+    <div className="space-y-2 p-5">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <div
+          key={i}
+          className="h-[56px] animate-pulse rounded-xl border border-tp-glass-edge bg-tp-glass-inner/70"
+        />
+      ))}
     </div>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*                            Debug panel                             */
+/*                             Debug panel                             */
 /* ------------------------------------------------------------------ */
 
 function DebugPanel({
@@ -411,39 +734,57 @@ function DebugPanel({
   error: string | null;
 }) {
   return (
-    <details className="rounded-lg border border-border bg-panel">
-      <summary className="cursor-pointer px-4 py-3 text-sm font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        Debug
-      </summary>
-      <div className="space-y-3 border-t border-border p-4">
-        <div>
-          <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-            Last webhook payload
-          </div>
-          <pre
-            className="max-h-[240px] overflow-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed"
-            data-testid="tg-debug-payload"
-          >
-            {payload ? JSON.stringify(payload, null, 2) : "(none)"}
-          </pre>
-        </div>
-        <div>
-          <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-            Last dispatch error
-          </div>
-          {error ? (
-            <pre
-              className="rounded-md bg-destructive/10 p-3 font-mono text-[11px] text-destructive"
-              data-testid="tg-debug-error"
-            >
-              {error}
-            </pre>
-          ) : (
-            <p className="text-xs text-muted-foreground">No recent errors.</p>
+    <GlassPanel variant="soft" as="section" className="overflow-hidden">
+      <details className="group">
+        <summary
+          className={cn(
+            "flex cursor-pointer items-center justify-between px-5 py-3",
+            "text-[13.5px] font-medium text-tp-ink",
+            "outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
           )}
+        >
+          <span>Debug</span>
+          <span className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-4 group-open:hidden">
+            click to expand
+          </span>
+        </summary>
+        <div className="space-y-3 border-t border-tp-glass-edge p-5">
+          <div>
+            <div className="mb-2 font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-4">
+              Last webhook payload
+            </div>
+            {payload ? (
+              <JsonView
+                value={payload}
+                data-testid="tg-debug-payload"
+                className="max-h-[240px]"
+              />
+            ) : (
+              <p
+                data-testid="tg-debug-payload"
+                className="rounded-lg border border-tp-glass-edge bg-tp-glass-inner p-3 font-mono text-[11px] text-tp-ink-4"
+              >
+                (none)
+              </p>
+            )}
+          </div>
+          <div>
+            <div className="mb-2 font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-4">
+              Last dispatch error
+            </div>
+            {error ? (
+              <pre
+                data-testid="tg-debug-error"
+                className="rounded-lg border border-tp-err/30 bg-tp-err-soft p-3 font-mono text-[11px] text-tp-err"
+              >
+                {error}
+              </pre>
+            ) : (
+              <p className="text-[12px] text-tp-ink-3">No recent errors.</p>
+            )}
+          </div>
         </div>
-      </div>
-    </details>
+      </details>
+    </GlassPanel>
   );
 }
-

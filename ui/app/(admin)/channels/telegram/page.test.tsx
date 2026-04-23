@@ -140,7 +140,9 @@ describe("TelegramChannelPage", () => {
     expect(screen.getByText(/avg latency/i)).toBeInTheDocument();
 
     expect(await screen.findByTestId("tg-message-m-1")).toBeInTheDocument();
-    expect(screen.getByText(/@alice/)).toBeInTheDocument();
+    // Sender now appears in both the list row AND the hero prose ("last
+    // update from @alice …"); loosen to existence.
+    expect(screen.getAllByText(/@alice/).length).toBeGreaterThan(0);
     expect(
       screen.getByText(/help me with the k8s manifest/),
     ).toBeInTheDocument();
