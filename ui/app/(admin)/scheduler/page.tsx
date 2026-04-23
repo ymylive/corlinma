@@ -3,55 +3,95 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { motion } from "framer-motion";
 import { toast } from "sonner";
-import { Play } from "lucide-react";
+import { Search } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { CountdownRing } from "@/components/ui/countdown-ring";
+import { cn } from "@/lib/utils";
+import { useMotionVariants } from "@/lib/motion";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Skeleton } from "@/components/ui/skeleton";
+  FilterChipGroup,
+  type FilterChipOption,
+} from "@/components/ui/filter-chip-group";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
-  fetchSchedulerJobs,
   fetchSchedulerHistory,
+  fetchSchedulerJobs,
   triggerSchedulerJob,
-  type SchedulerJob,
   type SchedulerHistory,
+  type SchedulerJob,
 } from "@/lib/api";
+import { SchedulerHeader } from "@/components/scheduler/scheduler-header";
+import { SchedulerStatsRow } from "@/components/scheduler/scheduler-stats-row";
+import { SchedulerRow } from "@/components/scheduler/scheduler-row";
+import { SchedulerHistoryDrawer } from "@/components/scheduler/scheduler-history-drawer";
+import {
+  SchedulerEmptyBlock,
+  SchedulerListSkeleton,
+  SchedulerOfflineBlock,
+} from "@/components/scheduler/scheduler-list-states";
+import {
+  deriveStatus,
+  formatRelative,
+  pickNextUpcoming,
+  type SchedulerStatus,
+} from "@/components/scheduler/scheduler-util";
 
 /**
- * Scheduler admin page. Job table with a live next-trigger countdown that
- * ticks every second. Row-click opens the history modal. Trigger button
- * dispatches a POST and surfaces the resulting history entry.
+ * Scheduler — Phase 5d Tidepool cutover.
+ *
+ * Layout:
+ *   [ SchedulerHeader (glass strong, prose + ⌘K CTA) ]
+ *   [ SchedulerStatsRow — Total · Enabled · Paused · Errored ]
+ *   [ search input + FilterChipGroup ]
+ *   [ job rows (stacked)         │ SchedulerHistoryDrawer (when selected) ]
+ *
+ * Data flow is unchanged from the pre-cutover page:
+ *   - `/admin/scheduler/jobs`     (60s poll) — the cron table
+ *   - `/admin/scheduler/history`  (15s poll) — the recent-attempts ring
+ *   - `triggerSchedulerJob(name)` — POST trigger, toast on result
+ *
+ * Selection: click a row to open the history drawer; click it again to
+ * close. Esc also closes. Mirrors the Approvals / Hooks pattern.
+ *
+ * Tidepool primitives in use: `GlassPanel`, `StatChip`, `FilterChipGroup`,
+ * `CountdownRing`, `DetailDrawer` (via SchedulerHistoryDrawer).
  */
+
+type FilterValue = "all" | "enabled" | "paused" | "errored";
+
+// Consider a failed history entry "recent" if it's within this window.
+const RECENT_ERROR_WINDOW_MS = 60 * 60 * 1000; // 1h
+
 export default function SchedulerPage() {
   const { t } = useTranslation();
+  const variants = useMotionVariants();
   const qc = useQueryClient();
-  const jobs = useQuery<SchedulerJob[]>({
+
+  const [search, setSearch] = React.useState("");
+  const [filter, setFilter] = React.useState<FilterValue>("all");
+  const [selectedName, setSelectedName] = React.useState<string | null>(null);
+
+  // 1-Hz tick — the row countdowns and the hero "next run in X" prose
+  // both read from this.
+  const [now, setNow] = React.useState<number>(() => Date.now());
+  React.useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const jobsQuery = useQuery<SchedulerJob[]>({
     queryKey: ["admin", "scheduler", "jobs"],
     queryFn: fetchSchedulerJobs,
     refetchInterval: 60_000,
+    retry: false,
   });
-  const history = useQuery<SchedulerHistory[]>({
+
+  const historyQuery = useQuery<SchedulerHistory[]>({
     queryKey: ["admin", "scheduler", "history"],
     queryFn: fetchSchedulerHistory,
     refetchInterval: 15_000,
+    retry: false,
   });
-
-  const [historyJob, setHistoryJob] = React.useState<string | null>(null);
 
   const triggerMutation = useMutation({
     mutationFn: (name: string) => triggerSchedulerJob(name),
@@ -66,213 +106,254 @@ export default function SchedulerPage() {
     },
   });
 
+  const jobs = jobsQuery.data ?? [];
+  const offline = jobsQuery.isError;
+
+  // ─── derived ─────────────────────────────────────────────────────────
+  const statusByName = React.useMemo(() => {
+    const m = new Map<string, SchedulerStatus>();
+    for (const j of jobs) m.set(j.name, deriveStatus(j));
+    return m;
+  }, [jobs]);
+
+  const counts = React.useMemo(() => {
+    let enabled = 0;
+    let paused = 0;
+    let errored = 0;
+    for (const j of jobs) {
+      switch (statusByName.get(j.name)) {
+        case "enabled":
+          enabled += 1;
+          break;
+        case "paused":
+          paused += 1;
+          break;
+        case "errored":
+          errored += 1;
+          break;
+      }
+    }
+    return { total: jobs.length, enabled, paused, errored };
+  }, [jobs, statusByName]);
+
+  const filtered = React.useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return jobs.filter((j) => {
+      const status = statusByName.get(j.name);
+      if (filter !== "all" && status !== filter) return false;
+      if (!q) return true;
+      return (
+        j.name.toLowerCase().includes(q) ||
+        j.cron.toLowerCase().includes(q) ||
+        (j.timezone ?? "").toLowerCase().includes(q)
+      );
+    });
+  }, [jobs, search, filter, statusByName]);
+
+  const nextUpcoming = React.useMemo(
+    () => pickNextUpcoming(jobs, now),
+    [jobs, now],
+  );
+
+  const recentlyErrored = React.useMemo(() => {
+    const history = historyQuery.data;
+    if (!history) return 0;
+    let n = 0;
+    for (const h of history) {
+      const s = h.status?.toLowerCase() ?? "";
+      if (!(s.includes("err") || s.includes("fail"))) continue;
+      const then = new Date(h.at).getTime();
+      if (!Number.isFinite(then)) continue;
+      if (now - then <= RECENT_ERROR_WINDOW_MS) n += 1;
+    }
+    return n;
+  }, [historyQuery.data, now]);
+
+  const updatedLabel = React.useMemo(() => {
+    const ts = jobsQuery.dataUpdatedAt;
+    if (!ts) return undefined;
+    return formatRelative(new Date(ts).toISOString(), t);
+  }, [jobsQuery.dataUpdatedAt, t]);
+
+  const selectedJob = React.useMemo(
+    () => (selectedName ? jobs.find((j) => j.name === selectedName) ?? null : null),
+    [jobs, selectedName],
+  );
+
+  // Drop the selection if the job disappears from the current filter.
+  React.useEffect(() => {
+    if (!selectedName) return;
+    if (!filtered.some((j) => j.name === selectedName)) {
+      setSelectedName(null);
+    }
+  }, [filtered, selectedName]);
+
   const scopedHistory = React.useMemo(() => {
-    if (!historyJob || !history.data) return [];
-    return history.data.filter((h) => h.job === historyJob);
-  }, [history.data, historyJob]);
+    if (!selectedName || !historyQuery.data) return [];
+    return historyQuery.data.filter((h) => h.job === selectedName);
+  }, [historyQuery.data, selectedName]);
+
+  // ─── keyboard: Esc closes the drawer ─────────────────────────────────
+  React.useEffect(() => {
+    if (!selectedName) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase() ?? "";
+      if (tag === "input" || tag === "textarea" || target?.isContentEditable) {
+        return;
+      }
+      e.preventDefault();
+      setSelectedName(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedName]);
+
+  const filterOptions: FilterChipOption[] = [
+    {
+      value: "all",
+      label: t("scheduler.tp.filterAll"),
+      count: counts.total,
+    },
+    {
+      value: "enabled",
+      label: t("scheduler.tp.filterEnabled"),
+      count: counts.enabled,
+      tone: "ok",
+    },
+    {
+      value: "paused",
+      label: t("scheduler.tp.filterPaused"),
+      count: counts.paused,
+      tone: "info",
+    },
+    {
+      value: "errored",
+      label: t("scheduler.tp.filterErrored"),
+      count: counts.errored,
+      tone: "err",
+    },
+  ];
+
+  const selectedStatus = selectedJob
+    ? statusByName.get(selectedJob.name) ?? deriveStatus(selectedJob)
+    : null;
 
   return (
-    <>
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {t("scheduler.title")}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {t("scheduler.subtitle")}
-        </p>
-      </header>
+    <motion.div
+      className="flex flex-col gap-4"
+      variants={variants.fadeUp}
+      initial="hidden"
+      animate="visible"
+    >
+      <SchedulerHeader
+        counts={offline ? undefined : counts}
+        updatedLabel={updatedLabel}
+        nextUp={
+          offline || !nextUpcoming
+            ? null
+            : { name: nextUpcoming.job.name, deltaMs: nextUpcoming.deltaMs }
+        }
+        recentlyErrored={offline ? 0 : recentlyErrored}
+        offline={offline}
+        fetching={jobsQuery.isFetching}
+        onRefresh={() => {
+          jobsQuery.refetch();
+          historyQuery.refetch();
+        }}
+      />
 
-      <section className="overflow-hidden rounded-lg border border-border bg-panel">
-        <Table>
-          <TableHeader>
-            <TableRow className="border-b border-border hover:bg-transparent">
-              <TableHead className="pl-4">{t("scheduler.colName")}</TableHead>
-              <TableHead>{t("scheduler.colCron")}</TableHead>
-              <TableHead>{t("scheduler.colTz")}</TableHead>
-              <TableHead>{t("scheduler.colAction")}</TableHead>
-              <TableHead>{t("scheduler.colNextFire")}</TableHead>
-              <TableHead>{t("scheduler.colLastStatus")}</TableHead>
-              <TableHead className="w-32"></TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {jobs.isPending ? (
-              <TableRow>
-                <TableCell colSpan={7} className="p-4">
-                  <Skeleton className="h-5 w-full" />
-                </TableCell>
-              </TableRow>
-            ) : jobs.data && jobs.data.length === 0 ? (
-              <TableRow>
-                <TableCell
-                  colSpan={7}
-                  className="py-10 text-center text-sm text-muted-foreground"
-                >
-                  {t("scheduler.noJobs")}
-                </TableCell>
-              </TableRow>
-            ) : (
-              jobs.data?.map((j) => (
-                <TableRow
-                  key={j.name}
-                  className="group border-b border-border transition-colors hover:bg-accent/30"
-                  onClick={() => setHistoryJob(j.name)}
-                  style={{ cursor: "pointer" }}
-                >
-                  <TableCell className="pl-4 font-medium">{j.name}</TableCell>
-                  <TableCell className="font-mono text-xs">{j.cron}</TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
-                    {j.timezone ?? "utc"}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline" className="font-mono text-[10px]">
-                      {j.action_kind}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Countdown iso={j.next_fire_at} />
-                  </TableCell>
-                  <TableCell>
-                    <StatusLabel status={j.last_status} />
-                  </TableCell>
-                  <TableCell>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={triggerMutation.isPending}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        triggerMutation.mutate(j.name);
-                      }}
-                      data-testid={`scheduler-trigger-${j.name}`}
-                    >
-                      <Play className="h-3 w-3" />
-                      {t("scheduler.triggerBtn")}
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
+      <SchedulerStatsRow
+        total={counts.total}
+        enabled={counts.enabled}
+        paused={counts.paused}
+        errored={counts.errored}
+        live={!offline}
+      />
+
+      {/* Offline info banner — parallel to Approvals. */}
+      {offline ? (
+        <div
+          role="alert"
+          className={cn(
+            "flex items-center gap-3 rounded-xl border px-3 py-2 text-[12.5px]",
+            "border-tp-glass-edge bg-tp-glass-inner text-tp-ink-3",
+          )}
+        >
+          <span>{t("scheduler.tp.endpointOfflineBanner")}</span>
+        </div>
+      ) : null}
+
+      {/* Search + filter chips */}
+      <section className="flex flex-wrap items-center justify-between gap-3">
+        <label className="relative flex min-w-[220px] flex-1 items-center sm:max-w-[360px]">
+          <Search
+            className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-tp-ink-4"
+            aria-hidden
+          />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={t("scheduler.tp.searchPlaceholder")}
+            aria-label={t("scheduler.tp.searchPlaceholder")}
+            className="h-9 w-full rounded-lg border border-tp-glass-edge bg-tp-glass-inner pl-8 pr-3 text-[13px] text-tp-ink placeholder:text-tp-ink-4 transition-colors hover:bg-tp-glass-inner-hover focus:outline-none focus:ring-2 focus:ring-tp-amber/40"
+          />
+        </label>
+        <FilterChipGroup
+          options={filterOptions}
+          value={filter}
+          onChange={(next) => setFilter(next as FilterValue)}
+          label={t("scheduler.tp.filterLabel")}
+        />
       </section>
 
-      <Dialog
-        open={historyJob !== null}
-        onOpenChange={(v) => !v && setHistoryJob(null)}
-      >
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>
-              {t("scheduler.historyTitle")}
-              {historyJob ? (
-                <span className="ml-2 font-mono text-xs text-muted-foreground">
-                  {historyJob}
-                </span>
-              ) : null}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="max-h-96 overflow-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("scheduler.historyAt")}</TableHead>
-                  <TableHead>{t("scheduler.historySource")}</TableHead>
-                  <TableHead>{t("scheduler.historyStatus")}</TableHead>
-                  <TableHead>{t("scheduler.historyMessage")}</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {scopedHistory.length === 0 ? (
-                  <TableRow>
-                    <TableCell
-                      colSpan={4}
-                      className="py-4 text-center text-sm text-muted-foreground"
-                    >
-                      {t("scheduler.noHistory")}
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  scopedHistory.map((h, i) => (
-                    <TableRow key={`${h.at}-${i}`}>
-                      <TableCell className="font-mono text-xs">{h.at}</TableCell>
-                      <TableCell className="font-mono text-xs">
-                        {h.source}
-                      </TableCell>
-                      <TableCell>
-                        <StatusLabel status={h.status} />
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {h.message}
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        </DialogContent>
-      </Dialog>
-    </>
+      {/* List + drawer */}
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="flex flex-col gap-2">
+          {jobsQuery.isPending ? (
+            <SchedulerListSkeleton />
+          ) : offline ? (
+            <SchedulerOfflineBlock
+              message={(jobsQuery.error as Error | undefined)?.message}
+            />
+          ) : filtered.length === 0 ? (
+            <SchedulerEmptyBlock hasAnyJobs={jobs.length > 0} />
+          ) : (
+            filtered.map((job) => {
+              const status = statusByName.get(job.name) ?? deriveStatus(job);
+              return (
+                <SchedulerRow
+                  key={job.name}
+                  job={job}
+                  status={status}
+                  now={now}
+                  selected={selectedName === job.name}
+                  triggering={
+                    triggerMutation.isPending &&
+                    triggerMutation.variables === job.name
+                  }
+                  onSelect={(name) =>
+                    setSelectedName((prev) => (prev === name ? null : name))
+                  }
+                  onTrigger={(name) => triggerMutation.mutate(name)}
+                />
+              );
+            })
+          )}
+        </div>
+        <aside className="lg:sticky lg:top-4 lg:self-start">
+          {selectedJob && selectedStatus ? (
+            <SchedulerHistoryDrawer
+              job={selectedJob}
+              status={selectedStatus}
+              history={scopedHistory}
+            />
+          ) : null}
+        </aside>
+      </section>
+    </motion.div>
   );
 }
 
-// Ring drain window — the ring shows "full" beyond 1 minute and empties in the
-// last 60s. A short totalMs keeps the drain perceptible without trying to
-// infer the cron cadence.
-const SCHEDULER_RING_TOTAL_MS = 60_000;
-
-/** Live countdown to `iso`. Updates every second. */
-function Countdown({ iso }: { iso: string | null }) {
-  const { t } = useTranslation();
-  const [now, setNow] = React.useState(() => Date.now());
-  React.useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
-  if (!iso) return <span className="font-mono text-xs text-muted-foreground">—</span>;
-  const then = new Date(iso).getTime();
-  const delta = then - now;
-  if (isNaN(then))
-    return <span className="font-mono text-xs text-muted-foreground">{iso}</span>;
-  if (delta <= 0) {
-    return (
-      <span className="font-mono text-xs text-warn">
-        {t("scheduler.due")} · {iso.slice(11, 19)}
-      </span>
-    );
-  }
-  const s = Math.floor(delta / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const ss = s % 60;
-  return (
-    <span className="inline-flex items-center gap-2">
-      <CountdownRing
-        remainingMs={delta}
-        totalMs={SCHEDULER_RING_TOTAL_MS}
-        size={20}
-        strokeWidth={2}
-        label={t("scheduler.colNextFire")}
-        // Hide the ring's own text; we already render richer h/m/s below.
-        className="[&>span]:hidden"
-      />
-      <span className="font-mono text-xs tabular-nums">
-        {h > 0 ? `${h}h ` : ""}
-        {m.toString().padStart(2, "0")}m {ss.toString().padStart(2, "0")}s
-      </span>
-    </span>
-  );
-}
-
-function StatusLabel({ status }: { status: string | null }) {
-  if (!status) return <span className="font-mono text-xs text-muted-foreground">—</span>;
-  const s = status.toLowerCase();
-  const tone =
-    s.includes("ok") || s.includes("success")
-      ? "text-ok"
-      : s.includes("err") || s.includes("fail")
-        ? "text-err"
-        : "text-muted-foreground";
-  return <span className={`font-mono text-xs ${tone}`}>{status}</span>;
-}
