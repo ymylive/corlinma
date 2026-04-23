@@ -26,6 +26,9 @@ dist/
 .DS_Store
 *.swp
 
+# Claude Code local workspace (agent worktrees, notes, plans)
+.claude/
+
 # Data (in-place, never commit user data)
 /config.env
 /Plugin/

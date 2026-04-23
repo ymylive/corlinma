@@ -287,6 +287,7 @@ mod tests {
 
     fn fake_manifest(name: &str, command: &str, args: &[&str]) -> PluginManifest {
         PluginManifest {
+            manifest_version: 2,
             name: name.into(),
             version: "0.1.0".into(),
             description: String::new(),
@@ -301,6 +302,9 @@ mod tests {
             capabilities: Default::default(),
             sandbox: Default::default(),
             meta: None,
+            protocols: vec!["openai_function".into()],
+            hooks: vec![],
+            skill_refs: vec![],
         }
     }
 

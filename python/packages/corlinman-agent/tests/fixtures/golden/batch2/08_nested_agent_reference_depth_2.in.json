@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {"role": "system", "content": "{{agent.mentor}}"},
+    {"role": "user", "content": "go"}
+  ],
+  "session_key": "sess-08",
+  "model_name": "gpt-4",
+  "metadata": {},
+  "agents": {
+    "mentor": "name: mentor\ndescription: mentor that chains into researcher\nsystem_prompt: |\n  Mentor says: collaborate with {{agent.researcher}}\n",
+    "researcher": "name: researcher\ndescription: deep researcher\nsystem_prompt: |\n  Researcher reports facts.\n"
+  },
+  "single_agent_gate": false
+}

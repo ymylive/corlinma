@@ -39,7 +39,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use corlinman_core::config::{Config, IssueLevel, Meta, ValidationIssue};
@@ -58,7 +58,40 @@ pub fn router(state: AdminState) -> Router {
     Router::new()
         .route("/admin/config", get(get_config).post(post_config))
         .route("/admin/config/schema", get(get_schema))
+        .route("/admin/config/reload", post(post_reload))
         .with_state(state)
+}
+
+/// `POST /admin/config/reload` — manually trigger a hot-reload of the on-disk
+/// TOML. Equivalent to sending SIGHUP to the process but authenticated + returns
+/// the [`ReloadReport`] as JSON so ops scripts can assert on the diff. Returns
+/// 503 `config_reload_disabled` when the watcher isn't wired (test harnesses,
+/// old integration tests).
+async fn post_reload(State(state): State<AdminState>) -> Response {
+    let Some(watcher) = state.config_watcher.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "config_reload_disabled",
+                "message": "gateway booted without a ConfigWatcher; hot-reload is unavailable",
+            })),
+        )
+            .into_response();
+    };
+    match watcher.trigger_reload().await {
+        Ok(report) => Json(report).into_response(),
+        Err(err) => {
+            tracing::warn!(error = %err, "admin/config/reload: trigger failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "reload_failed",
+                    "message": err.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Sprint 6 T4: `GET /admin/config/schema` — JSON-Schema document for

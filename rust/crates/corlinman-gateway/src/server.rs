@@ -20,12 +20,14 @@ use tokio::sync::broadcast;
 
 use crate::log_broadcast::LogRecord;
 use crate::metrics;
+use crate::middleware::admin_auth::AdminAuthState;
 use crate::middleware::admin_session::AdminSessionStore;
 use crate::middleware::approval::ApprovalGate;
 use crate::middleware::trace;
 use crate::routes;
 use crate::routes::admin::scheduler::SchedulerHistory;
 use crate::routes::admin::{self as admin_routes, AdminState};
+use crate::routes::canvas::CanvasState;
 use crate::routes::chat::{grpc::GrpcBackend, ChatBackend, ChatState};
 use crate::routes::HealthState;
 
@@ -189,7 +191,7 @@ pub async fn build_router_for_runtime() -> Router {
 /// the gateway boots without session history (falls back to stateless single
 /// turns). This keeps boot resilient on first run / fresh containers.
 pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>, Arc<PluginRegistry>) {
-    build_runtime_with_logs(None).await
+    build_runtime_with_logs_and_bus(None, None).await
 }
 
 /// Variant of [`build_runtime`] that also threads a `log_tx` sender
@@ -199,6 +201,40 @@ pub async fn build_runtime() -> (Router, Option<Arc<dyn ChatBackend>>, Arc<Plugi
 pub async fn build_runtime_with_logs(
     log_tx: Option<broadcast::Sender<LogRecord>>,
 ) -> (Router, Option<Arc<dyn ChatBackend>>, Arc<PluginRegistry>) {
+    build_runtime_with_logs_and_bus(log_tx, None).await
+}
+
+/// B4-BE6: variant that additionally threads the shared
+/// [`corlinman_hooks::HookBus`] into crate-internal constructors (notably
+/// [`ApprovalGate`]). `None` for `hook_bus` preserves pre-B4-BE6 wiring
+/// byte-for-byte; `Some` makes approval lifecycle events fan out to bus
+/// subscribers on top of the existing SSE broadcaster.
+pub async fn build_runtime_with_logs_and_bus(
+    log_tx: Option<broadcast::Sender<LogRecord>>,
+    hook_bus: Option<Arc<corlinman_hooks::HookBus>>,
+) -> (Router, Option<Arc<dyn ChatBackend>>, Arc<PluginRegistry>) {
+    let (router, backend, registry, _cfg, _cfg_path) =
+        build_runtime_full(log_tx, hook_bus, None).await;
+    (router, backend, registry)
+}
+
+/// B5-BE3: variant that also hands back the `Arc<ArcSwap<Config>>` and
+/// on-disk config path so `main.rs` can attach a [`ConfigWatcher`] onto the
+/// same live handle every admin / canvas / health subsystem already reads
+/// from. `watcher` is optional — when `Some`, it is installed on
+/// `admin_state.config_watcher` so `POST /admin/config/reload` works; the
+/// caller still owns the watcher task and is responsible for spawning it.
+pub async fn build_runtime_full(
+    log_tx: Option<broadcast::Sender<LogRecord>>,
+    hook_bus: Option<Arc<corlinman_hooks::HookBus>>,
+    watcher: Option<Arc<crate::config_watcher::ConfigWatcher>>,
+) -> (
+    Router,
+    Option<Arc<dyn ChatBackend>>,
+    Arc<PluginRegistry>,
+    Arc<ArcSwap<Config>>,
+    Option<PathBuf>,
+) {
     let registry = Arc::new(load_plugin_registry());
     tracing::info!(
         plugin_count = registry.len(),
@@ -211,9 +247,14 @@ pub async fn build_runtime_with_logs(
 
     // Resolve config *once* so both the admin state and the /health probe
     // share the same `Arc<ArcSwap<Config>>` — live reloads propagate to
-    // both surfaces at once.
+    // both surfaces at once. B5-BE3: when the caller passed in a
+    // `ConfigWatcher`, reuse its `ArcSwap` so a hot-reload lands in every
+    // subsystem that reads from this handle without a second swap.
     let (cfg, cfg_path) = load_admin_config();
-    let config_handle: Arc<ArcSwap<Config>> = Arc::new(ArcSwap::from_pointee(cfg));
+    let config_handle: Arc<ArcSwap<Config>> = match watcher.as_ref() {
+        Some(w) => w.arc_swap(),
+        None => Arc::new(ArcSwap::from_pointee(cfg)),
+    };
 
     // S7.T5: bundle the health probe state.
     let endpoint = resolve_endpoint();
@@ -276,11 +317,19 @@ pub async fn build_runtime_with_logs(
     let rag_store = open_rag_store().await;
     let scheduler_history = Some(SchedulerHistory::new());
     let approval_gate = rag_store.as_ref().map(|store| {
-        Arc::new(ApprovalGate::new(
+        let mut gate = ApprovalGate::new(
             config_handle.load().approvals.rules.clone(),
             store.clone(),
             StdDuration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
-        ))
+        );
+        // B4-BE6: mirror approval lifecycle to the unified bus if the
+        // caller supplied one. Additive — the gate's own
+        // `broadcast::Sender<ApprovalEvent>` still drives
+        // `/admin/approvals/stream`.
+        if let Some(bus) = hook_bus.as_ref() {
+            gate = gate.with_bus(bus.clone());
+        }
+        Arc::new(gate)
     });
     // Feature C last-mile: drop the Python-side JSON config so the
     // `ProviderRegistry` / `EmbeddingSpec` subprocess boots with the
@@ -309,19 +358,36 @@ pub async fn build_runtime_with_logs(
         }
     }
 
-    let admin_state = build_admin_state_with_config(
+    let mut admin_state = build_admin_state_with_config(
         registry.clone(),
         log_tx,
         rag_store,
         scheduler_history,
         approval_gate,
-        config_handle,
-        cfg_path,
+        config_handle.clone(),
+        cfg_path.clone(),
         Some(py_config_path),
     );
+    if let Some(w) = watcher.as_ref() {
+        admin_state = admin_state.with_config_watcher(w.clone());
+    }
+    // B5-BE1: Canvas Host protocol stubs. Sub-router carries its own auth
+    // guard (shares `AdminAuthState` with the admin surface), so we can
+    // merge it alongside the admin router without widening the public
+    // namespace. The routes return 503 when `[canvas] host_endpoint_enabled
+    // = false` (default) — see `routes::canvas`.
+    let canvas_auth_state = {
+        let mut s = AdminAuthState::new(config_handle.clone());
+        if let Some(store) = admin_state.session_store.as_ref() {
+            s = s.with_session_store(store.clone());
+        }
+        s
+    };
+    let canvas_state = CanvasState::new(config_handle.clone());
+    let base_router = base_router.merge(routes::canvas::router(canvas_state, canvas_auth_state));
     let router = mount_admin_routes(base_router, admin_state);
 
-    (router, backend_opt, registry)
+    (router, backend_opt, registry, config_handle, cfg_path)
 }
 
 /// Variant of [`build_admin_state`] that reuses a pre-loaded config handle

@@ -85,6 +85,16 @@ pub trait PluginRuntime: Send + Sync + 'static {
 
     /// Human-readable identifier for logs / metrics (e.g. "jsonrpc_stdio").
     fn kind(&self) -> &'static str;
+
+    /// Which tool-call protocol this runtime prefers when the plugin's
+    /// manifest advertises more than one. Returning `None` means "no
+    /// preference — use policy order". Default: `Some("openai_function")`.
+    ///
+    /// The dispatcher in `protocol::dispatcher` consults this only when two
+    /// protocols are otherwise equally valid for the same invocation.
+    fn preferred_protocol(&self) -> Option<&str> {
+        Some("openai_function")
+    }
 }
 
 /// Streaming progress callback; corresponds 1:1 to `ToolEvent::Progress` in proto.

@@ -20,7 +20,7 @@
 
 import * as React from "react";
 import { Command } from "cmdk";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -32,20 +32,30 @@ import {
   Command as CommandIcon,
   Database,
   FileTerminal,
+  FilterX,
   Languages,
   LogOut,
   MessageCircle,
   MessageSquare,
   Moon,
+  Plug,
+  RefreshCw,
   Route,
+  Send,
   Settings,
+  Sparkles,
   Sun,
   Timer,
+  UserSquare,
+  Wrench,
+  Zap,
 } from "lucide-react";
 
 import { logout } from "@/lib/auth";
 import { GATEWAY_BASE_URL, MOCK_API_URL } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useMotion } from "@/components/ui/motion-safe";
+import { useRecentRoutes } from "@/lib/hooks/use-recent-routes";
 
 // --- context ----------------------------------------------------------------
 
@@ -106,14 +116,20 @@ interface NavCmd {
 const NAV_CMDS: NavCmd[] = [
   { id: "nav.dashboard", labelKey: "nav.dashboard", href: "/", icon: Activity, keywords: "overview home 仪表盘 dashboard" },
   { id: "nav.plugins", labelKey: "nav.plugins", href: "/plugins", icon: Boxes, keywords: "tools manifest 插件" },
+  { id: "nav.skills", labelKey: "nav.skills", href: "/skills", icon: Wrench, keywords: "skills gallery 技能" },
   { id: "nav.agents", labelKey: "nav.agents", href: "/agents", icon: Bot, keywords: "prompt editor agent" },
+  { id: "nav.characters", labelKey: "nav.characters", href: "/characters", icon: UserSquare, keywords: "characters cards 角色卡" },
   { id: "nav.rag", labelKey: "nav.rag", href: "/rag", icon: Database, keywords: "retrieval chunks embeddings 向量" },
   { id: "nav.qq", labelKey: "nav.qq", href: "/channels/qq", icon: MessageCircle, keywords: "channels messaging 通道 qq" },
+  { id: "nav.telegram", labelKey: "nav.telegram", href: "/channels/telegram", icon: Send, keywords: "telegram channel 电报" },
   { id: "nav.scheduler", labelKey: "nav.scheduler", href: "/scheduler", icon: Timer, keywords: "cron jobs 定时任务" },
   { id: "nav.approvals", labelKey: "nav.approvals", href: "/approvals", icon: ClipboardCheck, keywords: "pending tool gate 审批" },
   { id: "nav.models", labelKey: "nav.models", href: "/models", icon: Route, keywords: "providers aliases routing 模型" },
+  { id: "nav.providers", labelKey: "nav.providers", href: "/providers", icon: Plug, keywords: "providers llm openai" },
+  { id: "nav.embedding", labelKey: "nav.embedding", href: "/embedding", icon: Sparkles, keywords: "embedding vectors 向量" },
   { id: "nav.config", labelKey: "nav.config", href: "/config", icon: Settings, keywords: "toml settings 配置" },
   { id: "nav.logs", labelKey: "nav.logs", href: "/logs", icon: FileTerminal, keywords: "stream events trace 日志" },
+  { id: "nav.hooks", labelKey: "nav.hooks", href: "/hooks", icon: Zap, keywords: "hooks events monitor" },
 ];
 
 // --- provider ---------------------------------------------------------------
@@ -125,10 +141,28 @@ export function CommandPaletteProvider({
 }) {
   const [open, setOpen] = React.useState(false);
   const toggle = React.useCallback(() => setOpen((v) => !v), []);
+  const pathname = usePathname();
+  const { record } = useRecentRoutes();
 
+  // Hotkeys: Cmd/Ctrl+K always; `?` only when not typing in an input.
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        toggle();
+        return;
+      }
+      if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const t = e.target as HTMLElement | null;
+        if (
+          t &&
+          (t.tagName === "INPUT" ||
+            t.tagName === "TEXTAREA" ||
+            t.tagName === "SELECT" ||
+            t.isContentEditable)
+        ) {
+          return;
+        }
         e.preventDefault();
         toggle();
       }
@@ -136,6 +170,11 @@ export function CommandPaletteProvider({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [toggle]);
+
+  // Track visited admin routes for the Recent section.
+  React.useEffect(() => {
+    if (pathname) record(pathname);
+  }, [pathname, record]);
 
   return (
     <CommandPaletteCtx.Provider value={{ open, setOpen, toggle }}>
@@ -157,6 +196,8 @@ function CommandPalette({
   const router = useRouter();
   const { theme, setTheme } = useTheme();
   const { t, i18n } = useTranslation();
+  const { reduced } = useMotion();
+  const { routes: recentRoutes } = useRecentRoutes();
   const [recent, setRecent] = React.useState<string[]>([]);
   const [chatOpen, setChatOpen] = React.useState(false);
 
@@ -176,6 +217,33 @@ function CommandPalette({
     for (const n of NAV_CMDS) m.set(n.id, n);
     return m;
   }, []);
+  const navByHref = React.useMemo(() => {
+    const m = new Map<string, NavCmd>();
+    for (const n of NAV_CMDS) m.set(n.href, n);
+    return m;
+  }, []);
+
+  // Prefer route-history (any visited admin path) and fall back to legacy
+  // per-id recents so existing users keep their list after this upgrade.
+  const recentEntries = React.useMemo(() => {
+    const out: { key: string; nav: NavCmd }[] = [];
+    const seen = new Set<string>();
+    for (const href of recentRoutes) {
+      const n = navByHref.get(href);
+      if (n && !seen.has(n.id)) {
+        out.push({ key: `route-${href}`, nav: n });
+        seen.add(n.id);
+      }
+    }
+    for (const rid of recent) {
+      const n = navById.get(rid);
+      if (n && !seen.has(n.id)) {
+        out.push({ key: `id-${rid}`, nav: n });
+        seen.add(n.id);
+      }
+    }
+    return out.slice(0, 5);
+  }, [recentRoutes, recent, navByHref, navById]);
 
   if (!open && !chatOpen) return null;
 
@@ -185,19 +253,25 @@ function CommandPalette({
         <div
           role="dialog"
           aria-modal="true"
+          aria-label={t("cmdk.commandMenu")}
           className="fixed inset-0 z-[60] flex items-start justify-center px-4 pt-[15vh]"
         >
           {/* blurred backdrop */}
           <div
-            className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in-0 duration-150"
+            className={cn(
+              "absolute inset-0 bg-black/60 backdrop-blur-sm",
+              reduced ? null : "animate-in fade-in-0 duration-150",
+            )}
             onClick={() => setOpen(false)}
             aria-hidden
           />
           <div
             className={cn(
               "relative z-10 w-full max-w-[640px] overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-2xl",
-              "animate-in fade-in-0 zoom-in-95 duration-150",
+              // springPop opening animation; stripped under reduced-motion.
+              reduced ? null : "animate-in fade-in-0 zoom-in-95 duration-150",
             )}
+            data-motion={reduced ? "reduced" : "spring"}
           >
             <Command label={t("cmdk.commandMenu")} loop>
               <div className="flex items-center gap-2 border-b border-border px-3">
@@ -216,19 +290,17 @@ function CommandPalette({
                   {t("cmdk.noResults")}
                 </Command.Empty>
 
-                {recent.length > 0 ? (
+                {recentEntries.length > 0 ? (
                   <Command.Group
                     heading={t("cmdk.groupRecent")}
                     className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[10px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-muted-foreground"
                   >
-                    {recent.map((rid) => {
-                      const n = navById.get(rid);
-                      if (!n) return null;
+                    {recentEntries.map(({ key, nav: n }) => {
                       const Icon = n.icon;
                       const label = t(n.labelKey);
                       return (
                         <PaletteItem
-                          key={`recent-${rid}`}
+                          key={`recent-${key}`}
                           value={`recent ${label} ${n.keywords ?? ""}`}
                           onSelect={() =>
                             run(n.id, () => router.push(n.href as never))
@@ -315,6 +387,37 @@ function CommandPalette({
                     hint={t("cmdk.switchLanguageHint")}
                   />
                   <PaletteItem
+                    value="reload config refresh toml 重载配置"
+                    onSelect={() =>
+                      run("action.reload-config", () => {
+                        // TODO(B4): wire to POST /admin/config/reload once the
+                        // gateway exposes the endpoint. For now surface a
+                        // confirmation toast so users see the keyboard path.
+                        toast.success(t("cmdk.reloadConfig"));
+                      })
+                    }
+                    icon={<RefreshCw className="h-4 w-4" />}
+                    label={t("cmdk.reloadConfig")}
+                    hint={t("cmdk.reloadConfigHint")}
+                  />
+                  <PaletteItem
+                    value="clear filter reset 清除筛选"
+                    onSelect={() =>
+                      run("action.clear-filter", () => {
+                        // TODO(B3): broadcast a `corlinman.filter.clear` event
+                        // once the per-page filter stores land. For now this
+                        // is a stub + toast so the shortcut is discoverable.
+                        window.dispatchEvent(
+                          new CustomEvent("corlinman.filter.clear"),
+                        );
+                        toast.success(t("cmdk.clearFilter"));
+                      })
+                    }
+                    icon={<FilterX className="h-4 w-4" />}
+                    label={t("cmdk.clearFilter")}
+                    hint={t("cmdk.clearFilterHint")}
+                  />
+                  <PaletteItem
                     value="logout sign out 退出"
                     onSelect={() =>
                       run("action.logout", async () => {
@@ -334,6 +437,7 @@ function CommandPalette({
                   />
                 </Command.Group>
               </Command.List>
+              <PaletteShortcutFooter />
             </Command>
           </div>
         </div>
@@ -374,6 +478,29 @@ function PaletteItem({
         <span className="font-mono text-[10px] text-muted-foreground">{hint}</span>
       ) : null}
     </Command.Item>
+  );
+}
+
+function PaletteShortcutFooter() {
+  const { t } = useTranslation();
+  const parts = [
+    t("cmdk.hintNavigate"),
+    t("cmdk.hintSelect"),
+    t("cmdk.hintClose"),
+    t("cmdk.hintToggle"),
+  ];
+  return (
+    <div
+      className="flex items-center gap-3 border-t border-border px-3 py-2 text-[10px] text-muted-foreground"
+      data-testid="cmdk-footer"
+      aria-hidden="true"
+    >
+      {parts.map((p, i) => (
+        <span key={i} className="font-mono">
+          {p}
+        </span>
+      ))}
+    </div>
   );
 }
 

@@ -1,0 +1,15 @@
+{
+  "messages": [
+    {"role": "system", "content": "tar={{TarMood}} var={{VarRole}} sar={{SarPrompt7}}"},
+    {"role": "user", "content": "ok"}
+  ],
+  "session_key": "sess-03",
+  "model_name": "claude-3",
+  "metadata": {},
+  "tar": {"Mood": "cheerful"},
+  "sar": {"SarPrompt7": "sar-body-text"},
+  "env": {
+    "VarRole": "admin",
+    "SarModel7": "gpt-4,claude-3"
+  }
+}

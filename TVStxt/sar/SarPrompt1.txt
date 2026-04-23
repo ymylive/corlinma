@@ -1,0 +1,3 @@
+(This is a model-specific instruction — it fires only when the current model name is in the comma-separated list at env SarModel1.)
+
+Additional instruction: respond in concise bullet points, max 5 bullets, no preamble. Save prose paragraphs for follow-up questions.

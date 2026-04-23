@@ -2,6 +2,16 @@
 
 本文给准备贡献代码的开发者用。读完你应能回答：消息从 HTTP 进来到 SSE 出去经过哪几个进程；一个新 Rust 模块该放哪个 crate；一个 proto 字段该加到哪个 service。
 
+> **What's new since v1** — v0.2 adds four Rust crates (`corlinman-hooks`,
+> `corlinman-skills`, `corlinman-wstool`, `corlinman-nodebridge`), one
+> Python package (`corlinman-tagmemo`), seven admin UI pages
+> (`/skills`, `/characters`, `/hooks`, `/playground/protocol`,
+> `/channels/telegram`, `/nodes`, plus tagmemo/diary/canvas surfaces),
+> a vector schema bump to v6 (hierarchical `tag_nodes` + `chunk_epa`
+> cache), a manifest bump to v2 (`protocols` / `hooks` / `skill_refs`),
+> and eight reserved placeholder namespaces. Full upgrade instructions
+> live in [`migration/v1-to-v2.md`](migration/v1-to-v2.md).
+
 **前置知识**：你看过顶层 [README.md](../README.md)，熟悉 async Rust 和 Python asyncio 的基本概念。
 
 > 本文不重复计划文件里的决策、里程碑、风险。这些在
@@ -111,6 +121,10 @@
 | `corlinman-agent-client` | gRPC client 包装（背压、重试、cancel 级联、分类错误） |
 | `corlinman-scheduler` | `tokio-cron-scheduler` 封装 + `Job` trait，shutdown cascade |
 | `corlinman-cli` | `corlinman` 主 binary：`onboard` / `doctor` / `plugins` / `config` / `dev` / `qa` |
+| `corlinman-hooks` | 进程内 hook bus（`[hooks]` 配置），manifest `hooks=[...]` 订阅事件 |
+| `corlinman-skills` | `skills/*.md` openclaw 风格加载器 + 注入到 system prompt |
+| `corlinman-wstool` | 本地 WebSocket 工具总线（`[wstool]`），loopback 默认 |
+| `corlinman-nodebridge` | Node.js worker bridge 监听器（`[nodebridge]`） |
 
 ## 4. Python package 图
 
@@ -153,6 +167,7 @@
 | `corlinman_agent` | `reasoning_loop.py`（自建，不依赖 LangChain）+ context_assembler + session |
 | `corlinman_embedding` | 本地 `ProcessPoolExecutor` 绕 GIL，或走 remote embedding 服务 |
 | `corlinman_server` | `grpc.aio.server()` 主入口、traceparent middleware、SIGTERM 143 |
+| `corlinman_tagmemo` | EPA basis fitting + pyramid build，feeds `chunk_epa` cache（v0.2 起） |
 
 统一规约：配置用 pydantic v2 strict，日志用 structlog + JSON，异常继承 `CorlinmanError`。
 
@@ -315,6 +330,17 @@ self_ids = [123456789]
 
 **Docker ENTRYPOINT**：`tini -- corlinman-gateway`，tini 负责转发信号；SIGTERM 传到 gateway 后级联关 Python 子进程（gateway 的 shutdown handler 向 Python UDS socket 写关闭帧后 `wait()` Python 进程）。
 
+## Protocols reserved for device clients
+
+The gateway ships one wire contract for future device-class clients
+(iOS / Android / macOS / Linux / Electron):
+
+- **NodeBridge v1** — WebSocket + JSON at `config.nodebridge.listen`
+  (default `127.0.0.1:18788`). Registration + heartbeat + dispatch +
+  telemetry. Implemented by the stub crate `corlinman-nodebridge`; no
+  native client is built from this repo. See
+  [`protocols/nodebridge.md`](protocols/nodebridge.md).
+
 ## 延伸阅读
 
 - 跨进程通道更多细节：`proto/corlinman/v1/agent.proto` 的注释（M0 写）
@@ -322,3 +348,4 @@ self_ids = [123456789]
 - 每个 crate 的内部模块：该 crate 目录下的 `README.md`（M1 起每个 crate 维护）
 - 一张图回答"一个请求花在哪"：`/metrics` 的 `corlinman_chat_stream_duration_seconds` histogram 加 `label=stage`（M7 引入）
 - 当前里程碑进展表：[milestones.md](milestones.md)
+- Canvas Host 协议（B5-BE1，`POST /canvas/session` / `POST /canvas/frame` / SSE `GET /canvas/session/:id/events`）：见 [openapi/canvas.yaml](openapi/canvas.yaml)，默认受 `[canvas] host_endpoint_enabled = false` 屏蔽。

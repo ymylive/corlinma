@@ -498,6 +498,7 @@ mod tests {
 
     fn fixture_manifest(sandbox: SandboxConfig) -> PluginManifest {
         PluginManifest {
+            manifest_version: 2,
             name: "fixture".into(),
             version: "0.1.0".into(),
             description: String::new(),
@@ -512,6 +513,9 @@ mod tests {
             capabilities: Default::default(),
             sandbox,
             meta: None,
+            protocols: vec!["openai_function".into()],
+            hooks: vec![],
+            skill_refs: vec![],
         }
     }
 

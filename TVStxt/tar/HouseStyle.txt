@@ -1,0 +1,1 @@
+House style: English + minimal Chinese callouts (for 中文 users) where product surface is bilingual. Prefer present tense, active voice, second person. Never invent library APIs — verify before citing.

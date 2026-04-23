@@ -62,6 +62,34 @@ pub struct Config {
     pub scheduler: SchedulerConfig,
     #[validate(nested)]
     pub logging: LoggingConfig,
+    // --- B1-BE4 additions; each defaults so existing configs still parse. ---
+    #[serde(default)]
+    #[validate(nested)]
+    pub hooks: HooksConfig,
+    #[serde(default)]
+    #[validate(nested)]
+    pub skills: SkillsConfig,
+    #[serde(default)]
+    #[validate(nested)]
+    pub variables: VariablesConfig,
+    #[serde(default)]
+    #[validate(nested)]
+    pub agents: AgentsConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub vector: VectorConfig,
+    #[serde(default)]
+    #[validate(nested)]
+    pub wstool: WsToolConfig,
+    #[serde(default)]
+    #[validate(nested)]
+    pub canvas: CanvasConfig,
+    #[serde(default)]
+    #[validate(nested)]
+    pub nodebridge: NodeBridgeConfig,
     pub meta: Meta,
 }
 
@@ -548,6 +576,24 @@ pub struct RagConfig {
     /// Disabled by default — flip `enabled = true` to hand the fused
     /// candidates to the Python embedding service's rerank client.
     pub rerank: RerankConfig,
+    /// Sprint 9 T-B3-BE5: feature flag for EPA re-ranking boost.
+    /// When `false` (default) the hybrid searcher's RRF output is
+    /// byte-identical to pre-B3-BE5 behaviour. Flip to `true` to
+    /// multiply each candidate's fused score by the `dynamic_boost`
+    /// derived from its stored `chunk_epa` row (if present).
+    #[serde(default)]
+    pub epa_enabled: bool,
+    /// Base multiplier fed into `dynamic_boost`. `1.0` keeps the boost
+    /// centred at the unclamped formula; larger values bias toward the
+    /// ceiling of `epa_boost_range`.
+    #[serde(default = "default_epa_base_tag_boost")]
+    #[validate(range(min = 0.0, max = 100.0))]
+    pub epa_base_tag_boost: f32,
+    /// Clamp range for the final boost factor `[min, max]`. Defaults
+    /// to `[0.5, 2.5]` — i.e. at most a 5× swing between the worst and
+    /// best chunks under the same RRF baseline.
+    #[serde(default = "default_epa_boost_range")]
+    pub epa_boost_range: [f32; 2],
 }
 
 impl Default for RagConfig {
@@ -559,6 +605,9 @@ impl Default for RagConfig {
             hybrid_hnsw_weight: 1.0,
             rrf_k: default_rrf_k(),
             rerank: RerankConfig::default(),
+            epa_enabled: false,
+            epa_base_tag_boost: default_epa_base_tag_boost(),
+            epa_boost_range: default_epa_boost_range(),
         }
     }
 }
@@ -571,6 +620,12 @@ fn default_top_k() -> usize {
 }
 fn default_rrf_k() -> f32 {
     60.0
+}
+fn default_epa_base_tag_boost() -> f32 {
+    1.0
+}
+fn default_epa_boost_range() -> [f32; 2] {
+    [0.5, 2.5]
 }
 
 /// Cross-encoder rerank configuration.
@@ -713,6 +768,275 @@ fn validate_log_format(v: &str) -> Result<(), validator::ValidationError> {
     match v {
         "json" | "text" => Ok(()),
         _ => Err(validator::ValidationError::new("log_format")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [hooks] — in-process hook bus (B1-BE4).
+// ---------------------------------------------------------------------------
+
+/// Capacity + master switch for the in-process hook bus. Consumers (skills,
+/// agents, plugins) register synchronous handlers; `capacity` caps the bounded
+/// fan-out queue. When `enabled = false` handlers are still registered but the
+/// bus short-circuits dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct HooksConfig {
+    #[validate(range(min = 1, max = 1_048_576))]
+    pub capacity: usize,
+    pub enabled: bool,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            capacity: 1024,
+            enabled: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [skills] — filesystem-loaded skill bundles (B1-BE4).
+// ---------------------------------------------------------------------------
+
+/// Skills are discovered by walking `dir` relative to the data_dir. With
+/// `autoload = true` the runtime indexes them at startup; otherwise they must
+/// be requested explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillsConfig {
+    #[validate(length(min = 1))]
+    pub dir: String,
+    pub autoload: bool,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            dir: "skills".into(),
+            autoload: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [variables] — TVStxt variable stores (tar/var/sar/fixed).
+// ---------------------------------------------------------------------------
+
+/// Four on-disk variable stores used by the placeholder engine. Paths are
+/// resolved relative to the data_dir. `hot_reload = true` makes the runtime
+/// watch the directories and reload on change.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct VariablesConfig {
+    #[validate(length(min = 1))]
+    pub tar_dir: String,
+    #[validate(length(min = 1))]
+    pub var_dir: String,
+    #[validate(length(min = 1))]
+    pub sar_dir: String,
+    #[validate(length(min = 1))]
+    pub fixed_dir: String,
+    pub hot_reload: bool,
+}
+
+impl Default for VariablesConfig {
+    fn default() -> Self {
+        Self {
+            tar_dir: "TVStxt/tar".into(),
+            var_dir: "TVStxt/var".into(),
+            sar_dir: "TVStxt/sar".into(),
+            fixed_dir: "TVStxt/fixed".into(),
+            hot_reload: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [agents] — character-card / {{角色}} registry (B1-BE4).
+// ---------------------------------------------------------------------------
+
+/// Agents live under `dir` relative to data_dir. `single_agent_gate = true`
+/// enforces classic "first expansion wins" — the first agent invocation in
+/// a turn gates subsequent expansions in the same prompt.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentsConfig {
+    #[validate(length(min = 1))]
+    pub dir: String,
+    pub single_agent_gate: bool,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            dir: "agents".into(),
+            single_agent_gate: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [tools] + [tools.block] — dual-track tool invocation (B1-BE4).
+// ---------------------------------------------------------------------------
+
+/// Top-level `[tools]` wrapper. Currently holds the block-tool dual-track
+/// switch; future tracks (OpenAI function-call parallel mode, etc.) get added
+/// here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolsConfig {
+    pub block: BlockToolsConfig,
+}
+
+/// Block-tool protocol opt-in. When `enabled = false`, block-tool expansion is
+/// skipped and only the regular function-call track runs. When `enabled = true`
+/// and `fallback_to_function_call = true`, agents that don't advertise the
+/// block protocol are silently downgraded to function-calling.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlockToolsConfig {
+    pub enabled: bool,
+    pub fallback_to_function_call: bool,
+}
+
+impl Default for BlockToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fallback_to_function_call: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [telegram] + [telegram.webhook] — webhook-mode Telegram adapter.
+// ---------------------------------------------------------------------------
+
+/// Top-level `[telegram]` wrapper for webhook-mode configuration. The
+/// long-poll adapter lives under `[channels.telegram]` and is unaffected.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelegramConfig {
+    pub webhook: TelegramWebhookConfig,
+}
+
+/// Webhook-mode Telegram bot config. `public_url` is the HTTPS URL Telegram
+/// will POST updates to; empty string = webhook disabled. `secret_token` is
+/// echoed back in `X-Telegram-Bot-Api-Secret-Token` by Telegram so the
+/// handler can authenticate inbound requests.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelegramWebhookConfig {
+    pub public_url: String,
+    pub secret_token: String,
+    pub drop_updates_on_reconnect: bool,
+}
+
+// ---------------------------------------------------------------------------
+// [vector] + [vector.tags] — opt-in v6 hierarchical tag tree.
+// ---------------------------------------------------------------------------
+
+/// Top-level `[vector]` wrapper. Currently holds the hierarchical-tag opt-in;
+/// room to grow for future vector-store knobs without another top-level table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct VectorConfig {
+    pub tags: VectorTagsConfig,
+}
+
+/// Hierarchical tag tree for the vector store. Off by default; when
+/// `hierarchy_enabled = true`, tags may be dotted paths (`a.b.c`) and queries
+/// match prefix subtrees up to `max_depth` levels deep.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct VectorTagsConfig {
+    pub hierarchy_enabled: bool,
+    #[validate(range(min = 1, max = 32))]
+    pub max_depth: u32,
+}
+
+impl Default for VectorTagsConfig {
+    fn default() -> Self {
+        Self {
+            hierarchy_enabled: false,
+            max_depth: 6,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [wstool] — local WebSocket tool-bus.
+// ---------------------------------------------------------------------------
+
+/// Local WebSocket bus for tool plugins that prefer a streaming socket over
+/// stdio. `bind` defaults to loopback for safety. `auth_token` is required
+/// when `bind` is non-loopback (validated via [`Config::validate`]).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct WsToolConfig {
+    #[validate(length(min = 1))]
+    pub bind: String,
+    pub auth_token: String,
+    #[validate(range(min = 1, max = 3600))]
+    pub heartbeat_secs: u32,
+}
+
+impl Default for WsToolConfig {
+    fn default() -> Self {
+        Self {
+            bind: "127.0.0.1:18790".into(),
+            auth_token: String::new(),
+            heartbeat_secs: 15,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [canvas] — host canvas endpoint.
+// ---------------------------------------------------------------------------
+
+/// Canvas host endpoint (code / diagram preview). Off by default;
+/// `session_ttl_secs` bounds the per-session scratch retention.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct CanvasConfig {
+    pub host_endpoint_enabled: bool,
+    #[validate(range(min = 1, max = 86_400))]
+    pub session_ttl_secs: u32,
+}
+
+impl Default for CanvasConfig {
+    fn default() -> Self {
+        Self {
+            host_endpoint_enabled: false,
+            session_ttl_secs: 1800,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [nodebridge] — Node.js child-process bridge listener.
+// ---------------------------------------------------------------------------
+
+/// Bridge listener for Node.js worker children. `accept_unsigned = false`
+/// reserves future signed-payload verification; the switch is live today so
+/// migrations later flip to true/false without schema churn.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct NodeBridgeConfig {
+    #[validate(length(min = 1))]
+    pub listen: String,
+    pub accept_unsigned: bool,
+}
+
+impl Default for NodeBridgeConfig {
+    fn default() -> Self {
+        Self {
+            listen: "127.0.0.1:18788".into(),
+            accept_unsigned: false,
+        }
     }
 }
 
@@ -983,6 +1307,40 @@ impl Config {
         issues
     }
 
+    /// Human-readable convenience wrapper around [`Config::validate_report`].
+    ///
+    /// Returns `Ok(())` iff the report contains no `Error`-level issues;
+    /// otherwise `Err(Vec<String>)` with one line per error, formatted as
+    /// `"<path>: <code>: <message>"`. Warnings are intentionally dropped here
+    /// (callers that care about warnings should use `validate_report`).
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        // Cross-field rule specific to this facade: if wstool binds to a
+        // non-loopback address, require an auth_token. Purely a defence-in-
+        // depth hint; `validate_report` doesn't emit this today so network-
+        // exposed wstool sockets without a token still boot, which is not
+        // what we want for the "did you configure this safely?" facade.
+        let mut extra: Vec<String> = Vec::new();
+        if !is_loopback_bind(&self.wstool.bind) && self.wstool.auth_token.is_empty() {
+            extra.push(format!(
+                "wstool.auth_token: wstool_token_required: wstool.bind = '{}' is non-loopback but auth_token is empty",
+                self.wstool.bind
+            ));
+        }
+
+        let errors: Vec<String> = self
+            .validate_report()
+            .into_iter()
+            .filter(|i| i.level == IssueLevel::Error)
+            .map(|i| format!("{}: {}: {}", i.path, i.code, i.message))
+            .chain(extra)
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
     /// A clone with `SecretRef::Literal` values redacted, suitable for logging
     /// or `corlinman config show`.
     pub fn redacted(&self) -> Self {
@@ -1002,6 +1360,24 @@ impl Config {
             out.admin.password_hash = Some("***REDACTED***".into());
         }
         out
+    }
+}
+
+/// Return `true` iff `bind` is a loopback `host:port` (`127.0.0.0/8` or `::1`).
+/// Any unparseable or non-loopback address returns `false`. Best-effort; the
+/// goal is just to gate the "non-loopback without auth_token" warning.
+fn is_loopback_bind(bind: &str) -> bool {
+    // Accept `host:port` only. Strip the port then parse the host as an IP.
+    // We intentionally don't try to resolve hostnames — "localhost" isn't
+    // auto-trusted because an operator overriding /etc/hosts shouldn't change
+    // the security posture of the config schema.
+    let host = match bind.rsplit_once(':') {
+        Some((h, _)) => h.trim_start_matches('[').trim_end_matches(']'),
+        None => return false,
+    };
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
     }
 }
 
@@ -1417,5 +1793,284 @@ bogus = "field"
             get_dotted(&cfg, "does.not.exist"),
             Err(CorlinmanError::NotFound { .. })
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // B1-BE4: new top-level sections.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_toml_populates_all_new_sections_with_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+
+        assert_eq!(cfg.hooks.capacity, 1024);
+        assert!(cfg.hooks.enabled);
+
+        assert_eq!(cfg.skills.dir, "skills");
+        assert!(cfg.skills.autoload);
+
+        assert_eq!(cfg.variables.tar_dir, "TVStxt/tar");
+        assert_eq!(cfg.variables.var_dir, "TVStxt/var");
+        assert_eq!(cfg.variables.sar_dir, "TVStxt/sar");
+        assert_eq!(cfg.variables.fixed_dir, "TVStxt/fixed");
+        assert!(cfg.variables.hot_reload);
+
+        assert_eq!(cfg.agents.dir, "agents");
+        assert!(cfg.agents.single_agent_gate);
+
+        assert!(!cfg.tools.block.enabled);
+        assert!(cfg.tools.block.fallback_to_function_call);
+
+        assert_eq!(cfg.telegram.webhook.public_url, "");
+        assert_eq!(cfg.telegram.webhook.secret_token, "");
+        assert!(!cfg.telegram.webhook.drop_updates_on_reconnect);
+
+        assert!(!cfg.vector.tags.hierarchy_enabled);
+        assert_eq!(cfg.vector.tags.max_depth, 6);
+
+        assert_eq!(cfg.wstool.bind, "127.0.0.1:18790");
+        assert_eq!(cfg.wstool.auth_token, "");
+        assert_eq!(cfg.wstool.heartbeat_secs, 15);
+
+        assert!(!cfg.canvas.host_endpoint_enabled);
+        assert_eq!(cfg.canvas.session_ttl_secs, 1800);
+
+        assert_eq!(cfg.nodebridge.listen, "127.0.0.1:18788");
+        assert!(!cfg.nodebridge.accept_unsigned);
+    }
+
+    #[test]
+    fn existing_full_toml_still_parses_with_new_sections_absent() {
+        // The pre-B1-BE4 full_toml fixture mentions none of the new sections;
+        // this is the back-compat guarantee — it must still load untouched.
+        let cfg: Config = toml::from_str(&full_toml()).unwrap();
+        assert_eq!(cfg.hooks.capacity, 1024);
+        assert_eq!(cfg.variables.tar_dir, "TVStxt/tar");
+        assert_eq!(cfg.wstool.bind, "127.0.0.1:18790");
+    }
+
+    #[test]
+    fn docs_example_toml_still_parses() {
+        // `docs/config.example.toml` is the source of truth the README points
+        // readers at. Load it by path so any addition to the example is
+        // forced through `Config`'s deny-unknown-fields gate.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("..")
+            .join("docs")
+            .join("config.example.toml");
+        if !path.exists() {
+            // The example file is optional — if it's missing we skip rather
+            // than failing. This keeps the test portable across checkouts
+            // that strip the docs/ tree.
+            return;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let cfg: Config = toml::from_str(&text).expect("docs/config.example.toml must parse");
+        // spot-check: defaults still present for new sections if the example
+        // doesn't override them.
+        assert!(cfg.hooks.enabled);
+    }
+
+    #[test]
+    fn hooks_fragment_parses() {
+        let frag = r#"
+[hooks]
+capacity = 4096
+enabled = false
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert_eq!(cfg.hooks.capacity, 4096);
+        assert!(!cfg.hooks.enabled);
+    }
+
+    #[test]
+    fn skills_fragment_parses() {
+        let frag = r#"
+[skills]
+dir = "my-skills"
+autoload = false
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert_eq!(cfg.skills.dir, "my-skills");
+        assert!(!cfg.skills.autoload);
+    }
+
+    #[test]
+    fn variables_fragment_parses() {
+        let frag = r#"
+[variables]
+tar_dir = "a"
+var_dir = "b"
+sar_dir = "c"
+fixed_dir = "d"
+hot_reload = false
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert_eq!(cfg.variables.tar_dir, "a");
+        assert_eq!(cfg.variables.fixed_dir, "d");
+        assert!(!cfg.variables.hot_reload);
+    }
+
+    #[test]
+    fn agents_fragment_parses() {
+        let frag = r#"
+[agents]
+dir = "./agents-custom"
+single_agent_gate = false
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert_eq!(cfg.agents.dir, "./agents-custom");
+        assert!(!cfg.agents.single_agent_gate);
+    }
+
+    #[test]
+    fn tools_block_fragment_parses() {
+        let frag = r#"
+[tools.block]
+enabled = true
+fallback_to_function_call = false
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert!(cfg.tools.block.enabled);
+        assert!(!cfg.tools.block.fallback_to_function_call);
+    }
+
+    #[test]
+    fn telegram_webhook_fragment_parses() {
+        let frag = r#"
+[telegram.webhook]
+public_url = "https://bot.example.com/telegram/webhook"
+secret_token = "sekret"
+drop_updates_on_reconnect = true
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert_eq!(
+            cfg.telegram.webhook.public_url,
+            "https://bot.example.com/telegram/webhook"
+        );
+        assert_eq!(cfg.telegram.webhook.secret_token, "sekret");
+        assert!(cfg.telegram.webhook.drop_updates_on_reconnect);
+    }
+
+    #[test]
+    fn vector_tags_fragment_parses() {
+        let frag = r#"
+[vector.tags]
+hierarchy_enabled = true
+max_depth = 4
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert!(cfg.vector.tags.hierarchy_enabled);
+        assert_eq!(cfg.vector.tags.max_depth, 4);
+    }
+
+    #[test]
+    fn wstool_fragment_parses() {
+        let frag = r#"
+[wstool]
+bind = "0.0.0.0:19000"
+auth_token = "tok"
+heartbeat_secs = 30
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert_eq!(cfg.wstool.bind, "0.0.0.0:19000");
+        assert_eq!(cfg.wstool.auth_token, "tok");
+        assert_eq!(cfg.wstool.heartbeat_secs, 30);
+    }
+
+    #[test]
+    fn canvas_fragment_parses() {
+        let frag = r#"
+[canvas]
+host_endpoint_enabled = true
+session_ttl_secs = 600
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert!(cfg.canvas.host_endpoint_enabled);
+        assert_eq!(cfg.canvas.session_ttl_secs, 600);
+    }
+
+    #[test]
+    fn nodebridge_fragment_parses() {
+        let frag = r#"
+[nodebridge]
+listen = "127.0.0.1:19001"
+accept_unsigned = true
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert_eq!(cfg.nodebridge.listen, "127.0.0.1:19001");
+        assert!(cfg.nodebridge.accept_unsigned);
+    }
+
+    fn cfg_with_one_provider() -> Config {
+        let mut cfg = Config::default();
+        cfg.providers.anthropic = Some(ProviderEntry {
+            api_key: Some(SecretRef::EnvVar {
+                env: "ANTHROPIC_API_KEY".into(),
+            }),
+            base_url: None,
+            enabled: true,
+            ..Default::default()
+        });
+        cfg
+    }
+
+    #[test]
+    fn validate_ok_on_minimal_config_with_provider() {
+        // Default config (no provider) produces a `no_provider_enabled` warn,
+        // not an error; with one enabled provider, validate() should be Ok.
+        cfg_with_one_provider()
+            .validate()
+            .expect("validate returned errors");
+    }
+
+    #[test]
+    fn validate_flags_wstool_nonloopback_without_token() {
+        let mut cfg = cfg_with_one_provider();
+        cfg.wstool.bind = "0.0.0.0:18790".into();
+        cfg.wstool.auth_token = String::new();
+        let errs = cfg.validate().expect_err("expected a wstool error");
+        assert!(
+            errs.iter().any(|e| e.contains("wstool_token_required")),
+            "expected wstool_token_required, got: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn validate_wstool_loopback_without_token_is_ok() {
+        // default bind = 127.0.0.1:18790, empty token is fine on loopback.
+        cfg_with_one_provider()
+            .validate()
+            .expect("loopback + empty token must be ok");
+    }
+
+    #[test]
+    fn validate_wstool_ipv6_loopback_is_ok() {
+        let mut cfg = cfg_with_one_provider();
+        cfg.wstool.bind = "[::1]:18790".into();
+        cfg.validate().expect("[::1] is loopback");
+    }
+
+    #[test]
+    fn validate_wstool_nonloopback_with_token_is_ok() {
+        let mut cfg = cfg_with_one_provider();
+        cfg.wstool.bind = "0.0.0.0:18790".into();
+        cfg.wstool.auth_token = "tok".into();
+        cfg.validate()
+            .expect("non-loopback with a token must be accepted");
+    }
+
+    #[test]
+    fn validate_propagates_validator_derive_errors() {
+        let mut cfg = cfg_with_one_provider();
+        // hooks.capacity = 0 fails the validator range(min=1).
+        cfg.hooks.capacity = 0;
+        let errs = cfg.validate().expect_err("expected validator error");
+        assert!(
+            errs.iter().any(|e| e.contains("hooks.capacity")),
+            "expected hooks.capacity error, got: {errs:?}"
+        );
     }
 }

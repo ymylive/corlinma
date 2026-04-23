@@ -27,6 +27,10 @@ pub use corlinman_core::manifest::Meta;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct PluginManifest {
+    /// Manifest schema version. Absent/0/1 = v1 (legacy); 2 = v2+.
+    #[serde(default = "default_manifest_version")]
+    pub manifest_version: u32,
+
     /// Stable identifier; lowercase letters / digits / dashes only.
     #[validate(length(min = 1, max = 128))]
     pub name: String,
@@ -64,7 +68,50 @@ pub struct PluginManifest {
     /// UI "last touched" metadata (shared with core).
     #[serde(default)]
     pub meta: Option<Meta>,
+
+    /// Tool-call protocols the plugin can accept. Default: `["openai_function"]`.
+    #[serde(default = "default_protocols")]
+    pub protocols: Vec<String>,
+
+    /// Hook events this plugin subscribes to (matches
+    /// `corlinman-hooks` HookEvent kinds).
+    #[serde(default)]
+    pub hooks: Vec<String>,
+
+    /// Skill identifiers this plugin participates in.
+    #[serde(default)]
+    pub skill_refs: Vec<String>,
 }
+
+fn default_manifest_version() -> u32 {
+    1
+}
+
+fn default_protocols() -> Vec<String> {
+    vec!["openai_function".into()]
+}
+
+/// Protocols we currently accept. Additions require a coordinated
+/// gateway+plugin rollout.
+const KNOWN_PROTOCOLS: &[&str] = &["openai_function", "block"];
+
+/// Hook event kinds known as of the B1 plan. Unknown names are a warning,
+/// not an error — manifests may reference hooks that ship in a later
+/// gateway version (forward-compat).
+const KNOWN_HOOK_EVENTS: &[&str] = &[
+    "message.received",
+    "message.sent",
+    "message.transcribed",
+    "message.preprocessed",
+    "session.patch",
+    "agent.bootstrap",
+    "gateway.startup",
+    "config.changed",
+];
+
+/// Highest schema version this gateway understands. Manifests declaring a
+/// higher value are rejected with a forward-compat hint.
+const MAX_SUPPORTED_MANIFEST_VERSION: u32 = 2;
 
 /// Plugin runtime taxonomy. Three variants covering sync / async / service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, Default)]
@@ -207,21 +254,80 @@ pub enum ManifestParseError {
 /// Canonical filename the discovery layer looks for.
 pub const MANIFEST_FILENAME: &str = "plugin-manifest.toml";
 
-/// Parse a single manifest file from disk and validate it.
+impl PluginManifest {
+    /// Upgrade a freshly-deserialised v1 manifest to the v2 in-memory shape.
+    ///
+    /// The on-disk file is **not** rewritten: v1 manifests continue to parse
+    /// in place, and the gateway merely fills in the new fields with their
+    /// documented defaults so downstream code sees a uniform v2 structure.
+    fn migrate_to_v2_in_memory(&mut self) {
+        if self.manifest_version < 2 {
+            tracing::debug!(
+                "manifest {name} loaded as v1; upgrading in-memory to v2 shape",
+                name = self.name
+            );
+            // Defaults come from serde `default = ...` during deserialisation,
+            // so we don't need to touch protocols/hooks/skill_refs here — we
+            // just bump the version marker to the current schema.
+            self.manifest_version = 2;
+        }
+    }
+
+    /// Run both the derive-based field validation and the v2-specific rules
+    /// (protocol whitelist, version ceiling, hook name advisory warnings).
+    pub fn validate_all(&self) -> Result<(), String> {
+        self.validate().map_err(|e| e.to_string())?;
+
+        if self.manifest_version == 0 || self.manifest_version > MAX_SUPPORTED_MANIFEST_VERSION {
+            return Err(format!(
+                "manifest_version {} is not supported (this gateway supports 1..={}); \
+                 upgrade the gateway to load newer manifests",
+                self.manifest_version, MAX_SUPPORTED_MANIFEST_VERSION
+            ));
+        }
+
+        for proto in &self.protocols {
+            if !KNOWN_PROTOCOLS.contains(&proto.as_str()) {
+                return Err(format!(
+                    "unknown protocol {:?}; allowed: {:?}",
+                    proto, KNOWN_PROTOCOLS
+                ));
+            }
+        }
+
+        for hook in &self.hooks {
+            if !KNOWN_HOOK_EVENTS.contains(&hook.as_str()) {
+                tracing::warn!(
+                    plugin = %self.name,
+                    hook = %hook,
+                    "manifest references unknown hook event; treating as forward-compat \
+                     (will no-op until a hook source emits this kind)"
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Parse a single manifest file from disk, migrate it to the v2 in-memory
+/// shape, and validate it.
 pub fn parse_manifest_file(path: &Path) -> Result<PluginManifest, ManifestParseError> {
     let raw = std::fs::read_to_string(path).map_err(|e| ManifestParseError::Io {
         path: path.to_path_buf(),
         source: e,
     })?;
-    let manifest: PluginManifest = toml::from_str(&raw).map_err(|e| ManifestParseError::Toml {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    manifest
-        .validate()
-        .map_err(|e| ManifestParseError::Validation {
+    let mut manifest: PluginManifest =
+        toml::from_str(&raw).map_err(|e| ManifestParseError::Toml {
             path: path.to_path_buf(),
-            message: e.to_string(),
+            source: e,
+        })?;
+    manifest.migrate_to_v2_in_memory();
+    manifest
+        .validate_all()
+        .map_err(|message| ManifestParseError::Validation {
+            path: path.to_path_buf(),
+            message,
         })?;
     Ok(manifest)
 }
@@ -331,5 +437,164 @@ command = "true"
         std::fs::write(&path, SAMPLE).unwrap();
         let m = parse_manifest_file(&path).unwrap();
         assert_eq!(m.name, "greeter");
+    }
+
+    // ---------- v2 schema tests ----------
+
+    /// A v1 manifest (no `manifest_version`, no protocols/hooks/skill_refs)
+    /// must load fine and be upgraded in memory to the v2 shape with
+    /// default protocols.
+    #[test]
+    fn test_v1_manifest_loads_as_v2() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plugin-manifest.toml");
+        std::fs::write(&path, SAMPLE).unwrap();
+
+        let m = parse_manifest_file(&path).unwrap();
+
+        assert_eq!(m.manifest_version, 2, "v1 must migrate to v2 in memory");
+        assert_eq!(m.protocols, vec!["openai_function".to_string()]);
+        assert!(m.hooks.is_empty());
+        assert!(m.skill_refs.is_empty());
+    }
+
+    #[test]
+    fn test_v2_manifest_roundtrip() {
+        let raw = r#"
+manifest_version = 2
+name = "full"
+version = "0.2.0"
+plugin_type = "sync"
+protocols = ["openai_function", "block"]
+hooks = ["message.received", "session.patch"]
+skill_refs = ["skill.core", "skill.search"]
+
+[entry_point]
+command = "python"
+args = ["main.py"]
+"#;
+        let mut m: PluginManifest = toml::from_str(raw).unwrap();
+        m.migrate_to_v2_in_memory();
+        m.validate_all().unwrap();
+
+        assert_eq!(m.manifest_version, 2);
+        assert_eq!(m.protocols, vec!["openai_function", "block"]);
+        assert_eq!(m.hooks, vec!["message.received", "session.patch"]);
+        assert_eq!(m.skill_refs, vec!["skill.core", "skill.search"]);
+
+        // Re-serialise and re-parse: the round-trip should land back on the
+        // same v2 shape.
+        let serialised = toml::to_string(&m).unwrap();
+        let round: PluginManifest = toml::from_str(&serialised).unwrap();
+        assert_eq!(round.manifest_version, 2);
+        assert_eq!(round.protocols, m.protocols);
+        assert_eq!(round.hooks, m.hooks);
+        assert_eq!(round.skill_refs, m.skill_refs);
+    }
+
+    #[test]
+    fn test_invalid_protocol_rejected() {
+        let raw = r#"
+manifest_version = 2
+name = "bad"
+version = "0.1.0"
+plugin_type = "sync"
+protocols = ["custom"]
+[entry_point]
+command = "true"
+"#;
+        let mut m: PluginManifest = toml::from_str(raw).unwrap();
+        m.migrate_to_v2_in_memory();
+        let err = m.validate_all().unwrap_err();
+        assert!(err.contains("unknown protocol"), "{err}");
+    }
+
+    #[test]
+    fn test_future_version_warns() {
+        // `tracing_test` is not a dev-dep, so per spec we just assert the
+        // forward-compat error surface for `manifest_version = 99`.
+        let raw = r#"
+manifest_version = 99
+name = "future"
+version = "0.1.0"
+plugin_type = "sync"
+[entry_point]
+command = "true"
+"#;
+        let mut m: PluginManifest = toml::from_str(raw).unwrap();
+        m.migrate_to_v2_in_memory();
+        // migrate is a no-op for version >= 2, so 99 is preserved.
+        assert_eq!(m.manifest_version, 99);
+        let err = m.validate_all().unwrap_err();
+        assert!(err.contains("not supported"), "{err}");
+    }
+
+    #[test]
+    fn test_unknown_hook_is_warning_not_error() {
+        let raw = r#"
+manifest_version = 2
+name = "hooky"
+version = "0.1.0"
+plugin_type = "sync"
+hooks = ["message.weird"]
+[entry_point]
+command = "true"
+"#;
+        let mut m: PluginManifest = toml::from_str(raw).unwrap();
+        m.migrate_to_v2_in_memory();
+        // Forward-compat: unknown hook names only emit a warning log.
+        m.validate_all()
+            .expect("unknown hooks must not fail validation");
+        assert_eq!(m.hooks, vec!["message.weird"]);
+    }
+
+    // ---------- Smoke-load: representative channel plugin manifests ----------
+    //
+    // The qq and telegram channels are currently linked directly into the
+    // gateway (not yet shipped as separate plugins), so there is no
+    // `plugin-manifest.toml` on disk for them. These smoke tests author the
+    // manifest shapes those plugins will use once externalised and confirm
+    // they load cleanly under the v2 loader.
+
+    fn write_and_load(dir: &Path, body: &str) -> PluginManifest {
+        let path = dir.join(MANIFEST_FILENAME);
+        std::fs::write(&path, body).unwrap();
+        parse_manifest_file(&path).unwrap()
+    }
+
+    #[test]
+    fn smoke_load_qq_manifest_is_v2_in_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = r#"
+name = "qq"
+version = "0.1.0"
+description = "QQ (OneBot v11) channel adapter"
+plugin_type = "service"
+
+[entry_point]
+command = "corlinman-channel-qq"
+"#;
+        let m = write_and_load(tmp.path(), body);
+        assert_eq!(m.name, "qq");
+        assert_eq!(m.manifest_version, 2);
+        assert_eq!(m.protocols, vec!["openai_function".to_string()]);
+    }
+
+    #[test]
+    fn smoke_load_telegram_manifest_is_v2_in_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = r#"
+name = "telegram"
+version = "0.1.0"
+description = "Telegram Bot API channel adapter"
+plugin_type = "service"
+
+[entry_point]
+command = "corlinman-channel-telegram"
+"#;
+        let m = write_and_load(tmp.path(), body);
+        assert_eq!(m.name, "telegram");
+        assert_eq!(m.manifest_version, 2);
+        assert_eq!(m.protocols, vec!["openai_function".to_string()]);
     }
 }

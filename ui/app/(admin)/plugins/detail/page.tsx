@@ -5,11 +5,13 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { motion } from "framer-motion";
 import { ArrowLeft } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useMotion } from "@/components/ui/motion-safe";
 import { cn } from "@/lib/utils";
 import {
   fetchPluginDetail,
@@ -41,6 +43,7 @@ interface ToolManifest {
 
 export default function PluginDetailPage() {
   const { t } = useTranslation();
+  const { reduced } = useMotion();
   const search = useSearchParams();
   const name = search?.get("name") ?? "";
 
@@ -71,7 +74,10 @@ export default function PluginDetailPage() {
 
   return (
     <>
-      <header className="space-y-1">
+      <motion.header
+        layoutId={reduced ? undefined : `plugin-card-${name}`}
+        className="space-y-1"
+      >
         <Link
           href="/plugins"
           className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
@@ -80,7 +86,7 @@ export default function PluginDetailPage() {
           {t("plugins.backToList")}
         </Link>
         <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
-      </header>
+      </motion.header>
 
       {detail.isPending ? (
         <Skeleton className="h-40 w-full" />

@@ -10,13 +10,17 @@ authors = [{ name = "corlinman contributors" }]
 dependencies = [
     "pydantic>=2.10",
     "structlog>=25.1",
+    "PyYAML>=6.0",
+    "numpy>=1.26",
     "corlinman-grpc",
     "corlinman-providers",
+    "corlinman-tagmemo",
 ]
 
 [tool.uv.sources]
 corlinman-grpc = { workspace = true }
 corlinman-providers = { workspace = true }
+corlinman-tagmemo = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

@@ -20,8 +20,13 @@
 //! | `corlinman_vector_query_duration_seconds`  | HistogramV| `stage`             |
 
 pub use corlinman_core::metrics::{
-    encode, AGENT_GRPC_INFLIGHT, BACKOFF_RETRIES, CHANNELS_RATE_LIMITED, CHAT_STREAM_DURATION,
-    HTTP_REQUESTS, PLUGIN_EXECUTE_DURATION, PLUGIN_EXECUTE_TOTAL, REGISTRY, VECTOR_QUERY_DURATION,
+    encode, AGENT_GRPC_INFLIGHT, AGENT_MUTES_TOTAL, APPROVALS_TOTAL, BACKOFF_RETRIES,
+    CHANNELS_RATE_LIMITED, CHAT_STREAM_DURATION, FILE_FETCHER_BYTES_TOTAL,
+    FILE_FETCHER_FETCHES_TOTAL, HOOK_EMITS_TOTAL, HOOK_SUBSCRIBERS_CURRENT, HTTP_REQUESTS,
+    PLUGIN_EXECUTE_DURATION, PLUGIN_EXECUTE_TOTAL, PROTOCOL_DISPATCH_ERRORS,
+    PROTOCOL_DISPATCH_TOTAL, RATE_LIMIT_TRIGGERS_TOTAL, REGISTRY, SKILL_INVOCATIONS_TOTAL,
+    TELEGRAM_MEDIA_TOTAL, TELEGRAM_UPDATES_TOTAL, VECTOR_QUERY_DURATION, WSTOOL_INVOKES_TOTAL,
+    WSTOOL_INVOKE_DURATION, WSTOOL_RUNNERS_CONNECTED,
 };
 
 /// Eagerly touch every metric so names appear in `/metrics` even before the
@@ -49,6 +54,48 @@ pub fn init() {
     VECTOR_QUERY_DURATION
         .with_label_values(&["startup"])
         .observe(0.0);
+
+    // B1–B4 sentinels so each new family has at least one labelled sample.
+    PROTOCOL_DISPATCH_TOTAL
+        .with_label_values(&["startup"])
+        .inc_by(0.0);
+    PROTOCOL_DISPATCH_ERRORS
+        .with_label_values(&["startup", "startup"])
+        .inc_by(0.0);
+    WSTOOL_INVOKES_TOTAL
+        .with_label_values(&["startup", "true"])
+        .inc_by(0.0);
+    WSTOOL_INVOKE_DURATION
+        .with_label_values(&["startup"])
+        .observe(0.0);
+    FILE_FETCHER_FETCHES_TOTAL
+        .with_label_values(&["startup", "true"])
+        .inc_by(0.0);
+    FILE_FETCHER_BYTES_TOTAL
+        .with_label_values(&["startup"])
+        .inc_by(0.0);
+    TELEGRAM_UPDATES_TOTAL
+        .with_label_values(&["startup", "startup"])
+        .inc_by(0.0);
+    TELEGRAM_MEDIA_TOTAL
+        .with_label_values(&["startup"])
+        .inc_by(0.0);
+    HOOK_EMITS_TOTAL
+        .with_label_values(&["startup", "startup"])
+        .inc_by(0.0);
+    HOOK_SUBSCRIBERS_CURRENT
+        .with_label_values(&["startup"])
+        .set(0);
+    SKILL_INVOCATIONS_TOTAL
+        .with_label_values(&["startup"])
+        .inc_by(0.0);
+    AGENT_MUTES_TOTAL
+        .with_label_values(&["startup"])
+        .inc_by(0.0);
+    RATE_LIMIT_TRIGGERS_TOTAL
+        .with_label_values(&["startup"])
+        .inc_by(0.0);
+    APPROVALS_TOTAL.with_label_values(&["startup"]).inc_by(0.0);
 }
 
 #[cfg(test)]

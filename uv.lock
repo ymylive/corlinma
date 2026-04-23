@@ -15,6 +15,7 @@ members = [
     "corlinman-grpc",
     "corlinman-providers",
     "corlinman-server",
+    "corlinman-tagmemo",
 ]
 
 [[package]]
@@ -237,6 +238,7 @@ dependencies = [
     { name = "corlinman-grpc" },
     { name = "corlinman-providers" },
     { name = "corlinman-server" },
+    { name = "corlinman-tagmemo" },
 ]
 
 [package.dev-dependencies]
@@ -261,6 +263,7 @@ requires-dist = [
     { name = "corlinman-grpc", editable = "python/packages/corlinman-grpc" },
     { name = "corlinman-providers", editable = "python/packages/corlinman-providers" },
     { name = "corlinman-server", editable = "python/packages/corlinman-server" },
+    { name = "corlinman-tagmemo", editable = "python/packages/corlinman-tagmemo" },
 ]
 
 [package.metadata.requires-dev]
@@ -285,7 +288,10 @@ source = { editable = "python/packages/corlinman-agent" }
 dependencies = [
     { name = "corlinman-grpc" },
     { name = "corlinman-providers" },
+    { name = "corlinman-tagmemo" },
+    { name = "numpy" },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "structlog" },
 ]
 
@@ -293,7 +299,10 @@ dependencies = [
 requires-dist = [
     { name = "corlinman-grpc", editable = "python/packages/corlinman-grpc" },
     { name = "corlinman-providers", editable = "python/packages/corlinman-providers" },
+    { name = "corlinman-tagmemo", editable = "python/packages/corlinman-tagmemo" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "pydantic", specifier = ">=2.10" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "structlog", specifier = ">=25.1" },
 ]
 
@@ -397,6 +406,21 @@ requires-dist = [
     { name = "opentelemetry-sdk", specifier = ">=1.27" },
     { name = "python-json-logger", specifier = ">=3.2" },
     { name = "structlog", specifier = ">=25.1" },
+]
+
+[[package]]
+name = "corlinman-tagmemo"
+version = "0.1.0"
+source = { editable = "python/packages/corlinman-tagmemo" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scikit-learn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "scikit-learn", specifier = ">=1.4" },
 ]
 
 [[package]]

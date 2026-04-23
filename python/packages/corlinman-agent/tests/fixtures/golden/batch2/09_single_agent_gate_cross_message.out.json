@@ -1,0 +1,22 @@
+{
+  "expanded_agent": "mentor",
+  "messages": [
+    {
+      "content": "First: MENTOR body.\n",
+      "role": "system"
+    },
+    {
+      "content": "Second: ",
+      "role": "system"
+    },
+    {
+      "content": "go",
+      "role": "user"
+    }
+  ],
+  "muted_agents": [
+    "researcher"
+  ],
+  "skill_errors": [],
+  "unresolved_keys": []
+}

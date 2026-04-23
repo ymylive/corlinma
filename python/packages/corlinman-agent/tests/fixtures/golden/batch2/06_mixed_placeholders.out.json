@@ -1,0 +1,22 @@
+{
+  "expanded_agent": null,
+  "messages": [
+    {
+      "content": "user=nova sess=u-9000 unknown={{UnknownKey}}",
+      "role": "system"
+    },
+    {
+      "content": "[系统提示:] privileged user turn with nova",
+      "role": "user"
+    },
+    {
+      "content": "regular user message keeps nova literal? No — cascade applies.",
+      "role": "user"
+    }
+  ],
+  "muted_agents": [],
+  "skill_errors": [],
+  "unresolved_keys": [
+    "UnknownKey"
+  ]
+}

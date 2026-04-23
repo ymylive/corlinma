@@ -50,6 +50,21 @@ describe("LoginPage", () => {
     expect(screen.getByRole("button", { name: "登录" })).toBeInTheDocument();
   });
 
+  it("renders decorative shimmer backdrop layers", () => {
+    render(<LoginPage />);
+    // Both decoration layers live on the hero column. They are aria-hidden
+    // and CSS-driven; the reduced-motion branch lives in a @media block so
+    // the DOM is stable — assertion is just that the classes are present.
+    const dotDrift = document.querySelector(".login-dot-drift");
+    const shimmer = document.querySelector(".login-shimmer-glow");
+    expect(dotDrift).not.toBeNull();
+    expect(shimmer).not.toBeNull();
+    // Not using Tailwind `animate-*` utilities — the animation is scoped via
+    // a component-local <style> block and disabled via @media CSS.
+    expect(dotDrift?.className).not.toMatch(/\banimate-/);
+    expect(shimmer?.className).not.toMatch(/\banimate-/);
+  });
+
   it("calls /admin/login and redirects on success", async () => {
     render(<LoginPage />);
     fireEvent.change(screen.getByLabelText("用户名"), {

@@ -4,6 +4,8 @@
 //! Keeping the logic in a lib crate lets integration tests drive the gateway
 //! without booting the process.
 
+pub mod config_watcher;
+pub mod grpc;
 pub mod log_broadcast;
 pub mod metrics;
 pub mod middleware;

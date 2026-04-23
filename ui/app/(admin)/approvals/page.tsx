@@ -4,8 +4,11 @@ import * as React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { motion } from "framer-motion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { CountdownRing } from "@/components/ui/countdown-ring";
+import { useMotion } from "@/components/ui/motion-safe";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -32,6 +35,21 @@ import { BatchToolbar } from "@/components/approvals/BatchToolbar";
 import { FilterBar } from "@/components/approvals/FilterBar";
 import { Checkbox } from "@/components/approvals/Checkbox";
 import type { StreamEvent, Tab } from "@/components/approvals/types";
+
+// Framer-motion-wrapped buttons so we can add whileTap scale feedback without
+// touching the shared Button primitive.
+const MotionButton = motion.create(Button);
+
+// 5-minute approval TTL — the countdown ring is relative to `requested_at`.
+// Rows flip to the "urgent" glow state once under this threshold.
+const APPROVAL_TTL_MS = 5 * 60 * 1000;
+const URGENT_THRESHOLD_MS = 60 * 1000;
+
+function computeRemainingMs(requestedAt: string, now: number): number {
+  const t = new Date(requestedAt).getTime();
+  if (Number.isNaN(t)) return APPROVAL_TTL_MS;
+  return Math.max(0, APPROVAL_TTL_MS - (now - t));
+}
 
 /**
  * Admin approvals page — Sprint 2 T3 wiring + Sprint 5 T4 polish.
@@ -113,6 +131,14 @@ const FADE_MS = 400;
 
 export default function ApprovalsPage() {
   const { t } = useTranslation();
+  const { reduced } = useMotion();
+  // Coarse 1s tick purely for the urgent-row flip; CountdownRing does its own
+  // sub-second rAF so the visible number stays smooth.
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, []);
   const [tab, setTab] = useState<Tab>("pending");
   const [search, setSearch] = useState("");
   const [pluginFilter, setPluginFilter] = useState("");
@@ -515,7 +541,11 @@ export default function ApprovalsPage() {
         />
       ) : null}
 
-      <section className="overflow-hidden rounded-lg border border-border bg-panel">
+      <section
+        aria-live="polite"
+        aria-relevant="additions text"
+        className="overflow-hidden rounded-lg border border-border bg-panel"
+      >
         <Table>
           <TableHeader>
             <TableRow>
@@ -580,6 +610,11 @@ export default function ApprovalsPage() {
                 const isSelected = selected.has(row.id);
                 const isHighlight = highlightIds.has(row.id);
                 const isFading = fadingIds.has(row.id);
+                const remainingMs = isPending
+                  ? computeRemainingMs(row.requested_at, now)
+                  : 0;
+                const isUrgent =
+                  isPending && remainingMs > 0 && remainingMs < URGENT_THRESHOLD_MS;
                 return (
                   <TableRow
                     key={row.id}
@@ -587,6 +622,12 @@ export default function ApprovalsPage() {
                       "transition-opacity duration-300",
                       isHighlight && "bg-emerald-500/10",
                       isFading && "opacity-30",
+                      // Urgent: red border tint, plus pulse-glow if the user
+                      // allows motion. The glow is purely visual — screen-
+                      // reader announcements ride on the CountdownRing's
+                      // role="timer" + aria-valuenow.
+                      isUrgent && "border-l-2 border-l-err bg-state-error/40",
+                      isUrgent && !reduced && "animate-pulse-glow",
                     )}
                   >
                     {tab === "pending" ? (
@@ -620,12 +661,13 @@ export default function ApprovalsPage() {
                       <DecisionBadge decision={row.decision} />
                     </TableCell>
                     <TableCell>
-                      <div className="flex gap-2">
+                      <div className="flex items-center gap-2">
                         <ArgsDialog approval={row} />
                         {isPending ? (
                           <>
-                            <Button
+                            <MotionButton
                               size="sm"
+                              whileTap={reduced ? undefined : { scale: 0.96 }}
                               onClick={() =>
                                 singleMutation.mutate({
                                   id: row.id,
@@ -635,17 +677,25 @@ export default function ApprovalsPage() {
                               disabled={anyMutating}
                             >
                               {t("approvals.approve")}
-                            </Button>
-                            <Button
+                            </MotionButton>
+                            <MotionButton
                               size="sm"
                               variant="destructive"
+                              whileTap={reduced ? undefined : { scale: 0.96 }}
                               onClick={() =>
                                 setDenyDialog({ kind: "single", id: row.id })
                               }
                               disabled={anyMutating}
                             >
                               {t("approvals.deny")}
-                            </Button>
+                            </MotionButton>
+                            <CountdownRing
+                              remainingMs={remainingMs}
+                              totalMs={APPROVAL_TTL_MS}
+                              size={24}
+                              label={`${row.plugin}.${row.tool} expires in`}
+                              className="ml-auto"
+                            />
                           </>
                         ) : null}
                       </div>

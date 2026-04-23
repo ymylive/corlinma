@@ -1,0 +1,15 @@
+{
+  "messages": [
+    {"role": "system", "content": "{{agent.coder}}"},
+    {"role": "user", "content": "review this PR"}
+  ],
+  "session_key": "sess-04",
+  "model_name": "gpt-4",
+  "metadata": {},
+  "agents": {
+    "coder": "name: coder\ndescription: Code reviewer\nsystem_prompt: |\n  I review code carefully.\nskill_refs:\n  - lint\n"
+  },
+  "skills": [
+    ["lint.md", "---\nname: lint\ndescription: Lint the code\n---\nAlways run ruff before committing.\n"]
+  ]
+}

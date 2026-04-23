@@ -1,0 +1,16 @@
+{
+  "expanded_agent": null,
+  "messages": [
+    {
+      "content": "You are helpful.",
+      "role": "system"
+    },
+    {
+      "content": "Hello there",
+      "role": "user"
+    }
+  ],
+  "muted_agents": [],
+  "skill_errors": [],
+  "unresolved_keys": []
+}

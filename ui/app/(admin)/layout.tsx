@@ -7,6 +7,7 @@ import { getSession, type AdminSession } from "@/lib/auth";
 import { TopNav } from "@/components/layout/nav";
 import { Sidebar } from "@/components/layout/sidebar";
 import { PageTransition } from "@/components/layout/page-transition";
+import { RouteScrollRestore } from "@/components/layout/route-scroll-restore";
 import { PageErrorBoundary } from "@/components/layout/error-boundary";
 
 /**
@@ -71,6 +72,7 @@ export default function AdminLayout({
 
   return (
     <div className="flex min-h-dvh">
+      <RouteScrollRestore />
       <Sidebar user={state.session.user} />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopNav />

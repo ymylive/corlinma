@@ -7,10 +7,14 @@ import { useTheme } from "next-themes";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertTriangle, X } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useMotion } from "@/components/ui/motion-safe";
+import { SuccessRipple } from "@/components/config/success-ripple";
+import { ToastBurst } from "@/components/config/toast-burst";
 import { cn } from "@/lib/utils";
 import {
   fetchConfig,
@@ -49,6 +53,7 @@ export default function ConfigPage() {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const { resolvedTheme } = useTheme();
+  const { reduced } = useMotion();
   const config = useQuery<ConfigGetResponse>({
     queryKey: ["admin", "config"],
     queryFn: fetchConfig,
@@ -73,6 +78,9 @@ export default function ConfigPage() {
   const [saveResult, setSaveResult] =
     React.useState<ConfigPostResponse | null>(null);
   const [issuesOpen, setIssuesOpen] = React.useState(false);
+  // Monotonic id keyed into <SuccessRipple>. Each save success increments it
+  // so framer-motion re-mounts the ripple and plays a one-shot animation.
+  const [successId, setSuccessId] = React.useState(0);
 
   React.useEffect(() => {
     if (config.data && !initialized) {
@@ -97,6 +105,14 @@ export default function ConfigPage() {
       setValidateResult(null);
       if (r.issues.length > 0) setIssuesOpen(true);
       qc.invalidateQueries({ queryKey: ["admin", "config"] });
+      // Micro-effects: ripple + toast with burst decoration. Both branches
+      // go through framer-motion under the hood; <ToastBurst> handles the
+      // reduced-motion fallback internally.
+      setSuccessId((n) => n + 1);
+      toast.success(t("config.toastSavedTitle"), {
+        description: t("config.toastSavedDescription"),
+        icon: <ToastBurst />,
+      });
     },
     onError: () => setSaveResult(null),
   });
@@ -135,6 +151,21 @@ export default function ConfigPage() {
 
   const latestResult = saveResult ?? validateResult;
 
+  // Flash `animate-pulse-glow` on newly-rendered validation rows for 400ms to
+  // draw the eye. We key off object identity: every time `latestResult`
+  // changes, highlight the rows, then clear so the pulse doesn't loop
+  // forever. Skipped under reduced-motion.
+  const [highlightIssues, setHighlightIssues] = React.useState(false);
+  React.useEffect(() => {
+    if (!latestResult || latestResult.issues.length === 0 || reduced) {
+      setHighlightIssues(false);
+      return;
+    }
+    setHighlightIssues(true);
+    const handle = window.setTimeout(() => setHighlightIssues(false), 400);
+    return () => window.clearTimeout(handle);
+  }, [latestResult, reduced]);
+
   return (
     <>
       <header className="flex items-start justify-between gap-4">
@@ -163,14 +194,22 @@ export default function ConfigPage() {
               ? t("config.validating")
               : t("config.validate")}
           </Button>
-          <Button
-            size="sm"
-            onClick={() => saveMutation.mutate()}
-            disabled={!initialized || saveMutation.isPending}
-            data-testid="config-save-btn"
-          >
-            {saveMutation.isPending ? t("config.saving") : t("config.save")}
-          </Button>
+          <span className="relative inline-flex">
+            <Button
+              size="sm"
+              onClick={() => saveMutation.mutate()}
+              disabled={!initialized || saveMutation.isPending}
+              data-testid="config-save-btn"
+              className={cn(
+                saveMutation.isPending &&
+                  !reduced &&
+                  "animate-pulse shadow-glow-primary",
+              )}
+            >
+              {saveMutation.isPending ? t("config.saving") : t("config.save")}
+            </Button>
+            <SuccessRipple id={successId} />
+          </span>
         </div>
       </header>
 
@@ -281,7 +320,13 @@ export default function ConfigPage() {
             </div>
             <ul className="max-h-[30vh] space-y-1 overflow-auto">
               {latestResult.issues.map((iss, i) => (
-                <li key={i} className="flex items-start gap-2 text-xs">
+                <li
+                  key={i}
+                  className={cn(
+                    "flex items-start gap-2 rounded text-xs",
+                    highlightIssues && "animate-pulse-glow",
+                  )}
+                >
                   <Badge
                     variant={
                       iss.level === "error" ? "destructive" : "secondary"

@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {"role": "system", "content": "{{agent.小助手}} 请帮我"},
+    {"role": "user", "content": "你好"}
+  ],
+  "session_key": "sess-07",
+  "model_name": "gpt-4",
+  "metadata": {},
+  "agents": {
+    "小助手": "name: 小助手\ndescription: CJK helper\nsystem_prompt: |\n  我是小助手,会用中文回答。\n"
+  }
+}

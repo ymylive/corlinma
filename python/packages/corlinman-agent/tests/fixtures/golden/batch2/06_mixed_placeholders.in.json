@@ -1,0 +1,16 @@
+{
+  "messages": [
+    {"role": "system", "content": "user={{VarPersona}} sess={{session.user_id}} unknown={{UnknownKey}}"},
+    {"role": "user", "content": "[系统提示:] privileged user turn with {{VarPersona}}"},
+    {"role": "user", "content": "regular user message keeps {{VarPersona}} literal? No — cascade applies."}
+  ],
+  "session_key": "sess-06",
+  "model_name": "gpt-4",
+  "metadata": {"is_group": "true", "group_id": "g-42"},
+  "env": {
+    "VarPersona": "nova"
+  },
+  "placeholder_subs": {
+    "session.user_id": "u-9000"
+  }
+}

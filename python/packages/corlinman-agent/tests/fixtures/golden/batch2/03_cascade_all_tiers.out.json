@@ -1,0 +1,16 @@
+{
+  "expanded_agent": null,
+  "messages": [
+    {
+      "content": "tar=cheerful var=admin sar=sar-body-text",
+      "role": "system"
+    },
+    {
+      "content": "ok",
+      "role": "user"
+    }
+  ],
+  "muted_agents": [],
+  "skill_errors": [],
+  "unresolved_keys": []
+}

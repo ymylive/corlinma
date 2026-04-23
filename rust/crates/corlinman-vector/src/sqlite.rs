@@ -1,6 +1,6 @@
 //! sqlx pool + file/chunk/kv access + BM25 FTS5 search.
 //!
-//! Tables (corlinman-native, schema v5):
+//! Tables (corlinman-native, schema v6):
 //!
 //! - `files` — one row per indexed source file.
 //! - `chunks` — text chunks + little-endian f32 BLOB vector + namespace tag
@@ -8,8 +8,15 @@
 //!   the diary / paper-reader / general RAG split.
 //! - `chunks_fts` — FTS5 contentless-linked virtual table mirroring
 //!   `chunks.content`, maintained by INSERT/DELETE/UPDATE triggers.
-//! - `chunk_tags` — (chunk_id, tag) many-to-many used for tag-filter
-//!   pushdown in [`crate::hybrid::HybridSearcher`] (Sprint 3 T4).
+//! - `tag_nodes` — hierarchical tag tree (Sprint 9 T-B3-BE3). Each row is
+//!   a node in a dotted-path tree (`role.protagonist.voice`); `parent_id`
+//!   threads the hierarchy, `path` is the dotted full path (UNIQUE), and
+//!   `depth` is 0 for roots.
+//! - `chunk_tags` — (chunk_id, tag_node_id) many-to-many retargeted in v6
+//!   to reference `tag_nodes.id` instead of a flat TEXT tag.
+//! - `chunk_epa` — per-chunk EPA cache (Sprint 9 T-B3-BE3). One row per
+//!   processed chunk: packed f32[] projections BLOB, entropy + logic_depth
+//!   REAL scalars. Populated lazily by the TagMemo engine (B3-BE4).
 //! - `kv_store` — general KV cache + `schema_version`.
 //! - `pending_approvals` — one row per tool call that hit a `prompt`
 //!   approval rule; consumed by the `/admin/approvals` UI.
@@ -98,14 +105,36 @@ CREATE INDEX IF NOT EXISTS idx_pending_approvals_undecided
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_requested
     ON pending_approvals(requested_at);
 
-CREATE TABLE IF NOT EXISTS chunk_tags (
-    chunk_id INTEGER NOT NULL,
-    tag TEXT NOT NULL,
-    PRIMARY KEY (chunk_id, tag),
-    FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS tag_nodes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id   INTEGER REFERENCES tag_nodes(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    path        TEXT NOT NULL UNIQUE,
+    depth       INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_chunk_tags_tag ON chunk_tags(tag);
+CREATE INDEX IF NOT EXISTS idx_tag_nodes_parent ON tag_nodes(parent_id);
+CREATE INDEX IF NOT EXISTS idx_tag_nodes_path   ON tag_nodes(path);
+CREATE INDEX IF NOT EXISTS idx_tag_nodes_depth  ON tag_nodes(depth);
+
+CREATE TABLE IF NOT EXISTS chunk_tags (
+    chunk_id     INTEGER NOT NULL,
+    tag_node_id  INTEGER NOT NULL,
+    PRIMARY KEY (chunk_id, tag_node_id),
+    FOREIGN KEY (chunk_id)    REFERENCES chunks(id)    ON DELETE CASCADE,
+    FOREIGN KEY (tag_node_id) REFERENCES tag_nodes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunk_tags_tag_node ON chunk_tags(tag_node_id);
+
+CREATE TABLE IF NOT EXISTS chunk_epa (
+    chunk_id     INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+    projections  BLOB    NOT NULL,
+    entropy      REAL    NOT NULL,
+    logic_depth  REAL    NOT NULL,
+    computed_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
 "#;
 
 /// Row from `files`.
@@ -134,6 +163,29 @@ pub struct ChunkRow {
     /// default to `"general"` per the v4→v5 migration; callers that don't
     /// care pass `"general"` to [`SqliteStore::insert_chunk`].
     pub namespace: String,
+}
+
+/// Row from `tag_nodes` (schema v6, hierarchical tag tree).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagNodeRow {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub path: String,
+    pub depth: i32,
+}
+
+/// Row from `chunk_epa` — per-chunk EPA cache (projections / entropy /
+/// logic_depth). Populated lazily by the TagMemo engine; a missing row
+/// means the chunk has not been processed yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkEpaRow {
+    pub chunk_id: i64,
+    /// Packed little-endian f32[] projections.
+    pub projections: Vec<f32>,
+    pub entropy: f32,
+    pub logic_depth: f32,
+    pub computed_at: i64,
 }
 
 /// Row from `pending_approvals` — one per tool call intercepted by an
@@ -366,30 +418,131 @@ impl SqliteStore {
         }
     }
 
-    // ---- chunk_tags (schema v4) ------------------------------------------
+    // ---- chunk_tags (schema v6, hierarchical) ----------------------------
 
-    /// Attach `tag` to `chunk_id`. Idempotent: a duplicate (chunk, tag)
-    /// pair is a no-op thanks to `INSERT OR IGNORE`.
+    /// Attach `tag` (a dotted path, possibly single-segment) to `chunk_id`.
+    ///
+    /// Idempotent on both the `tag_nodes` side (intermediate segments are
+    /// upserted via [`Self::ensure_tag_path`]) and the `chunk_tags` side
+    /// (`INSERT OR IGNORE`). Pre-v6 callers passing a flat string like
+    /// `"rust"` see the same semantics as before: the node is created at
+    /// depth 0 and attached.
     pub async fn insert_tag(&self, chunk_id: i64, tag: &str) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO chunk_tags(chunk_id, tag) VALUES (?1, ?2)")
+        let node_id = self.ensure_tag_path(tag).await?;
+        sqlx::query("INSERT OR IGNORE INTO chunk_tags(chunk_id, tag_node_id) VALUES (?1, ?2)")
             .bind(chunk_id)
-            .bind(tag)
+            .bind(node_id)
             .execute(&self.pool)
             .await
             .with_context(|| format!("insert_tag(chunk_id={chunk_id}, tag={tag})"))?;
         Ok(())
     }
 
-    /// Tags attached to `chunk_id`, sorted ascending.
+    /// Tags attached to `chunk_id` as dotted paths, sorted ascending.
     pub async fn get_tags(&self, chunk_id: i64) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT tag FROM chunk_tags WHERE chunk_id = ?1 ORDER BY tag ASC")
-            .bind(chunk_id)
-            .fetch_all(&self.pool)
-            .await
-            .with_context(|| format!("get_tags({chunk_id})"))?;
+        let rows = sqlx::query(
+            "SELECT tn.path AS path FROM chunk_tags ct \
+             JOIN tag_nodes tn ON tn.id = ct.tag_node_id \
+             WHERE ct.chunk_id = ?1 ORDER BY tn.path ASC",
+        )
+        .bind(chunk_id)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("get_tags({chunk_id})"))?;
         Ok(rows
             .into_iter()
-            .map(|r| r.get::<String, _>("tag"))
+            .map(|r| r.get::<String, _>("path"))
+            .collect())
+    }
+
+    /// Upsert every segment of a dotted `path` into `tag_nodes` and return
+    /// the leaf node's id. `"role.protagonist.voice"` produces (or reuses)
+    /// three rows: `role`, `role.protagonist`, `role.protagonist.voice`.
+    ///
+    /// Empty or whitespace-only `path` segments yield a `Storage` error —
+    /// callers are expected to pass already-normalised paths.
+    pub async fn ensure_tag_path(&self, path: &str) -> Result<i64> {
+        if path.is_empty() || path.split('.').any(|seg| seg.trim().is_empty()) {
+            return Err(anyhow::anyhow!("ensure_tag_path: invalid path '{path}'"));
+        }
+        let segments: Vec<&str> = path.split('.').collect();
+        let mut parent_id: Option<i64> = None;
+        let mut cur_path = String::new();
+        let mut last_id: i64 = 0;
+        for (depth, seg) in segments.iter().enumerate() {
+            if depth == 0 {
+                cur_path.push_str(seg);
+            } else {
+                cur_path.push('.');
+                cur_path.push_str(seg);
+            }
+            // Try SELECT first for idempotency; fall back to INSERT if missing.
+            let existing: Option<i64> =
+                sqlx::query_scalar("SELECT id FROM tag_nodes WHERE path = ?1")
+                    .bind(&cur_path)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .with_context(|| format!("ensure_tag_path: lookup '{cur_path}'"))?;
+            let id = match existing {
+                Some(id) => id,
+                None => {
+                    let res = sqlx::query(
+                        "INSERT INTO tag_nodes(parent_id, name, path, depth) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                    )
+                    .bind(parent_id)
+                    .bind(*seg)
+                    .bind(&cur_path)
+                    .bind(depth as i64)
+                    .execute(&self.pool)
+                    .await
+                    .with_context(|| format!("ensure_tag_path: insert '{cur_path}'"))?;
+                    res.last_insert_rowid()
+                }
+            };
+            parent_id = Some(id);
+            last_id = id;
+        }
+        Ok(last_id)
+    }
+
+    /// Attach `chunk_id` to the leaf node addressed by `path`, upserting
+    /// intermediate nodes as needed. Wrapper around
+    /// [`Self::ensure_tag_path`] + an `INSERT OR IGNORE` on `chunk_tags`.
+    pub async fn attach_chunk_to_tag_path(&self, chunk_id: i64, path: &str) -> Result<()> {
+        let node_id = self.ensure_tag_path(path).await?;
+        sqlx::query("INSERT OR IGNORE INTO chunk_tags(chunk_id, tag_node_id) VALUES (?1, ?2)")
+            .bind(chunk_id)
+            .bind(node_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| {
+                format!("attach_chunk_to_tag_path(chunk_id={chunk_id}, path={path})")
+            })?;
+        Ok(())
+    }
+
+    /// Expand a tag-tree root `path` into the set of `chunk.id`s tagged
+    /// anywhere in its subtree (the root itself plus every descendant).
+    ///
+    /// Matches `tag_nodes.path = ?` OR `tag_nodes.path LIKE ? || '.%'`.
+    /// Returned ids are sorted ascending.
+    pub async fn filter_chunk_ids_by_tag_subtree(&self, path: &str) -> Result<Vec<i64>> {
+        let like_pattern = format!("{path}.%");
+        let rows = sqlx::query(
+            "SELECT DISTINCT ct.chunk_id AS chunk_id FROM chunk_tags ct \
+             JOIN tag_nodes tn ON tn.id = ct.tag_node_id \
+             WHERE tn.path = ?1 OR tn.path LIKE ?2 \
+             ORDER BY ct.chunk_id ASC",
+        )
+        .bind(path)
+        .bind(&like_pattern)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("filter_chunk_ids_by_tag_subtree({path})"))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<i64, _>("chunk_id"))
             .collect())
     }
 
@@ -397,10 +550,15 @@ impl SqliteStore {
     /// `chunk.id`s that satisfy it (required ∧ any_of ∧ ¬excluded).
     ///
     /// Semantics:
-    /// - `required`: chunk must carry *every* tag listed.
+    /// - `required`: chunk must carry *every* tag listed (matched against
+    ///   `tag_nodes.path` — a flat tag is simply a depth-0 path).
     /// - `any_of`: chunk must carry *at least one* tag listed (ignored when empty).
     /// - `excluded`: chunk must carry *none* of the tags listed.
-    /// - All three empty ⇒ returns every `chunks.id`.
+    /// - All empty ⇒ returns every `chunks.id`.
+    ///
+    /// Subtree queries live on [`Self::filter_chunk_ids_by_tag_subtree`]
+    /// and are combined by [`crate::hybrid::HybridSearcher::search`] so
+    /// [`crate::hybrid::TagFilter`] stays field-stable for downstream crates.
     pub async fn filter_chunk_ids_by_tags(
         &self,
         filter: &crate::hybrid::TagFilter,
@@ -420,17 +578,23 @@ impl SqliteStore {
         }
 
         // Build the SQL incrementally. `HAVING COUNT(DISTINCT ..) = N`
-        // implements the conjunction for `required`.
+        // implements the conjunction for `required`. All tag predicates
+        // match against `tag_nodes.path` so a flat v5-style tag like
+        // `"rust"` becomes a depth-0 path `"rust"` — the identical
+        // semantics callers had in v5 still hold.
         let mut sql = String::from("SELECT DISTINCT c.id FROM chunks c");
         let mut binds: Vec<String> = Vec::new();
         let mut where_clauses: Vec<String> = Vec::new();
 
         if !req.is_empty() {
-            sql.push_str(" JOIN chunk_tags ct_req ON ct_req.chunk_id = c.id");
+            sql.push_str(
+                " JOIN chunk_tags ct_req ON ct_req.chunk_id = c.id \
+                  JOIN tag_nodes tn_req ON tn_req.id = ct_req.tag_node_id",
+            );
             let placeholders = std::iter::repeat_n("?", req.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            where_clauses.push(format!("ct_req.tag IN ({placeholders})"));
+            where_clauses.push(format!("tn_req.path IN ({placeholders})"));
             for t in req {
                 binds.push(t.clone());
             }
@@ -442,7 +606,8 @@ impl SqliteStore {
                 .join(",");
             where_clauses.push(format!(
                 "EXISTS (SELECT 1 FROM chunk_tags ct_any \
-                 WHERE ct_any.chunk_id = c.id AND ct_any.tag IN ({placeholders}))"
+                 JOIN tag_nodes tn_any ON tn_any.id = ct_any.tag_node_id \
+                 WHERE ct_any.chunk_id = c.id AND tn_any.path IN ({placeholders}))"
             ));
             for t in any {
                 binds.push(t.clone());
@@ -455,7 +620,8 @@ impl SqliteStore {
                 .join(",");
             where_clauses.push(format!(
                 "NOT EXISTS (SELECT 1 FROM chunk_tags ct_exc \
-                 WHERE ct_exc.chunk_id = c.id AND ct_exc.tag IN ({placeholders}))"
+                 JOIN tag_nodes tn_exc ON tn_exc.id = ct_exc.tag_node_id \
+                 WHERE ct_exc.chunk_id = c.id AND tn_exc.path IN ({placeholders}))"
             ));
             for t in exc {
                 binds.push(t.clone());
@@ -469,7 +635,7 @@ impl SqliteStore {
 
         if !req.is_empty() {
             sql.push_str(&format!(
-                " GROUP BY c.id HAVING COUNT(DISTINCT ct_req.tag) = {}",
+                " GROUP BY c.id HAVING COUNT(DISTINCT tn_req.path) = {}",
                 req.len()
             ));
         }
@@ -485,6 +651,65 @@ impl SqliteStore {
             .await
             .context("filter_chunk_ids_by_tags")?;
         Ok(rows.into_iter().map(|r| r.get::<i64, _>("id")).collect())
+    }
+
+    // ---- chunk_epa (schema v6) -------------------------------------------
+
+    /// Upsert a per-chunk EPA cache row. `projections` is encoded as a
+    /// little-endian f32 BLOB; `entropy` and `logic_depth` are stored as
+    /// REALs. Running twice on the same `chunk_id` replaces the prior
+    /// row and refreshes `computed_at` to now.
+    pub async fn upsert_chunk_epa(
+        &self,
+        chunk_id: i64,
+        projections: &[f32],
+        entropy: f32,
+        logic_depth: f32,
+    ) -> Result<()> {
+        let blob = crate::f32_slice_to_blob(projections);
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        sqlx::query(
+            "INSERT INTO chunk_epa(chunk_id, projections, entropy, logic_depth, computed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(chunk_id) DO UPDATE SET \
+                projections = excluded.projections, \
+                entropy     = excluded.entropy, \
+                logic_depth = excluded.logic_depth, \
+                computed_at = excluded.computed_at",
+        )
+        .bind(chunk_id)
+        .bind(blob)
+        .bind(entropy as f64)
+        .bind(logic_depth as f64)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("upsert_chunk_epa(chunk_id={chunk_id})"))?;
+        Ok(())
+    }
+
+    /// Fetch the per-chunk EPA cache row, if the TagMemo engine has
+    /// populated it. Returns `None` for chunks that have not been
+    /// processed yet.
+    pub async fn get_chunk_epa(&self, chunk_id: i64) -> Result<Option<ChunkEpaRow>> {
+        let row = sqlx::query(
+            "SELECT chunk_id, projections, entropy, logic_depth, computed_at \
+             FROM chunk_epa WHERE chunk_id = ?1",
+        )
+        .bind(chunk_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("get_chunk_epa({chunk_id})"))?;
+        Ok(row.map(|r| {
+            let blob: Vec<u8> = r.get("projections");
+            ChunkEpaRow {
+                chunk_id: r.get::<i64, _>("chunk_id"),
+                projections: crate::blob_to_f32_vec(&blob).unwrap_or_default(),
+                entropy: r.get::<f64, _>("entropy") as f32,
+                logic_depth: r.get::<f64, _>("logic_depth") as f32,
+                computed_at: r.get::<i64, _>("computed_at"),
+            }
+        }))
     }
 
     // ---- namespace helpers (schema v5) -----------------------------------
@@ -554,12 +779,18 @@ impl SqliteStore {
         Ok(row.get::<i64, _>("n"))
     }
 
-    /// Distinct tag count across `chunk_tags`.
+    /// Distinct tag count across `chunk_tags` (distinct `tag_nodes.path`
+    /// values reachable through an attachment). Schema v6: a flat v5 tag
+    /// `"rust"` is a depth-0 node `path = "rust"`, so counts match the
+    /// pre-migration semantics for flat-tag callers.
     pub async fn count_tags(&self) -> Result<i64> {
-        let row = sqlx::query("SELECT COUNT(DISTINCT tag) AS n FROM chunk_tags")
-            .fetch_one(&self.pool)
-            .await
-            .context("count_tags")?;
+        let row = sqlx::query(
+            "SELECT COUNT(DISTINCT tn.path) AS n FROM chunk_tags ct \
+             JOIN tag_nodes tn ON tn.id = ct.tag_node_id",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("count_tags")?;
         Ok(row.get::<i64, _>("n"))
     }
 
@@ -817,7 +1048,15 @@ mod tests {
     #[tokio::test]
     async fn open_creates_schema() {
         let (store, _tmp) = fresh_store().await;
-        for t in ["files", "chunks", "kv_store", "chunks_fts", "chunk_tags"] {
+        for t in [
+            "files",
+            "chunks",
+            "kv_store",
+            "chunks_fts",
+            "chunk_tags",
+            "tag_nodes",
+            "chunk_epa",
+        ] {
             assert!(store.table_exists(t).await.unwrap(), "table {t} missing");
         }
     }
@@ -978,6 +1217,10 @@ mod tests {
         // Sprint 9 T1 — namespace lives on chunks with a 'general' default.
         assert!(SCHEMA_SQL.contains("namespace TEXT NOT NULL DEFAULT 'general'"));
         assert!(SCHEMA_SQL.contains("idx_chunks_namespace"));
+        // Sprint 9 T-B3-BE3 — hierarchical tag tree + EPA cache.
+        assert!(SCHEMA_SQL.contains("tag_nodes"));
+        assert!(SCHEMA_SQL.contains("tag_node_id"));
+        assert!(SCHEMA_SQL.contains("chunk_epa"));
     }
 
     // ---- chunk_tags -----------------------------------------------------

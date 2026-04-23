@@ -1,0 +1,18 @@
+{
+  "expanded_agent": "alpha",
+  "messages": [
+    {
+      "content": "first I am ALPHA.\n then  end",
+      "role": "system"
+    },
+    {
+      "content": "go",
+      "role": "user"
+    }
+  ],
+  "muted_agents": [
+    "beta"
+  ],
+  "skill_errors": [],
+  "unresolved_keys": []
+}

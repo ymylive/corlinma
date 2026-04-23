@@ -30,6 +30,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use corlinman_core::config::{ApprovalMode, ApprovalRule};
 use corlinman_core::CorlinmanError;
+use corlinman_hooks::{HookBus, HookEvent};
 use corlinman_vector::{PendingApproval, SqliteStore};
 use dashmap::DashMap;
 use tokio::sync::{broadcast, oneshot};
@@ -99,6 +100,13 @@ pub struct ApprovalGate {
     broadcaster: broadcast::Sender<ApprovalEvent>,
     pending: Arc<DashMap<String, oneshot::Sender<ApprovalDecision>>>,
     default_timeout: Duration,
+    /// Optional unified hook bus (B4-BE6). When `Some`, every `Pending` /
+    /// `Decided` broadcast is mirrored to `HookEvent::ApprovalRequested` /
+    /// `ApprovalDecided` so cross-component subscribers (python bridge,
+    /// admin UI aggregation layer) observe approvals without reaching into
+    /// this crate's internal `broadcast::Sender`. `None` preserves
+    /// pre-B4-BE6 behaviour exactly.
+    bus: Option<Arc<HookBus>>,
 }
 
 impl ApprovalGate {
@@ -116,7 +124,17 @@ impl ApprovalGate {
             broadcaster,
             pending: Arc::new(DashMap::new()),
             default_timeout,
+            bus: None,
         }
+    }
+
+    /// Builder: attach a shared `HookBus`. When set, every approval
+    /// lifecycle transition is additionally mirrored to the bus. Additive
+    /// only — the legacy `broadcast::Sender<ApprovalEvent>` still fires
+    /// for pre-existing SSE subscribers (`/admin/approvals/stream`).
+    pub fn with_bus(mut self, bus: Arc<HookBus>) -> Self {
+        self.bus = Some(bus);
+        self
     }
 
     /// Replace the rules snapshot (used by the live-config reload task in
@@ -205,11 +223,16 @@ impl ApprovalGate {
                 {
                     warn!(error = %err, id = %row.id, "approval.deny: decide update failed");
                 }
+                // Bus mirror: fire Requested before Decided so subscribers
+                // always see the full lifecycle even on instant-deny paths.
+                self.emit_requested_on_bus(&row, args_json);
+                let denied = ApprovalDecision::Denied(reason.clone());
+                self.emit_decided_on_bus(&row.id, &denied, None);
                 let _ = self.broadcaster.send(ApprovalEvent::Decided {
                     id: row.id,
-                    decision: ApprovalDecision::Denied(reason.clone()),
+                    decision: denied.clone(),
                 });
-                Ok(ApprovalDecision::Denied(reason))
+                Ok(denied)
             }
             RuleMatch::MatchedPrompt => {
                 self.prompt_wait(session_key, plugin, tool, args_json, cancel)
@@ -243,6 +266,8 @@ impl ApprovalGate {
         self.pending.insert(id.clone(), tx);
 
         let _ = self.broadcaster.send(ApprovalEvent::Pending(row.clone()));
+        // Unified bus: subscribers see the raise alongside the legacy SSE.
+        self.emit_requested_on_bus(&row, args_json);
         debug!(id = %id, plugin = %plugin, tool = %tool, "approval.prompt.enqueued");
 
         let timeout = tokio::time::sleep(self.default_timeout);
@@ -264,6 +289,11 @@ impl ApprovalGate {
                 // timeout so the UI still sees a terminal state.
                 self.pending.remove(&id);
                 self.persist_decision(&id, &ApprovalDecision::Timeout).await;
+                // Mirror the terminal state on the bus too; legacy
+                // broadcaster intentionally stays silent here (existing
+                // behaviour) but the unified bus audience wants to see the
+                // lifecycle close out.
+                self.emit_decided_on_bus(&id, &ApprovalDecision::Timeout, None);
                 return Err(CorlinmanError::Cancelled("approval wait cancelled"));
             }
         };
@@ -276,6 +306,11 @@ impl ApprovalGate {
             id: id.clone(),
             decision: outcome.clone(),
         });
+        // Timeouts fire here too; `resolve()` handles operator-driven
+        // allow/deny. Either way the bus sees exactly one Decided per id.
+        if matches!(outcome, ApprovalDecision::Timeout) {
+            self.emit_decided_on_bus(&id, &outcome, None);
+        }
         Ok(outcome)
     }
 
@@ -317,9 +352,83 @@ impl ApprovalGate {
         }
         let _ = self.broadcaster.send(ApprovalEvent::Decided {
             id: id.to_string(),
-            decision,
+            decision: decision.clone(),
         });
+        // Unified bus mirror. `resolve()` owns the operator-driven
+        // decision paths; the timeout path is emitted from `prompt_wait`.
+        // This split guarantees exactly one `ApprovalDecided` per id.
+        self.emit_decided_on_bus(id, &decision, None);
         Ok(())
+    }
+
+    /// Truncate an `args_json` payload to a safe preview size for the hook
+    /// bus. Keeps the first 512 bytes and replaces the rest with `…` — the
+    /// bus is fanned out to many subscribers, so avoid large clones.
+    fn preview_args(args_json: &[u8]) -> String {
+        const MAX: usize = 512;
+        let bytes = if args_json.len() <= MAX {
+            args_json
+        } else {
+            &args_json[..MAX]
+        };
+        let head = String::from_utf8_lossy(bytes).into_owned();
+        if args_json.len() > MAX {
+            format!("{head}…")
+        } else {
+            head
+        }
+    }
+
+    /// Wall-clock ms since the Unix epoch. Used for `ApprovalRequested`
+    /// and `ApprovalDecided` timestamps on the bus.
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Mirror an approval-raise onto the bus (if wired). The legacy local
+    /// `broadcast::Sender<ApprovalEvent>` is still driven by the caller —
+    /// this is an additive side channel.
+    fn emit_requested_on_bus(&self, row: &PendingApproval, args_json: &[u8]) {
+        let Some(bus) = &self.bus else { return };
+        let timeout_at_ms = Self::now_ms().saturating_add(self.default_timeout.as_millis() as u64);
+        let ev = HookEvent::ApprovalRequested {
+            id: row.id.clone(),
+            session_key: row.session_key.clone(),
+            plugin: row.plugin.clone(),
+            tool: row.tool.clone(),
+            args_preview: Self::preview_args(args_json),
+            timeout_at_ms,
+        };
+        // `emit_nonblocking` is sync and safe from any context; we don't
+        // need the strict yield-between-tiers ordering here because the
+        // approval path already has its own broadcast for legacy SSE.
+        bus.emit_nonblocking(ev);
+    }
+
+    /// Mirror an approval-decision onto the bus (if wired).
+    fn emit_decided_on_bus(&self, id: &str, decision: &ApprovalDecision, decider: Option<String>) {
+        let decision_label: &'static str = match decision {
+            ApprovalDecision::Approved => "allow",
+            ApprovalDecision::Denied(_) => "deny",
+            ApprovalDecision::Timeout => "timeout",
+        };
+
+        // Counter: always observed, even without a hook bus attached.
+        corlinman_core::metrics::APPROVALS_TOTAL
+            .with_label_values(&[decision_label])
+            .inc();
+
+        let Some(bus) = &self.bus else { return };
+        let ev = HookEvent::ApprovalDecided {
+            id: id.to_string(),
+            decision: decision_label.to_string(),
+            decider,
+            decided_at_ms: Self::now_ms(),
+        };
+        bus.emit_nonblocking(ev);
     }
 
     async fn persist_decision(&self, id: &str, decision: &ApprovalDecision) {
@@ -702,5 +811,122 @@ mod tests {
         let second = rx.recv().await.expect("second event");
         matches!(second, ApprovalEvent::Decided { .. });
         let _ = handle.await.unwrap();
+    }
+
+    // ---- hook bus mirror (B4-BE6) ----
+
+    /// With a `HookBus` attached, raising + resolving a prompt must fan
+    /// out `ApprovalRequested` then `ApprovalDecided` to bus subscribers
+    /// while the legacy local `ApprovalEvent` broadcaster still fires.
+    #[tokio::test]
+    async fn bus_receives_requested_then_decided_on_prompt_resolve() {
+        use corlinman_hooks::{HookBus, HookEvent, HookPriority};
+
+        let (gate, _tmp) = fresh_gate(
+            vec![rule("shell", None, ApprovalMode::Prompt, &[])],
+            Duration::from_secs(5),
+        )
+        .await;
+        let bus = Arc::new(HookBus::new(16));
+        let gate = gate.with_bus(bus.clone());
+        let mut sub = bus.subscribe(HookPriority::Normal);
+
+        let gate_clone = gate.clone();
+        let handle = tokio::spawn(async move {
+            gate_clone
+                .check(
+                    "s1",
+                    "shell",
+                    "exec",
+                    b"{\"cmd\":\"ls\"}",
+                    CancellationToken::new(),
+                )
+                .await
+        });
+
+        // First bus event must be `ApprovalRequested` — invariant for
+        // downstream consumers (they assume Requested precedes Decided).
+        let first = sub.recv().await.expect("first bus event");
+        let id = match first {
+            HookEvent::ApprovalRequested {
+                id,
+                session_key,
+                plugin,
+                tool,
+                args_preview,
+                ..
+            } => {
+                assert_eq!(session_key, "s1");
+                assert_eq!(plugin, "shell");
+                assert_eq!(tool, "exec");
+                assert!(args_preview.contains("ls"));
+                id
+            }
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        };
+
+        gate.resolve(&id, ApprovalDecision::Approved).await.unwrap();
+        let second = sub.recv().await.expect("second bus event");
+        match second {
+            HookEvent::ApprovalDecided {
+                id: ev_id,
+                decision,
+                ..
+            } => {
+                assert_eq!(ev_id, id);
+                assert_eq!(decision, "allow");
+            }
+            other => panic!("expected ApprovalDecided, got {other:?}"),
+        }
+
+        let d = handle.await.unwrap().unwrap();
+        assert_eq!(d, ApprovalDecision::Approved);
+    }
+
+    /// Instant-deny path must still fire Requested before Decided on the
+    /// bus, so subscribers never see an orphaned decision.
+    #[tokio::test]
+    async fn bus_requested_before_decided_on_instant_deny() {
+        use corlinman_hooks::{HookBus, HookEvent, HookPriority};
+
+        let (gate, _tmp) = fresh_gate(
+            vec![rule("shell", None, ApprovalMode::Deny, &[])],
+            Duration::from_millis(50),
+        )
+        .await;
+        let bus = Arc::new(HookBus::new(16));
+        let gate = gate.with_bus(bus.clone());
+        let mut sub = bus.subscribe(HookPriority::Normal);
+
+        let d = gate
+            .check("s1", "shell", "exec", b"{}", CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(d, ApprovalDecision::Denied(_)));
+
+        let first = sub.recv().await.expect("requested event");
+        assert!(matches!(first, HookEvent::ApprovalRequested { .. }));
+        let second = sub.recv().await.expect("decided event");
+        match second {
+            HookEvent::ApprovalDecided { decision, .. } => assert_eq!(decision, "deny"),
+            other => panic!("expected ApprovalDecided, got {other:?}"),
+        }
+    }
+
+    /// Without a bus, behaviour is unchanged — no panics, no extra
+    /// subscriber-visible events.
+    #[tokio::test]
+    async fn no_bus_preserves_legacy_behaviour() {
+        let (gate, _tmp) = fresh_gate(
+            vec![rule("shell", None, ApprovalMode::Deny, &[])],
+            Duration::from_millis(50),
+        )
+        .await;
+        // No with_bus() call.
+        let d = gate
+            .check("s1", "shell", "exec", b"{}", CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(d, ApprovalDecision::Denied(_)));
     }
 }

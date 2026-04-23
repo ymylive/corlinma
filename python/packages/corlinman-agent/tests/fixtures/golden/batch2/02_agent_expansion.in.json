@@ -1,0 +1,12 @@
+{
+  "messages": [
+    {"role": "system", "content": "intro\n{{agent.mentor}}\noutro"},
+    {"role": "user", "content": "help"}
+  ],
+  "session_key": "sess-02",
+  "model_name": "gpt-4",
+  "metadata": {},
+  "agents": {
+    "mentor": "name: mentor\ndescription: Senior dev mentor\nsystem_prompt: |\n  I am a senior developer.\n  I favor simple code.\n"
+  }
+}

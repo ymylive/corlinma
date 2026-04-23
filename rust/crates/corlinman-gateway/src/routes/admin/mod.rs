@@ -24,6 +24,7 @@ use corlinman_plugins::registry::PluginRegistry;
 use corlinman_vector::SqliteStore;
 use tokio::sync::broadcast;
 
+use crate::config_watcher::ConfigWatcher;
 use crate::log_broadcast::LogRecord;
 use crate::middleware::admin_auth::{require_admin, AdminAuthState};
 use crate::middleware::admin_session::AdminSessionStore;
@@ -89,6 +90,12 @@ pub struct AdminState {
     /// up the new shape on its next resolve call. `None` on test harnesses
     /// that don't exercise the Python integration.
     pub py_config_path: Option<PathBuf>,
+    /// B5-BE3: live config hot-reload handle. When set, `POST
+    /// /admin/config/reload` calls `trigger_reload()` for manual reloads
+    /// (useful in ops scripts / container healthchecks). `None` on test
+    /// harnesses that don't spawn the watcher — the endpoint then 503s
+    /// with `config_reload_disabled`.
+    pub config_watcher: Option<Arc<ConfigWatcher>>,
 }
 
 impl AdminState {
@@ -103,6 +110,7 @@ impl AdminState {
             rag_store: None,
             scheduler_history: None,
             py_config_path: None,
+            config_watcher: None,
         }
     }
 
@@ -153,6 +161,13 @@ impl AdminState {
     /// admin write handlers can re-serialise after every mutation.
     pub fn with_py_config_path(mut self, path: PathBuf) -> Self {
         self.py_config_path = Some(path);
+        self
+    }
+
+    /// Fluent: attach the live `ConfigWatcher` so `/admin/config/reload`
+    /// can trigger a manual hot-reload.
+    pub fn with_config_watcher(mut self, watcher: Arc<ConfigWatcher>) -> Self {
+        self.config_watcher = Some(watcher);
         self
     }
 

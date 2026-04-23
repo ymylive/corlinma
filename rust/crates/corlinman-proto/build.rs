@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         v1_dir.join("vector.proto"),
         v1_dir.join("plugin.proto"),
         v1_dir.join("agent.proto"),
+        v1_dir.join("placeholder.proto"),
     ];
 
     for p in &protos {

@@ -1,0 +1,9 @@
+{
+  "messages": [
+    {"role": "system", "content": "You are helpful."},
+    {"role": "user", "content": "Hello there"}
+  ],
+  "session_key": "sess-01",
+  "model_name": "gpt-4",
+  "metadata": {}
+}

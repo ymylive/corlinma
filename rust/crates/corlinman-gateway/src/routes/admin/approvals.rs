@@ -287,6 +287,7 @@ mod tests {
             rag_store: None,
             scheduler_history: None,
             py_config_path: None,
+            config_watcher: None,
         };
         router(state)
     }

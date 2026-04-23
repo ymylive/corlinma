@@ -1,0 +1,15 @@
+{
+  "expanded_agent": null,
+  "messages": [
+    {
+      "content": "bare={{VarUnknown}} ns={{session.missing}} both literal",
+      "role": "system"
+    }
+  ],
+  "muted_agents": [],
+  "skill_errors": [],
+  "unresolved_keys": [
+    "VarUnknown",
+    "session.missing"
+  ]
+}

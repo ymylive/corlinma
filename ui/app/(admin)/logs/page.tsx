@@ -2,12 +2,14 @@
 
 import * as React from "react";
 import { useTranslation } from "react-i18next";
-import { Pause, Play, Trash2 } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
+import { ArrowUp, Pause, Play, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { openEventStream } from "@/lib/sse";
+import { useMotionVariants } from "@/lib/motion";
 
 /**
  * Live log viewer — SSE /admin/logs/stream.
@@ -42,8 +44,29 @@ function levelTone(level: LogEvent["level"]) {
   }
 }
 
+/** CSS custom-property color token for the left-rail per log level. */
+function levelRailColor(level: LogEvent["level"]): string {
+  switch (level) {
+    case "error":
+      return "var(--err)";
+    case "warn":
+      return "var(--warn)";
+    case "info":
+      return "var(--accent)";
+    case "debug":
+    default:
+      return "var(--muted)";
+  }
+}
+
+/** How long a newly-appended row keeps the pulse-glow class. */
+const PULSE_MS = 400;
+/** Max rail-pulse registrations per second under fire-hose bursts. */
+const PULSE_MAX_PER_SEC = 30;
+
 export default function LogsPage() {
   const { t } = useTranslation();
+  const variants = useMotionVariants();
   const [events, setEvents] = React.useState<LogEvent[]>([]);
   const [levelFilter, setLevelFilter] = React.useState<string>("all");
   const [subsystemFilter, setSubsystemFilter] = React.useState<string>("");
@@ -51,8 +74,50 @@ export default function LogsPage() {
   const [paused, setPaused] = React.useState(false);
   const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set());
   const [copiedId, setCopiedId] = React.useState<string | null>(null);
+  const [recentIds, setRecentIds] = React.useState<Set<string>>(() => new Set());
+  const [atBottom, setAtBottom] = React.useState(true);
   const pausedRef = React.useRef(paused);
   pausedRef.current = paused;
+
+  // Rail-pulse throttle: cap registrations to PULSE_MAX_PER_SEC/s.
+  const pulseWindowRef = React.useRef<{ start: number; count: number }>({
+    start: 0,
+    count: 0,
+  });
+  const listRef = React.useRef<HTMLUListElement | null>(null);
+  // Sentinel at the "latest" edge. Because this list renders newest-first
+  // (prepends), the latest row lives at the top, so the sentinel is a top
+  // marker — its visibility means the user is pinned to the newest events.
+  const sentinelRef = React.useRef<HTMLLIElement | null>(null);
+
+  const registerPulse = React.useCallback((id: string) => {
+    const now = Date.now();
+    const win = pulseWindowRef.current;
+    if (now - win.start > 1000) {
+      win.start = now;
+      win.count = 0;
+    }
+    if (win.count >= PULSE_MAX_PER_SEC) return;
+    win.count += 1;
+    setRecentIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    window.setTimeout(() => {
+      setRecentIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }, PULSE_MS);
+  }, []);
+
+  // Keep a stable ref to `registerPulse` so the SSE effect below doesn't
+  // re-subscribe on every render.
+  const registerPulseRef = React.useRef(registerPulse);
+  registerPulseRef.current = registerPulse;
 
   React.useEffect(() => {
     const close = openEventStream<LogEvent>("/admin/logs/stream", {
@@ -64,6 +129,8 @@ export default function LogsPage() {
           if (next.length > RING_MAX) next.length = RING_MAX;
           return next;
         });
+        // Pulse the row that will render at index 0 for this event.
+        registerPulseRef.current(`${data.trace_id}-0`);
       },
       mock: (push) => {
         const id = setInterval(() => {
@@ -119,6 +186,30 @@ export default function LogsPage() {
       /* clipboard unavailable */
     }
   }
+
+  // Observe the bottom sentinel so we can surface a "jump to latest" pill when
+  // the user has scrolled up and is no longer pinned to the newest entries.
+  React.useEffect(() => {
+    const root = listRef.current;
+    const target = sentinelRef.current;
+    if (!root || !target || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          setAtBottom(entry.isIntersecting);
+        }
+      },
+      { root, threshold: 0.01 },
+    );
+    io.observe(target);
+    return () => io.disconnect();
+  }, []);
+
+  const jumpToLatest = React.useCallback(() => {
+    const root = listRef.current;
+    if (!root) return;
+    root.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
 
   return (
     <div className="flex flex-1 flex-col space-y-4">
@@ -191,8 +282,18 @@ export default function LogsPage() {
         </div>
       </section>
 
-      <section className="flex-1 overflow-hidden rounded-lg border border-border bg-panel">
-        <ul className="max-h-[70vh] divide-y divide-border overflow-auto font-mono text-xs">
+      <section className="relative flex-1 overflow-hidden rounded-lg border border-border bg-panel">
+        <ul
+          ref={listRef}
+          className="max-h-[70vh] divide-y divide-border overflow-auto font-mono text-xs"
+        >
+          {/* Top sentinel — its visibility means the user is pinned to the
+              newest entries (this list is rendered newest-first). */}
+          <li
+            ref={sentinelRef}
+            aria-hidden="true"
+            className="h-px w-full"
+          />
           {visible.length === 0 ? (
             <li className="p-6 text-center text-sm text-muted-foreground">
               {paused ? t("logs.paused") : t("logs.waitingForEvents")}
@@ -201,6 +302,7 @@ export default function LogsPage() {
             visible.map((e, i) => {
               const key = `${e.trace_id}-${i}`;
               const isExpanded = expanded.has(key);
+              const isRecent = recentIds.has(key);
               const extras = Object.entries(e).filter(
                 ([k]) =>
                   !["ts", "level", "subsystem", "trace_id", "message"].includes(
@@ -210,10 +312,18 @@ export default function LogsPage() {
               return (
                 <li
                   key={key}
-                  className="transition-colors hover:bg-accent/20"
+                  className="relative transition-colors hover:bg-accent/20"
                 >
                   <div
-                    className="flex items-start gap-2 px-3 py-2 cursor-pointer"
+                    aria-hidden="true"
+                    className={cn(
+                      "absolute left-0 top-0 h-full w-[2px]",
+                      isRecent && "animate-pulse-glow",
+                    )}
+                    style={{ backgroundColor: levelRailColor(e.level) }}
+                  />
+                  <div
+                    className="flex items-start gap-2 px-3 py-2 pl-4 cursor-pointer"
                     role="button"
                     tabIndex={0}
                     onClick={() => extras.length > 0 && toggleExpand(key)}
@@ -270,6 +380,30 @@ export default function LogsPage() {
             })
           )}
         </ul>
+        <AnimatePresence>
+          {!atBottom ? (
+            <motion.button
+              key="jump-to-latest"
+              type="button"
+              onClick={jumpToLatest}
+              aria-label="Jump to latest log entry"
+              variants={variants.springPop}
+              initial="hidden"
+              animate="visible"
+              exit="hidden"
+              className={cn(
+                "absolute bottom-4 right-4 inline-flex items-center gap-1.5",
+                "rounded-full border border-border bg-panel/95 px-3 py-1.5",
+                "text-xs font-medium shadow-2 backdrop-blur",
+                "transition-colors hover:bg-accent/40",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              )}
+            >
+              <ArrowUp className="h-3 w-3" />
+              {t("logs.jumpToLatest", { defaultValue: "Jump to latest" })}
+            </motion.button>
+          ) : null}
+        </AnimatePresence>
       </section>
     </div>
   );

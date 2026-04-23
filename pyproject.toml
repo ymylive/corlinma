@@ -16,6 +16,7 @@ dependencies = [
     "corlinman-embedding",
     "corlinman-agent",
     "corlinman-server",
+    "corlinman-tagmemo",
 ]
 
 [tool.uv.sources]
@@ -24,6 +25,7 @@ corlinman-providers = { workspace = true }
 corlinman-embedding = { workspace = true }
 corlinman-agent = { workspace = true }
 corlinman-server = { workspace = true }
+corlinman-tagmemo = { workspace = true }
 
 [tool.uv.workspace]
 members = ["python/packages/*"]
@@ -84,4 +86,5 @@ addopts = "--import-mode=importlib"
 markers = [
     "live_llm: tests that hit real LLM APIs (cost money)",
     "live_transport: tests that need real channel endpoints",
+    "integration: tests that spin real in-process gRPC servers",
 ]

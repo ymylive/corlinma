@@ -1,0 +1,8 @@
+{
+  "messages": [
+    {"role": "system", "content": "bare={{VarUnknown}} ns={{session.missing}} both literal"}
+  ],
+  "session_key": "sess-10",
+  "model_name": "gpt-4",
+  "metadata": {}
+}

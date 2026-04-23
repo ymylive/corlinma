@@ -14,10 +14,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use corlinman_core::config::Config;
+use corlinman_gateway::config_watcher::ConfigWatcher;
+use corlinman_gateway::grpc::{
+    serve_placeholder, PlaceholderService, DEFAULT_RUST_SOCKET, ENV_RUST_SOCKET,
+};
 use corlinman_gateway::log_broadcast::{
     BroadcastLayer, BroadcastLayerSpans, LogRecord, DEFAULT_CAPACITY,
 };
-use corlinman_gateway::routes::chat::ChatBackend;
 use corlinman_gateway::services::ChatService as GatewayChatService;
 use corlinman_gateway::{server, shutdown, telemetry};
 use corlinman_gateway_api::ChatService as ChatServiceTrait;
@@ -39,13 +42,44 @@ async fn main() {
     let addr = resolve_addr();
     tracing::info!(%addr, "starting corlinman-gateway");
 
+    // Cross-cutting event bus (B1-BE1). Subscribers pick a priority tier
+    // and observe domain events (message received/sent, session patches,
+    // config changes, ...). Capacity sized for burst from the QQ channel.
+    let hook_bus = corlinman_hooks::HookBus::new(1024);
+    if let Err(err) = hook_bus
+        .emit(corlinman_hooks::HookEvent::GatewayStartup {
+            version: env!("CARGO_PKG_VERSION").into(),
+        })
+        .await
+    {
+        tracing::warn!(error = %err, "hook bus startup emit failed");
+    }
+
     // Root cancellation token. Cancels gRPC/channels/axum on shutdown.
     let root = CancellationToken::new();
+
+    // B5-BE3: build the live `ConfigWatcher` *before* the router so the
+    // admin state + canvas state can share its `Arc<ArcSwap<Config>>`. The
+    // watcher also owns the in-memory config snapshot every subsystem
+    // reads from; a SIGHUP or fs-level edit will swap it in-place.
+    let config_watcher = spawn_config_watcher(&hook_bus, root.child_token());
 
     // Build router + keep a handle on the shared backend + registry.
     // The log broadcast sender threads through so `/admin/logs/stream`
     // can subscribe fresh receivers per request.
-    let (router, backend, plugin_registry) = server::build_runtime_with_logs(Some(log_tx)).await;
+    let (router, backend, plugin_registry, _cfg_handle, _cfg_path) = server::build_runtime_full(
+        Some(log_tx),
+        Some(Arc::new(hook_bus.clone())),
+        config_watcher.as_ref().map(|(w, _)| w.clone()),
+    )
+    .await;
+
+    // B4-BE1: when `[telegram.webhook].public_url` is set, mount the
+    // `POST /channels/telegram/webhook` route onto the gateway router.
+    // Empty URL = long-poll fallback; the route is not mounted so 404s
+    // for stray requests surface loudly. Missing `bot_token` is also a
+    // skip so boot stays resilient on fresh installs.
+    let router = maybe_mount_telegram_webhook(router, hook_bus.clone()).await;
 
     // Boot the long-lived service-plugin stack: spawn every
     // `plugin_type = "service"` manifest into a supervised child process,
@@ -109,19 +143,27 @@ async fn main() {
             }))
         }
     };
-    // Optionally launch channel adapters.
-    let mut channel_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // Optionally launch channel adapters via the shared `Channel` trait
+    // registry (B4-BE2). Each built-in adapter (`qq`, `telegram`) declares
+    // its own `enabled()` check against the config; `spawn_all` skips any
+    // that return false so the behaviour matches the previous ad-hoc
+    // `maybe_spawn_*` pair. External channels can be registered by pushing
+    // into a custom `ChannelRegistry` before the call.
+    let mut channel_handles: Vec<tokio::task::JoinHandle<anyhow::Result<()>>> = Vec::new();
     if let Some(backend) = backend.as_ref() {
         match load_config() {
             Ok(Some(cfg)) => {
-                if let Some(handle) = maybe_spawn_qq_channel(&cfg, backend.clone(), root.clone()) {
-                    channel_handles.push(handle);
-                }
-                if let Some(handle) =
-                    maybe_spawn_telegram_channel(&cfg, backend.clone(), root.clone())
-                {
-                    channel_handles.push(handle);
-                }
+                let svc: Arc<dyn ChatServiceTrait> =
+                    Arc::new(GatewayChatService::new(backend.clone()));
+                let ctx = corlinman_channels::ChannelContext {
+                    config: Arc::new(cfg.clone()),
+                    chat_service: svc,
+                    model: cfg.models.default.clone(),
+                    rate_limit_hook: None,
+                    hook_bus: Some(Arc::new(hook_bus.clone())),
+                };
+                let registry = corlinman_channels::ChannelRegistry::builtin();
+                channel_handles = corlinman_channels::spawn_all(&registry, ctx, root.clone());
             }
             Ok(None) => {
                 tracing::debug!("no CORLINMAN_CONFIG / config.toml found; channels disabled");
@@ -143,6 +185,24 @@ async fn main() {
         }
     });
 
+    // B1-BE3: stand up the Rust→Python reverse gRPC surface used by the
+    // Python `context_assembler` for placeholder expansion. Bind is best-
+    // effort — failure logs and the rest of the gateway keeps serving, so
+    // existing HTTP traffic is never blocked on this experimental channel.
+    let placeholder_socket =
+        std::env::var(ENV_RUST_SOCKET).unwrap_or_else(|_| DEFAULT_RUST_SOCKET.to_string());
+    let placeholder_cancel = root.clone();
+    let placeholder_handle = tokio::spawn(async move {
+        let svc = PlaceholderService::with_empty_engine();
+        let shutdown_fut = {
+            let token = placeholder_cancel.clone();
+            async move { token.cancelled().await }
+        };
+        if let Err(err) = serve_placeholder(&placeholder_socket, svc, shutdown_fut).await {
+            tracing::warn!(error = %err, socket = %placeholder_socket, "placeholder grpc server exited");
+        }
+    });
+
     let reason = shutdown::wait_for_signal().await;
     tracing::info!(?reason, "shutdown signal received, draining");
     root.cancel();
@@ -150,11 +210,21 @@ async fn main() {
     if let Err(err) = server_handle.await {
         tracing::warn!(error = %err, "server task join failed");
     }
+    if let Err(err) = placeholder_handle.await {
+        tracing::warn!(error = %err, "placeholder grpc task join failed");
+    }
     for h in channel_handles {
-        let _ = h.await;
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => tracing::error!(error = %err, "channel task exited with error"),
+            Err(join_err) => tracing::warn!(error = %join_err, "channel task join failed"),
+        }
     }
     if let Some(h) = hot_reloader_handle {
         let _ = h.await;
+    }
+    if let Some((_watcher, handle)) = config_watcher {
+        let _ = handle.await;
     }
 
     // S7.T1: flush + shutdown the OTLP exporter if it was installed. No-op
@@ -202,6 +272,57 @@ fn resolve_addr() -> SocketAddr {
     SocketAddr::new(ip, port)
 }
 
+/// Resolve `$CORLINMAN_CONFIG` (or [`Config::default_path`]) and — when the
+/// file exists and parses — spawn a [`ConfigWatcher`] bound to the shared
+/// [`corlinman_hooks::HookBus`]. Returns the `(watcher, join handle)` pair so
+/// `main` can both share the watcher with the router (for
+/// `POST /admin/config/reload`) and await the background task on shutdown.
+///
+/// A missing / unreadable file yields `None`: the gateway still boots with
+/// an `Arc<ArcSwap<Config>>` created inside `build_runtime_full`, and
+/// `/admin/config/reload` returns 503 `config_reload_disabled`.
+fn spawn_config_watcher(
+    hook_bus: &corlinman_hooks::HookBus,
+    cancel: CancellationToken,
+) -> Option<(
+    Arc<ConfigWatcher>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
+    let path = std::env::var("CORLINMAN_CONFIG")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(Config::default_path);
+    if !path.exists() {
+        tracing::debug!(
+            path = %path.display(),
+            "config watcher: no file on disk; hot-reload disabled",
+        );
+        return None;
+    }
+    let initial = match Config::load_from_path(&path) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                "config watcher: initial load failed; hot-reload disabled",
+            );
+            return None;
+        }
+    };
+    let watcher = Arc::new(ConfigWatcher::new(
+        path,
+        initial,
+        Arc::new(hook_bus.clone()),
+    ));
+    let task = {
+        let watcher = watcher.clone();
+        tokio::spawn(async move { watcher.run(cancel).await })
+    };
+    tracing::info!("config watcher: spawned");
+    Some((watcher, task))
+}
+
 /// Load config from `CORLINMAN_CONFIG` if set; otherwise return `Ok(None)` so
 /// the gateway can run without a config file (e.g. dev / tests).
 fn load_config() -> anyhow::Result<Option<Config>> {
@@ -215,55 +336,126 @@ fn load_config() -> anyhow::Result<Option<Config>> {
     Ok(Some(cfg))
 }
 
-/// If `[channels.qq].enabled` is true, spawn the channel loop and return its
-/// join handle. Otherwise returns `None`.
-fn maybe_spawn_qq_channel(
-    cfg: &Config,
-    backend: Arc<dyn ChatBackend>,
-    root: CancellationToken,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let qq_cfg = cfg.channels.qq.as_ref()?;
-    if !qq_cfg.enabled {
-        return None;
-    }
-    let model = cfg.models.default.clone();
-    let svc: Arc<dyn ChatServiceTrait> = Arc::new(GatewayChatService::new(backend));
-    let params = corlinman_channels::service::QqChannelParams {
-        config: qq_cfg.clone(),
-        model,
-        chat_service: svc,
-        rate_limit_hook: None,
+/// Conditionally mount the Telegram webhook route on top of `router`. Skips
+/// silently when the config isn't loaded, `public_url` is empty, the
+/// `bot_token` is absent, or the token doesn't resolve (env var missing).
+///
+/// On webhook mode the bot's identity (`getMe`) is fetched once at boot so
+/// the handler can classify group mentions without round-tripping Telegram
+/// on every update. Boot-time `getMe` failures log and demote the route to
+/// unmounted — the operator's next move is fixing the token and restarting.
+///
+/// Returns the (possibly unmodified) router.
+async fn maybe_mount_telegram_webhook(
+    router: axum::Router,
+    hook_bus: corlinman_hooks::HookBus,
+) -> axum::Router {
+    use corlinman_channels::telegram::media::ReqwestHttp;
+    use corlinman_gateway::routes::channels::{router_with_state, TelegramWebhookState};
+
+    let cfg = match load_config() {
+        Ok(Some(c)) => c,
+        _ => return router,
     };
-    let cancel = root.child_token();
-    Some(tokio::spawn(async move {
-        if let Err(err) = corlinman_channels::service::run_qq_channel(params, cancel).await {
-            tracing::error!(error = %err, "qq channel task exited with error");
+    let webhook_cfg = &cfg.telegram.webhook;
+    if webhook_cfg.public_url.trim().is_empty() {
+        tracing::debug!("telegram.webhook.public_url empty; webhook route not mounted");
+        return router;
+    }
+    let Some(tg_cfg) = cfg.channels.telegram.as_ref() else {
+        tracing::warn!("telegram.webhook.public_url set but channels.telegram missing");
+        return router;
+    };
+    let token = match tg_cfg.bot_token.as_ref().and_then(|t| t.resolve().ok()) {
+        Some(t) => t,
+        None => {
+            tracing::warn!("telegram.webhook.public_url set but bot_token not resolvable");
+            return router;
         }
-    }))
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, "telegram webhook: failed to build reqwest client");
+            return router;
+        }
+    };
+
+    // Fetch bot identity so classify() has a username to match against.
+    let (bot_id, bot_username) = match fetch_bot_identity(&client, &token).await {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "telegram webhook: getMe failed; route not mounted");
+            return router;
+        }
+    };
+
+    let data_dir = std::env::var("CORLINMAN_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .map(|h| h.join(".corlinman"))
+                .unwrap_or_else(|| PathBuf::from(".corlinman"))
+        });
+
+    let http: Arc<dyn corlinman_channels::telegram::media::TelegramHttp> =
+        Arc::new(ReqwestHttp::new(client, token));
+
+    let state = Arc::new(TelegramWebhookState {
+        secret_token: webhook_cfg.secret_token.clone(),
+        bot_id,
+        bot_username,
+        data_dir,
+        http,
+        hooks: Some(hook_bus),
+    });
+
+    tracing::info!(
+        public_url = %webhook_cfg.public_url,
+        bot_id,
+        secret_configured = !webhook_cfg.secret_token.is_empty(),
+        "telegram webhook route mounted"
+    );
+
+    // TODO(B4-BE1): also call Telegram's setWebhook at boot and
+    // deleteWebhook at shutdown. Left as a follow-up in the same task so
+    // the initial route lands without coupling boot to Telegram's API
+    // availability (a network hiccup shouldn't block gateway startup).
+    router.merge(router_with_state(state))
 }
 
-/// If `[channels.telegram].enabled` is true, spawn the TG long-poll loop.
-/// Otherwise returns `None`.
-fn maybe_spawn_telegram_channel(
-    cfg: &Config,
-    backend: Arc<dyn ChatBackend>,
-    root: CancellationToken,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let tg_cfg = cfg.channels.telegram.as_ref()?;
-    if !tg_cfg.enabled {
-        return None;
+/// One-shot `getMe` call used during webhook-mode boot. Returns
+/// `(bot_id, bot_username)`.
+async fn fetch_bot_identity(
+    client: &reqwest::Client,
+    token: &str,
+) -> anyhow::Result<(i64, Option<String>)> {
+    #[derive(serde::Deserialize)]
+    struct Env {
+        ok: bool,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        result: Option<User>,
     }
-    let model = cfg.models.default.clone();
-    let svc: Arc<dyn ChatServiceTrait> = Arc::new(GatewayChatService::new(backend));
-    let params = corlinman_channels::telegram::TelegramParams {
-        config: tg_cfg.clone(),
-        chat_service: svc,
-        model,
-    };
-    let cancel = root.child_token();
-    Some(tokio::spawn(async move {
-        if let Err(err) = corlinman_channels::telegram::run_telegram_channel(params, cancel).await {
-            tracing::error!(error = %err, "telegram channel task exited with error");
-        }
-    }))
+    #[derive(serde::Deserialize)]
+    struct User {
+        id: i64,
+        #[serde(default)]
+        username: Option<String>,
+    }
+    let url = format!("https://api.telegram.org/bot{token}/getMe");
+    let resp = client.get(&url).send().await?.error_for_status()?;
+    let env: Env = resp.json().await?;
+    if !env.ok {
+        anyhow::bail!("getMe failed: {}", env.description.unwrap_or_default());
+    }
+    let u = env
+        .result
+        .ok_or_else(|| anyhow::anyhow!("getMe returned no result"))?;
+    Ok((u.id, u.username))
 }

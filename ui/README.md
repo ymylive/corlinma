@@ -57,3 +57,12 @@ pnpm lint
 pnpm test        # vitest
 pnpm build
 ```
+
+## Known a11y debt
+
+The full `tests/a11y-audit.test.tsx` runs axe-core against every admin page in jsdom. Two cases are currently skipped — both jsdom infrastructure limits, not real a11y violations:
+
+- **`approvals`** — React 19 + react-query + SSE `setTimeout` cleanup interact to produce `destroy is not a function` on unmount in jsdom. The page itself renders fine in a real browser.
+- **`canvas`** — axe cannot descend into a sandboxed iframe when the frame lives in a detached jsdom tree ("Respondable target must be a frame in the current window"). The iframe body is static placeholder HTML; the chrome around it is audited.
+
+Both are covered by the real axe browser CLI in CI. See `tests/a11y-audit.test.tsx` for per-case `skip` reasons.

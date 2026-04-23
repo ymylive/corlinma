@@ -12,6 +12,7 @@ description = "Inbound channel adapters: QQ/OneBot v11 WebSocket, log stream, Te
 corlinman-core = { path = "../corlinman-core" }
 corlinman-proto = { path = "../corlinman-proto" }
 corlinman-gateway-api = { path = "../corlinman-gateway-api" }
+corlinman-hooks = { path = "../corlinman-hooks" }
 
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
@@ -30,6 +31,7 @@ tokio-util = { workspace = true }
 time = { workspace = true }
 dashmap = { workspace = true }
 reqwest = { workspace = true }
+bytes = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

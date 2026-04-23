@@ -22,7 +22,10 @@ pub mod types;
 
 // Re-exports that are load-bearing for downstream crates.
 pub use error::{CorlinmanError, FailoverReason};
-pub use placeholder::{DynamicResolver, PlaceholderEngine, RenderContext};
+pub use placeholder::{
+    DynamicResolver, PlaceholderCtx, PlaceholderEngine, PlaceholderError, RenderContext,
+    RESERVED_NAMESPACES,
+};
 pub use placeholders::{
     DiaryNamespaceResolver, FixedTime, NamespaceResolver, PlaceholderContext,
     PlaceholderContextBuilder, RagRetriever, RenderError, Renderer, SystemTime, TimeSource,

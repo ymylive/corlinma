@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { motion } from "framer-motion";
 import { RefreshCw, Search } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -18,8 +19,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useMotion } from "@/components/ui/motion-safe";
 import { cn } from "@/lib/utils";
 import { apiFetch, type PluginStatus, type PluginSummary } from "@/lib/api";
+
+// `motion(TableRow)` preserves the forwarded <tr> while letting framer-motion
+// track layoutId / whileHover. Hoisted so it isn't recreated on each render.
+const MotionTableRow = motion.create(TableRow);
 
 /**
  * Plugins admin page. Live against GET /admin/plugins. The row-click
@@ -73,6 +79,7 @@ function TypeBadge({ type }: { type: string }) {
 
 export default function PluginsPage() {
   const { t } = useTranslation();
+  const { reduced } = useMotion();
   const [search, setSearch] = React.useState("");
   const query = useQuery<PluginSummary[]>({
     queryKey: ["admin", "plugins"],
@@ -171,9 +178,11 @@ export default function PluginsPage() {
               </TableRow>
             ) : (
               filtered.map((p) => (
-                <TableRow
+                <MotionTableRow
                   key={p.name}
-                  className="border-b border-border transition-colors hover:bg-accent/30"
+                  layoutId={reduced ? undefined : `plugin-card-${p.name}`}
+                  whileHover={reduced ? undefined : { translateY: -2 }}
+                  className="border-b border-border transition-[colors,box-shadow] hover:bg-accent/30 hover:shadow-2"
                 >
                   <TableCell className="pl-4 font-medium">
                     <Link
@@ -212,7 +221,7 @@ export default function PluginsPage() {
                   <TableCell className="font-mono text-xs text-muted-foreground">
                     {formatRelative(p.last_touched_at, t)}
                   </TableCell>
-                </TableRow>
+                </MotionTableRow>
               ))
             )}
           </TableBody>

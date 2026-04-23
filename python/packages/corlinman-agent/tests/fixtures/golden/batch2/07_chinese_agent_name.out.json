@@ -1,0 +1,16 @@
+{
+  "expanded_agent": "小助手",
+  "messages": [
+    {
+      "content": "我是小助手,会用中文回答。\n 请帮我",
+      "role": "system"
+    },
+    {
+      "content": "你好",
+      "role": "user"
+    }
+  ],
+  "muted_agents": [],
+  "skill_errors": [],
+  "unresolved_keys": []
+}

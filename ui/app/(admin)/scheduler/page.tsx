@@ -8,6 +8,7 @@ import { Play } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { CountdownRing } from "@/components/ui/countdown-ring";
 import {
   Dialog,
   DialogContent,
@@ -216,6 +217,11 @@ export default function SchedulerPage() {
   );
 }
 
+// Ring drain window — the ring shows "full" beyond 1 minute and empties in the
+// last 60s. A short totalMs keeps the drain perceptible without trying to
+// infer the cron cadence.
+const SCHEDULER_RING_TOTAL_MS = 60_000;
+
 /** Live countdown to `iso`. Updates every second. */
 function Countdown({ iso }: { iso: string | null }) {
   const { t } = useTranslation();
@@ -241,9 +247,20 @@ function Countdown({ iso }: { iso: string | null }) {
   const m = Math.floor((s % 3600) / 60);
   const ss = s % 60;
   return (
-    <span className="font-mono text-xs tabular-nums">
-      {h > 0 ? `${h}h ` : ""}
-      {m.toString().padStart(2, "0")}m {ss.toString().padStart(2, "0")}s
+    <span className="inline-flex items-center gap-2">
+      <CountdownRing
+        remainingMs={delta}
+        totalMs={SCHEDULER_RING_TOTAL_MS}
+        size={20}
+        strokeWidth={2}
+        label={t("scheduler.colNextFire")}
+        // Hide the ring's own text; we already render richer h/m/s below.
+        className="[&>span]:hidden"
+      />
+      <span className="font-mono text-xs tabular-nums">
+        {h > 0 ? `${h}h ` : ""}
+        {m.toString().padStart(2, "0")}m {ss.toString().padStart(2, "0")}s
+      </span>
     </span>
   );
 }

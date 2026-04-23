@@ -5,6 +5,8 @@
 //! an honest response while we wire the real handlers in later milestones.
 
 pub mod admin;
+pub mod canvas;
+pub mod channels;
 pub mod chat;
 pub mod embeddings;
 pub mod health;

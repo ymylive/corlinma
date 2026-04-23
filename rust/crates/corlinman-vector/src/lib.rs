@@ -37,14 +37,16 @@ pub mod sqlite;
 pub mod usearch_index;
 
 pub use header::{probe_and_convert_if_needed, probe_usearch_header, UsearchHeader};
-pub use hybrid::{HitSource, HybridParams, HybridSearcher, RagHit, TagFilter};
+pub use hybrid::{
+    CandidateBoost, EpaBoost, HitSource, HybridParams, HybridSearcher, RagHit, TagFilter,
+};
 pub use migration::{
     MigrationRegistry, MigrationReport, MigrationScript, V1ToV2FtsBackfill, V2ToV3PendingApprovals,
-    V3ToV4ChunkTags, V4ToV5ChunksNamespace,
+    V3ToV4ChunkTags, V4ToV5ChunksNamespace, V5ToV6TagNodesAndEpa,
 };
 pub use query::VectorStore;
 pub use rerank::{GrpcReranker, NoopReranker, Reranker};
-pub use sqlite::{ChunkRow, FileRow, PendingApproval, SqliteStore};
+pub use sqlite::{ChunkEpaRow, ChunkRow, FileRow, PendingApproval, SqliteStore, TagNodeRow};
 pub use usearch_index::UsearchIndex;
 
 /// Current corlinman schema version written to `kv_store('schema_version')`.
@@ -67,9 +69,17 @@ pub use usearch_index::UsearchIndex;
 ///   files get it via [`migration::V4ToV5ChunksNamespace`], which is
 ///   idempotent (ALTER only runs when the column is absent) and reversible
 ///   (rollback rebuilds `chunks` without the column and re-hooks FTS).
+/// - v6: add hierarchical `tag_nodes` tree + retarget `chunk_tags` from
+///   `(chunk_id, tag TEXT)` to `(chunk_id, tag_node_id)`, plus an
+///   initially-empty `chunk_epa` per-chunk cache (packed projections
+///   BLOB + entropy + logic_depth) for the TagMemo engine (Sprint 9
+///   T-B3-BE3/BE4). Fresh DBs materialise all three via `SCHEMA_SQL`;
+///   legacy v5 files are migrated by [`migration::V5ToV6TagNodesAndEpa`],
+///   which seeds one depth-0 node per distinct legacy tag and rewrites
+///   `chunk_tags` idempotently.
 ///
 /// Bumped on any breaking migration; see [`migration::ensure_schema`].
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Encode a `&[f32]` as a little-endian byte blob for the `chunks.vector`
 /// column.

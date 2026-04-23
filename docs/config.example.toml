@@ -116,6 +116,18 @@ hybrid_bm25_weight = 1.0
 hybrid_hnsw_weight = 1.0
 rrf_k = 60.0
 
+# Sprint 9 T-B3-BE5 — EPA re-ranking boost. When `epa_enabled = true`, the
+# hybrid searcher multiplies each candidate's RRF score by the `dynamic_boost`
+# derived from its `chunk_epa` cache row (populated by the Python backfill
+# job `corlinman_agent.rag.epa_backfill`). Default `false` preserves
+# byte-identical pre-B3-BE5 behaviour.
+#
+# `epa_base_tag_boost` feeds the `dynamic_boost` formula as the base
+# multiplier; the final factor is clamped to `epa_boost_range = [min, max]`.
+epa_enabled = false
+epa_base_tag_boost = 1.0
+epa_boost_range = [0.5, 2.5]
+
 # Cross-encoder rerank on top of RRF (Sprint 3 T6). Disabled by default — the
 # searcher keeps RRF's ordering. Flip `enabled = true` to route fused
 # candidates through a cross-encoder before truncating to `top_k`.
@@ -205,6 +217,114 @@ action = { type = "run_agent", prompt = "生成今日简报" }
 level = "info"       # trace | debug | info | warn | error
 format = "json"      # json | text
 file_rolling = true
+
+# ---------------------------------------------------------------------------
+# [hooks] — in-process hook bus. `capacity` bounds the fan-out queue; set
+# `enabled = false` to short-circuit dispatch while keeping handlers registered.
+# ---------------------------------------------------------------------------
+[hooks]
+capacity = 1024
+enabled = true
+
+# ---------------------------------------------------------------------------
+# [skills] — filesystem skill bundles discovered under `dir` (relative to
+# data_dir). `autoload = true` indexes them at startup.
+#
+# Sample skills ship alongside this file:
+#   skills/web_search.md   — openclaw-shaped, requires providers.brave.api_key
+#   skills/code_review.md  — requires git on PATH
+#   skills/memory.md       — no external requires
+# See docs/guides/skills-and-agents.md for authoring notes.
+# ---------------------------------------------------------------------------
+[skills]
+dir = "skills"
+autoload = true
+
+# ---------------------------------------------------------------------------
+# [variables] — TVStxt variable stores. Paths are relative to data_dir;
+# `hot_reload = true` watches each directory for changes.
+#
+# Sample content:
+#   TVStxt/tar/CurrentProject.txt → {{TarCurrentProject}}
+#   TVStxt/tar/HouseStyle.txt     → {{TarHouseStyle}}
+#   TVStxt/sar/SarPrompt1.txt     → {{SarPrompt1}} gated on env SarModel1
+#   TVStxt/fixed/README.md        — placeholder; on-disk fixed tier is TODO.
+# ---------------------------------------------------------------------------
+[variables]
+tar_dir = "TVStxt/tar"
+var_dir = "TVStxt/var"
+sar_dir = "TVStxt/sar"
+fixed_dir = "TVStxt/fixed"
+hot_reload = true
+
+# ---------------------------------------------------------------------------
+# [agents] — character-card / {{角色}} registry. `single_agent_gate = true`
+# enforces "first expansion wins" semantics inside a single prompt.
+#
+# Sample cards:
+#   agents/mentor.yaml     — senior-dev mentor, Socratic method
+#   agents/researcher.yaml — cited summaries, web.search + web.fetch
+#   agents/editor.yaml     — prose editor, preserves author voice
+# ---------------------------------------------------------------------------
+[agents]
+dir = "agents"
+single_agent_gate = true
+
+# ---------------------------------------------------------------------------
+# [tools.block] — dual-track tool invocation. When enabled, agents may emit
+# tool calls as `<<<[TOOL_REQUEST]>>>` structured blocks in addition to the
+# OpenAI function-call format. Agents that don't advertise the block protocol
+# fall back to function-calling when `fallback_to_function_call = true`.
+# ---------------------------------------------------------------------------
+[tools.block]
+enabled = false
+fallback_to_function_call = true
+
+# ---------------------------------------------------------------------------
+# [telegram.webhook] — webhook-mode Telegram adapter. Empty public_url ⇒
+# webhook disabled (the long-poll adapter at [channels.telegram] is
+# independent). `secret_token` is echoed by Telegram in
+# `X-Telegram-Bot-Api-Secret-Token` so the handler can authenticate inbound.
+# ---------------------------------------------------------------------------
+[telegram.webhook]
+public_url = ""
+secret_token = ""
+drop_updates_on_reconnect = false
+
+# ---------------------------------------------------------------------------
+# [vector.tags] — opt-in v6 hierarchical tag tree. With
+# `hierarchy_enabled = true`, tags can be dotted paths (`a.b.c`) and queries
+# match prefix subtrees up to `max_depth` deep.
+# ---------------------------------------------------------------------------
+[vector.tags]
+hierarchy_enabled = false
+max_depth = 6
+
+# ---------------------------------------------------------------------------
+# [wstool] — local WebSocket tool-bus. `bind` defaults to loopback; if you
+# flip it to a non-loopback address, `corlinman config validate` requires
+# `auth_token` to be set.
+# ---------------------------------------------------------------------------
+[wstool]
+bind = "127.0.0.1:18790"
+auth_token = ""
+heartbeat_secs = 15
+
+# ---------------------------------------------------------------------------
+# [canvas] — host canvas endpoint (code / diagram preview). Off by default;
+# `session_ttl_secs` bounds the per-session scratch retention.
+# ---------------------------------------------------------------------------
+[canvas]
+host_endpoint_enabled = false
+session_ttl_secs = 1800
+
+# ---------------------------------------------------------------------------
+# [nodebridge] — Node.js worker bridge listener. `accept_unsigned` reserves
+# future signed-payload verification; keep it false in production.
+# ---------------------------------------------------------------------------
+[nodebridge]
+listen = "127.0.0.1:18788"
+accept_unsigned = false
 
 # ---------------------------------------------------------------------------
 # [meta] — maintained by `corlinman config set` / `save`. Do not edit by hand.

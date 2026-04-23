@@ -2,6 +2,12 @@
 
 import * as React from "react";
 import Link from "next/link";
+import {
+  motion,
+  useMotionValue,
+  useSpring,
+  useTransform,
+} from "framer-motion";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import {
@@ -25,6 +31,12 @@ import {
   type RagStats,
 } from "@/lib/api";
 import { openEventStream } from "@/lib/sse";
+import { AnimatedNumber } from "@/components/ui/animated-number";
+import { LiveDot } from "@/components/ui/live-dot";
+import { TiltCard } from "@/components/ui/tilt-card";
+import { useMotionVariants } from "@/lib/motion";
+import { useMotion } from "@/components/ui/motion-safe";
+import { HealthRing } from "@/components/admin/health-ring";
 
 /**
  * Dashboard landing page — Linear-style overview.
@@ -55,6 +67,7 @@ const RECENT_MAX = 20;
 
 export default function DashboardPage() {
   const { t } = useTranslation();
+  const variants = useMotionVariants();
   // Each query wrapped in .catch(() => undefined) would swallow errors; we
   // keep isError around instead so the UI can render "—" for failures.
   const plugins = useQuery<PluginSummary[]>({
@@ -106,28 +119,15 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       {/* hero */}
-      <section className="relative overflow-hidden rounded-lg border border-border bg-surface/40 p-6 dashboard-hero-glow">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div className="space-y-1">
-            <h1 className="text-2xl font-semibold tracking-tight">
-              {t("dashboard.title")}
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              {t("dashboard.subtitle")}
-            </p>
-          </div>
-          <Link
-            href="/logs"
-            className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-          >
-            {t("dashboard.liveLogs")}
-            <ArrowUpRight className="h-3 w-3" />
-          </Link>
-        </div>
-      </section>
+      <DashboardHero />
 
       {/* stat cards */}
-      <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <motion.section
+        className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4"
+        variants={variants.stagger}
+        initial="hidden"
+        animate="visible"
+      >
         <StatCard
           label={t("dashboard.plugins")}
           value={plugins.isError ? undefined : plugins.data?.length}
@@ -179,7 +179,7 @@ export default function DashboardPage() {
           href="/logs"
           sparkSeed={0}
         />
-      </section>
+      </motion.section>
 
       {/* activity + health */}
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-[1.4fr_1fr]">
@@ -187,6 +187,81 @@ export default function DashboardPage() {
         <HealthCard health={health.data} error={health.isError} />
       </section>
     </div>
+  );
+}
+
+// ---- hero (with light parallax) -------------------------------------------
+
+/**
+ * Dashboard hero with a very subtle cursor-tracked parallax. The title block
+ * and glow layer shift up to 8px in each axis based on the cursor's position
+ * relative to the page center. Disabled for coarse-pointer and
+ * reduced-motion users.
+ */
+function DashboardHero() {
+  const { t } = useTranslation();
+  const { reduced, touch } = useMotion();
+  const disabled = reduced || touch;
+
+  const MAX = 8; // px — hard ceiling per requirement
+  const mx = useMotionValue(0);
+  const my = useMotionValue(0);
+  // Springs keep the motion smooth even on rapid cursor changes.
+  const sx = useSpring(mx, { stiffness: 80, damping: 18, mass: 0.6 });
+  const sy = useSpring(my, { stiffness: 80, damping: 18, mass: 0.6 });
+  // Background layer drifts slightly more than the foreground text — classic
+  // depth cue without exceeding the 8px budget.
+  const bgX = useTransform(sx, (v) => v * 1.0);
+  const bgY = useTransform(sy, (v) => v * 1.0);
+  const fgX = useTransform(sx, (v) => v * 0.35);
+  const fgY = useTransform(sy, (v) => v * 0.35);
+
+  React.useEffect(() => {
+    if (disabled) return;
+    const onMove = (e: MouseEvent) => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      // Normalised −0.5..0.5 around page centre, scaled to MAX.
+      const px = (e.clientX / w - 0.5) * 2 * MAX;
+      const py = (e.clientY / h - 0.5) * 2 * MAX;
+      mx.set(Math.max(-MAX, Math.min(MAX, px)));
+      my.set(Math.max(-MAX, Math.min(MAX, py)));
+    };
+    window.addEventListener("mousemove", onMove, { passive: true });
+    return () => window.removeEventListener("mousemove", onMove);
+  }, [disabled, mx, my]);
+
+  return (
+    <section className="relative overflow-hidden rounded-lg border border-border bg-surface/40 p-6 dashboard-hero-glow">
+      {/* The glow backdrop is rendered by the `.dashboard-hero-glow` utility
+          on the section itself; we overlay a sibling that carries the
+          parallax offset. When disabled, both layers render at (0,0). */}
+      <motion.div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(400px_200px_at_80%_20%,hsl(var(--primary)/0.10),transparent_60%)]"
+        style={disabled ? undefined : { x: bgX, y: bgY }}
+      />
+      <motion.div
+        className="relative flex flex-wrap items-end justify-between gap-4"
+        style={disabled ? undefined : { x: fgX, y: fgY }}
+      >
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {t("dashboard.title")}
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            {t("dashboard.subtitle")}
+          </p>
+        </div>
+        <Link
+          href="/logs"
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+        >
+          {t("dashboard.liveLogs")}
+          <ArrowUpRight className="h-3 w-3" />
+        </Link>
+      </motion.div>
+    </section>
   );
 }
 
@@ -207,26 +282,38 @@ function StatCard({
   href: string;
   sparkSeed: number;
 }) {
+  const variants = useMotionVariants();
   return (
-    <Link
-      href={href as never}
-      className="group relative flex flex-col gap-3 rounded-lg border border-border bg-panel p-4 transition-colors hover:border-primary/40 hover:bg-accent/30"
-    >
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-muted-foreground">
-          <span className="text-muted-foreground/70">{icon}</span>
-          {label}
-        </div>
-        <ArrowUpRight className="h-3.5 w-3.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-      </div>
-      <div className="flex items-end justify-between">
-        <div className="font-mono text-3xl font-semibold tracking-tight">
-          {value === undefined ? "—" : value.toLocaleString()}
-        </div>
-        <Sparkline seed={sparkSeed} />
-      </div>
-      <p className="text-xs text-muted-foreground">{hint}</p>
-    </Link>
+    <motion.div variants={variants.listItem}>
+      <Link
+        href={href as never}
+        className="group relative block rounded-lg border border-border bg-panel transition-colors hover:border-primary/40 hover:bg-accent/30"
+      >
+        <TiltCard
+          maxTiltDeg={2}
+          className="flex flex-col gap-3 rounded-lg p-4"
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-muted-foreground">
+              <span className="text-muted-foreground/70">{icon}</span>
+              {label}
+            </div>
+            <ArrowUpRight className="h-3.5 w-3.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+          </div>
+          <div className="flex items-end justify-between">
+            <div className="font-mono text-3xl font-semibold tracking-tight">
+              {value === undefined ? (
+                "—"
+              ) : (
+                <AnimatedNumber value={value} format="number" />
+              )}
+            </div>
+            <Sparkline seed={sparkSeed} />
+          </div>
+          <p className="text-xs text-muted-foreground">{hint}</p>
+        </TiltCard>
+      </Link>
+    </motion.div>
   );
 }
 
@@ -281,6 +368,7 @@ function ActivityCard({ events }: { events: LogEvent[] }) {
         <div className="flex items-center gap-2 text-sm font-medium">
           <ActivityIcon className="h-4 w-4 text-muted-foreground" />
           {t("dashboard.recentActivity")}
+          <LiveDot variant="ok" pulse label="Live" />
         </div>
         <Link
           href="/logs"
@@ -371,9 +459,9 @@ function HealthCard({
     <div className="flex min-h-[320px] flex-col rounded-lg border border-border bg-panel">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div className="text-sm font-medium">{t("dashboard.systemHealth")}</div>
-        <div className="font-mono text-xs text-muted-foreground">
-          {ok} / {total}
-        </div>
+      </div>
+      <div className="flex justify-center py-4">
+        <HealthRing value={ok} total={total} size={120} />
       </div>
       <ul className="flex-1 divide-y divide-border">
         {checks.map((c) => (

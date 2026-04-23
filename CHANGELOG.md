@@ -4,6 +4,62 @@ All notable changes to corlinman are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — Unreleased
+
+Sprint 9 (Batch 1–4) rollup: hierarchical tags + EPA cache in the
+vector store, manifest v2, reserved placeholder namespaces, and
+dual-track tool-call protocol. All additions are backwards-compatible.
+Upgrade guide: [`docs/migration/v1-to-v2.md`](docs/migration/v1-to-v2.md).
+
+### Added
+
+- **Manifest v2** (`corlinman-plugins`): new `manifest_version`,
+  `protocols`, `hooks`, `skill_refs` fields. Absent `manifest_version`
+  is treated as v1 and auto-migrates to v2 in memory with default
+  protocols `["openai_function"]`. Unknown `protocols` values are
+  rejected at load; unknown `hooks` names warn but don't fail.
+- **Vector schema v6** (`corlinman-vector`): new `tag_nodes`
+  (hierarchical tag tree: `id / parent_id / name / path / depth`) and
+  `chunk_epa` (per-chunk EPA projection cache). `chunk_tags` retargets
+  its FK to `tag_nodes.id`; flat v5 tags materialise as depth-0 nodes
+  so legacy queries keep working. Migration is idempotent and runs
+  in-transaction on first open.
+- **Config sections**: `[hooks]`, `[skills]`, `[variables]`,
+  `[agents]`, `[tools.block]`, `[telegram.webhook]`, `[vector.tags]`,
+  `[wstool]`, `[canvas]`, `[nodebridge]`. All `#[serde(default)]` —
+  existing `config.toml` loads unchanged.
+- **Placeholder namespaces**: reserved `var / sar / tar / agent /
+  session / tool / vector / skill`. Cycle detection, async resolution,
+  `{{角色}}` agent-card expansion with single-agent-gate semantics.
+- **On-disk authoring surfaces**: `skills/*.md` (openclaw-style YAML
+  frontmatter + Markdown), `agents/*.yaml` (character cards),
+  `TVStxt/{tar,var,sar,fixed}/*.txt` (four-tier cascade variables).
+  Sample files ship in-repo.
+- **New Rust crates**: `corlinman-hooks` (in-process hook bus),
+  `corlinman-skills` (openclaw skill loader + system-prompt injector),
+  `corlinman-wstool` (local WebSocket tool bus), `corlinman-nodebridge`
+  (Node.js worker bridge listener).
+- **New Python package**: `corlinman-tagmemo` (EPA basis fitting +
+  pyramid build; feeds `chunk_epa` cache).
+- **Admin UI pages**: `/skills`, `/characters`, `/hooks`,
+  `/playground/protocol`, `/channels/telegram`, `/nodes`, plus
+  tagmemo / diary / canvas surfaces.
+- **Dual-track tool invocation**: agents may emit tool calls as
+  `<<<[TOOL_REQUEST]>>>` structured blocks (with `「始」…「末」`
+  value fencing) in addition to OpenAI function-call JSON. Opt in per
+  agent via manifest `protocols = ["block"]` + `[tools.block].enabled
+  = true`. Legacy plugins remain reachable via
+  `fallback_to_function_call = true`.
+
+### Migration notes
+
+- Legacy v1 plugin manifests parse unchanged.
+- v5 vector DBs migrate forward on first open; there is no shipped
+  down-path — rollback is "restore the pre-upgrade data-dir backup".
+- Existing `config.toml` needs no edits.
+
+[0.3.0]: https://github.com/ymylive/corlinman/releases/tag/v0.3.0
+
 ## [0.2.0] — 2026-04-21
 
 Major release. Dynamic provider registry, per-alias model params,

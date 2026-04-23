@@ -480,6 +480,7 @@ mod tests {
 
     fn sandboxed_manifest() -> PluginManifest {
         PluginManifest {
+            manifest_version: 2,
             name: "sbx".into(),
             version: "0.1.0".into(),
             description: String::new(),
@@ -497,11 +498,15 @@ mod tests {
                 ..Default::default()
             },
             meta: None,
+            protocols: vec!["openai_function".into()],
+            hooks: vec![],
+            skill_refs: vec![],
         }
     }
 
     fn bare_manifest() -> PluginManifest {
         PluginManifest {
+            manifest_version: 2,
             name: "bare".into(),
             version: "0.1.0".into(),
             description: String::new(),
@@ -516,6 +521,9 @@ mod tests {
             capabilities: Default::default(),
             sandbox: Default::default(),
             meta: None,
+            protocols: vec!["openai_function".into()],
+            hooks: vec![],
+            skill_refs: vec![],
         }
     }
 
@@ -619,6 +627,7 @@ mod tests {
     #[test]
     fn resolve_timeout_prefers_override() {
         let mut m = PluginManifest {
+            manifest_version: 2,
             name: "x".into(),
             version: "0.1.0".into(),
             description: String::new(),
@@ -633,6 +642,9 @@ mod tests {
             capabilities: Default::default(),
             sandbox: Default::default(),
             meta: None,
+            protocols: vec!["openai_function".into()],
+            hooks: vec![],
+            skill_refs: vec![],
         };
         m.communication.timeout_ms = Some(1234);
         assert_eq!(resolve_timeout(&m, None), 1234);

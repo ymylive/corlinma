@@ -1,0 +1,55 @@
+// placeholder.proto — Rust-hosted placeholder expansion service.
+//
+// The Rust gateway owns a `PlaceholderEngine` (corlinman-core::placeholder)
+// that resolves `{{namespace.name}}` tokens via a registry of async
+// resolvers (var, sar, tar, agent, session, tool, vector, skill). This
+// service exposes that engine so the Python `context_assembler` can
+// request rendering over the same gRPC substrate it already uses for
+// every other Rust↔Python hop.
+//
+// Direction: Python client → Rust server (reverse of agent.proto, which is
+// Rust client → Python server). The Python side dials the UDS path in
+// `$CORLINMAN_UDS_PATH` (default `/tmp/corlinman.sock`).
+
+syntax = "proto3";
+
+package corlinman.v1;
+
+option optimize_for = SPEED;
+
+service Placeholder {
+  // Render a template. Any `{{ns.key}}` tokens whose namespace has no
+  // resolver registered are returned verbatim and listed in
+  // `unresolved_keys`. Resolver / cycle / depth failures populate
+  // `error`; `rendered` is empty on error.
+  rpc Render(RenderRequest) returns (RenderResponse);
+}
+
+// Free-form per-call context threaded into every resolver. Mirrors the
+// Rust `corlinman_core::placeholder::PlaceholderCtx` struct 1:1.
+message PlaceholderCtx {
+  string session_key = 1;
+  string model_name = 2;              // optional; empty = none
+  map<string, string> metadata = 3;   // trace id, locale, caller tag, ...
+}
+
+message RenderRequest {
+  string template = 1;
+  PlaceholderCtx ctx = 2;
+  // 0 = use engine default (DEFAULT_MAX_DEPTH = 4). Any positive value
+  // overrides for this call only.
+  uint32 max_depth = 3;
+}
+
+message RenderResponse {
+  // Fully expanded template. Empty when `error` is populated.
+  string rendered = 1;
+  // Tokens that had no resolver (left as literal `{{…}}` in `rendered`).
+  // Informational; does not trigger `error`.
+  repeated string unresolved_keys = 2;
+  // Empty string = ok. Otherwise one of:
+  //   "cycle:<key>"     — PlaceholderError::Cycle
+  //   "depth_exceeded"  — PlaceholderError::DepthExceeded
+  //   "resolver:<msg>"  — PlaceholderError::Resolver
+  string error = 3;
+}

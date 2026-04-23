@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use corlinman_core::channel_binding::ChannelBinding;
 use corlinman_core::types::ChatRequest;
+use corlinman_hooks::{HookBus, HookEvent};
 
 use crate::qq::message::{is_mentioned, segments_to_text, MessageEvent, MessageType};
 use crate::rate_limit::TokenBucket;
@@ -77,6 +78,12 @@ pub struct ChannelRouter {
     /// Wired to Prometheus in production; `None` in tests that don't assert
     /// on it.
     pub rate_limit_hook: Option<RateLimitHook>,
+    /// Optional unified hook bus (B4-BE6). When `Some`, every rate-limit
+    /// rejection is additionally mirrored to
+    /// [`HookEvent::RateLimitTriggered`] so cross-component subscribers
+    /// observe drops without reaching into the `RateLimitHook` callback.
+    /// Additive — the `rate_limit_hook` callback still fires.
+    pub hook_bus: Option<Arc<HookBus>>,
 }
 
 impl std::fmt::Debug for ChannelRouter {
@@ -87,6 +94,7 @@ impl std::fmt::Debug for ChannelRouter {
             .field("group_limiter", &self.group_limiter.is_some())
             .field("sender_limiter", &self.sender_limiter.is_some())
             .field("rate_limit_hook", &self.rate_limit_hook.is_some())
+            .field("hook_bus", &self.hook_bus.is_some())
             .finish()
     }
 }
@@ -99,6 +107,7 @@ impl ChannelRouter {
             group_limiter: None,
             sender_limiter: None,
             rate_limit_hook: None,
+            hook_bus: None,
         }
     }
 
@@ -118,6 +127,14 @@ impl ChannelRouter {
     /// counter increment).
     pub fn with_rate_limit_hook(mut self, hook: RateLimitHook) -> Self {
         self.rate_limit_hook = Some(hook);
+        self
+    }
+
+    /// Builder: attach the unified hook bus. When set, every rate-limit
+    /// drop additionally emits a [`HookEvent::RateLimitTriggered`] on the
+    /// bus. Additive: the legacy [`RateLimitHook`] callback still fires.
+    pub fn with_hook_bus(mut self, bus: Arc<HookBus>) -> Self {
+        self.hook_bus = Some(bus);
         self
     }
 
@@ -159,6 +176,7 @@ impl ChannelRouter {
             let key = format!("{}:{}", binding.channel, binding.thread);
             if !limiter.check(&key) {
                 self.fire_hook(&binding.channel, "group");
+                self.emit_bus_rate_limit(&binding, "group");
                 return None;
             }
         }
@@ -166,6 +184,7 @@ impl ChannelRouter {
             let key = format!("{}:{}:{}", binding.channel, binding.thread, binding.sender);
             if !limiter.check(&key) {
                 self.fire_hook(&binding.channel, "sender");
+                self.emit_bus_rate_limit(&binding, "sender");
                 return None;
             }
         }
@@ -181,6 +200,29 @@ impl ChannelRouter {
         if let Some(h) = &self.rate_limit_hook {
             h(channel, reason);
         }
+    }
+
+    /// Bus mirror for rate-limit rejections. `limit_type` is rendered as
+    /// `"<reason>_<channel>"` (e.g. `"group_qq"`, `"sender_qq"`) so a
+    /// single bus subscriber can discriminate both dimensions without
+    /// parsing the callback's tuple form. No-op when no bus is attached.
+    fn emit_bus_rate_limit(&self, binding: &ChannelBinding, reason: &str) {
+        // Always bump the counter so dashboards see the drop even if no
+        // hook bus is attached (legacy callers don't wire one).
+        let limit_type = format!("{reason}_{}", binding.channel);
+        corlinman_core::metrics::RATE_LIMIT_TRIGGERS_TOTAL
+            .with_label_values(&[limit_type.as_str()])
+            .inc();
+
+        let Some(bus) = &self.hook_bus else { return };
+        let ev = HookEvent::RateLimitTriggered {
+            session_key: binding.session_key(),
+            limit_type,
+            // Token bucket refill cadence isn't exposed at this layer;
+            // leave the hint at 0 so consumers treat it as "unknown".
+            retry_after_ms: 0,
+        };
+        bus.emit_nonblocking(ev);
     }
 
     fn keyword_match(&self, group_id: i64, text: &str) -> bool {
@@ -373,5 +415,73 @@ mod tests {
         assert!(router.dispatch(&a1).is_some());
         assert!(router.dispatch(&a2).is_none());
         assert!(router.dispatch(&b1).is_some(), "group 2 has its own bucket");
+    }
+
+    // ------------------------------------------------------------------
+    // Hook-bus mirror (B4-BE6)
+    // ------------------------------------------------------------------
+
+    /// When a bus is attached, a rate-limit drop emits
+    /// `HookEvent::RateLimitTriggered` to subscribers in addition to the
+    /// legacy callback firing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rate_limit_drop_mirrors_to_hook_bus() {
+        use corlinman_hooks::{HookBus, HookEvent, HookPriority};
+
+        let group_bucket = Arc::new(TokenBucket::per_minute(1));
+        let (hook, count) = count_hook();
+        let bus = Arc::new(HookBus::new(16));
+        let mut sub = bus.subscribe(HookPriority::Normal);
+
+        let router = ChannelRouter::new(GroupKeywords::new(), vec![100])
+            .with_rate_limits(Some(group_bucket), None)
+            .with_rate_limit_hook(hook)
+            .with_hook_bus(bus.clone());
+
+        let ev1 = group_event("msg1", vec![MessageSegment::text("msg1")], 555);
+        let ev2 = group_event("msg2", vec![MessageSegment::text("msg2")], 555);
+        assert!(router.dispatch(&ev1).is_some());
+        assert!(router.dispatch(&ev2).is_none());
+
+        // Legacy callback still fires exactly once (back-compat contract).
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+
+        // And the bus subscriber observes the same event.
+        let got = sub.recv().await.expect("bus event");
+        match got {
+            HookEvent::RateLimitTriggered {
+                session_key,
+                limit_type,
+                retry_after_ms,
+            } => {
+                // Group bucket trips → `group_qq` (reason_channel).
+                assert_eq!(limit_type, "group_qq");
+                assert_eq!(retry_after_ms, 0);
+                // `ChannelBinding::session_key()` is a 16-char sha256
+                // prefix; just check it's non-empty and stable.
+                assert!(
+                    !session_key.is_empty() && session_key.len() == 16,
+                    "unexpected session_key shape: {session_key:?}"
+                );
+            }
+            other => panic!("expected RateLimitTriggered, got {other:?}"),
+        }
+    }
+
+    /// No bus attached → legacy behaviour is byte-for-byte preserved.
+    #[test]
+    fn no_bus_preserves_legacy_rate_limit_behaviour() {
+        let group_bucket = Arc::new(TokenBucket::per_minute(1));
+        let (hook, count) = count_hook();
+        let router = ChannelRouter::new(GroupKeywords::new(), vec![100])
+            .with_rate_limits(Some(group_bucket), None)
+            .with_rate_limit_hook(hook);
+        // No with_hook_bus() call.
+
+        let ev1 = group_event("msg1", vec![MessageSegment::text("msg1")], 555);
+        let ev2 = group_event("msg2", vec![MessageSegment::text("msg2")], 555);
+        assert!(router.dispatch(&ev1).is_some());
+        assert!(router.dispatch(&ev2).is_none());
+        assert_eq!(count.load(Ordering::Relaxed), 1);
     }
 }

@@ -325,8 +325,10 @@ impl NapcatContext {
     /// Exchange the raw admin-panel token for a short-lived Credential per
     /// the NapCat webui auth flow:
     ///
-    ///     POST /api/auth/login { "hash": sha256(token + ".napcat") }
-    ///     → { code: 0, data: { Credential: <base64-json> } }
+    /// ```text
+    /// POST /api/auth/login { "hash": sha256(token + ".napcat") }
+    /// → { code: 0, data: { Credential: <base64-json> } }
+    /// ```
     async fn login_credential(&self, token: &str) -> Result<String, NapcatError> {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();

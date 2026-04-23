@@ -43,6 +43,31 @@ use crate::telegram::message::{
 /// 25-50s; we use 25 so cancel→exit latency is bounded at ~25s.
 const LONG_POLL_TIMEOUT: u64 = 25;
 
+/// Which transport mode the adapter should run in.
+///
+/// Decision is a pure function of `[telegram.webhook].public_url` (empty =
+/// long-poll, non-empty HTTPS = webhook). Hot-swapping at runtime is **not**
+/// supported — changing `public_url` requires a gateway restart. The admin
+/// UI surfaces this via the tooltip added in the channel README.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramTransport {
+    LongPoll,
+    Webhook,
+}
+
+impl TelegramTransport {
+    /// Pick a transport mode from the configured public webhook URL. Empty
+    /// string → long-poll fallback. Trimmed so whitespace-only URLs don't
+    /// masquerade as a valid webhook config.
+    pub fn from_public_url(public_url: &str) -> Self {
+        if public_url.trim().is_empty() {
+            Self::LongPoll
+        } else {
+            Self::Webhook
+        }
+    }
+}
+
 /// Caller-supplied parameters. Struct-style so signature additions don't churn
 /// every call site.
 pub struct TelegramParams {
@@ -534,5 +559,21 @@ mod tests {
         // coherent when chat.is_private.
         let m = private_msg("random");
         assert!(m.chat.is_private());
+    }
+
+    #[test]
+    fn missing_public_url_falls_back_to_long_poll() {
+        assert_eq!(
+            TelegramTransport::from_public_url(""),
+            TelegramTransport::LongPoll
+        );
+        assert_eq!(
+            TelegramTransport::from_public_url("   "),
+            TelegramTransport::LongPoll
+        );
+        assert_eq!(
+            TelegramTransport::from_public_url("https://bot.example.com/telegram/webhook"),
+            TelegramTransport::Webhook
+        );
     }
 }

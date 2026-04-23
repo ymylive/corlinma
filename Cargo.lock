@@ -598,8 +598,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "corlinman-core",
  "corlinman-gateway-api",
+ "corlinman-hooks",
  "corlinman-proto",
  "dashmap",
  "futures",
@@ -709,6 +711,7 @@ dependencies = [
  "corlinman-channels",
  "corlinman-core",
  "corlinman-gateway-api",
+ "corlinman-hooks",
  "corlinman-plugins",
  "corlinman-proto",
  "corlinman-vector",
@@ -716,11 +719,13 @@ dependencies = [
  "dirs",
  "futures",
  "http",
+ "notify",
  "once_cell",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "prometheus",
+ "regex",
  "reqwest",
  "schemars 0.8.22",
  "serde",
@@ -756,6 +761,68 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio-util",
+]
+
+[[package]]
+name = "corlinman-hooks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "corlinman-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "corlinman-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "argon2",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "corlinman-channels",
+ "corlinman-core",
+ "corlinman-gateway",
+ "corlinman-gateway-api",
+ "corlinman-hooks",
+ "corlinman-nodebridge",
+ "corlinman-plugins",
+ "corlinman-vector",
+ "corlinman-wstool",
+ "futures",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.23.1",
+ "tokio-util",
+ "toml",
+ "tower 0.5.3",
+]
+
+[[package]]
+name = "corlinman-nodebridge"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "corlinman-hooks",
+ "dashmap",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.23.1",
+ "tracing",
 ]
 
 [[package]]
@@ -819,6 +886,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "corlinman-skills"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "which",
+]
+
+[[package]]
 name = "corlinman-vector"
 version = "0.1.0"
 dependencies = [
@@ -839,6 +918,35 @@ dependencies = [
  "tokio-util",
  "tracing",
  "usearch",
+]
+
+[[package]]
+name = "corlinman-wstool"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "corlinman-core",
+ "corlinman-hooks",
+ "corlinman-plugins",
+ "dashmap",
+ "futures",
+ "futures-util",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.23.1",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2054,6 +2162,12 @@ dependencies = [
 
 [[package]]
 name = "linux-raw-sys"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
+
+[[package]]
+name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
@@ -2923,6 +3037,19 @@ dependencies = [
 
 [[package]]
 name = "rustix"
+version = "0.38.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
+dependencies = [
+ "bitflags 2.11.1",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.4.15",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -2930,7 +3057,7 @@ dependencies = [
  "bitflags 2.11.1",
  "errno",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]
 
@@ -3714,7 +3841,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.2",
  "once_cell",
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
 
@@ -4603,6 +4730,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "which"
+version = "6.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ee928febd44d98f2f459a4a79bd4d928591333a494a10a868418ac1b39cf1f"
+dependencies = [
+ "either",
+ "home",
+ "rustix 0.38.44",
+ "winsafe",
+]
+
+[[package]]
 name = "whoami"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4878,6 +5017,12 @@ checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "winsafe"
+version = "0.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "wit-bindgen"

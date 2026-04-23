@@ -30,6 +30,7 @@ async fn docker_available() -> bool {
 
 fn manifest(name: &str, sandbox: SandboxConfig, python_script: &str) -> (PluginManifest, String) {
     let m = PluginManifest {
+        manifest_version: 2,
         name: name.into(),
         version: "0.1.0".into(),
         description: String::new(),
@@ -44,6 +45,9 @@ fn manifest(name: &str, sandbox: SandboxConfig, python_script: &str) -> (PluginM
         capabilities: Default::default(),
         sandbox,
         meta: None,
+        protocols: vec!["openai_function".into()],
+        hooks: vec![],
+        skill_refs: vec![],
     };
     (m, python_script.to_string())
 }

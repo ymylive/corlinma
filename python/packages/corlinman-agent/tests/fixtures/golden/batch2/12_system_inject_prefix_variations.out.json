@@ -1,0 +1,20 @@
+{
+  "expanded_agent": "mentor",
+  "messages": [
+    {
+      "content": "[系统提示:]MENTOR body.\n say hi",
+      "role": "user"
+    },
+    {
+      "content": "[系统邀请指令:]RESEARCHER body.\n",
+      "role": "user"
+    },
+    {
+      "content": "no-prefix user says {{agent.mentor}} literal",
+      "role": "user"
+    }
+  ],
+  "muted_agents": [],
+  "skill_errors": [],
+  "unresolved_keys": []
+}

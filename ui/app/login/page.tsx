@@ -64,9 +64,14 @@ function HeroColumn() {
         <span>·</span>
         <span>M6 admin</span>
       </div>
-      {/* decorative dot grid */}
+      {/* decorative dot grid — slowly drifts to add life */}
       <div
-        className="pointer-events-none absolute inset-0 dot-grid opacity-60"
+        className="pointer-events-none absolute inset-0 dot-grid opacity-60 login-dot-drift"
+        aria-hidden
+      />
+      {/* shimmer glow — slow diagonal sweep over the radial backdrop */}
+      <div
+        className="pointer-events-none absolute inset-0 login-shimmer-glow"
         aria-hidden
       />
       {/* subtle radial glow */}
@@ -74,6 +79,45 @@ function HeroColumn() {
         className="pointer-events-none absolute inset-0 bg-[radial-gradient(600px_300px_at_20%_20%,hsl(var(--primary)/0.15),transparent_60%)]"
         aria-hidden
       />
+      {/* Component-scoped keyframes. Intensities are low (≤10px drift, 16s
+          period) so the form remains the visual anchor. Reduced-motion is
+          honored via @media at the bottom. */}
+      <style>{`
+        @keyframes login-dot-drift {
+          0%   { background-position: 0px 0px; }
+          100% { background-position: 18px 18px; }
+        }
+        .login-dot-drift {
+          animation: login-dot-drift 16s linear infinite;
+          will-change: background-position;
+        }
+        @keyframes login-shimmer-sweep {
+          0%   { opacity: 0.0; transform: translate3d(-15%, -10%, 0); }
+          50%  { opacity: 0.55; }
+          100% { opacity: 0.0; transform: translate3d(15%, 10%, 0); }
+        }
+        .login-shimmer-glow {
+          background:
+            radial-gradient(
+              420px 220px at 30% 30%,
+              hsl(var(--primary) / 0.16),
+              transparent 70%
+            );
+          animation: login-shimmer-sweep 9s ease-in-out infinite;
+          mix-blend-mode: plus-lighter;
+          will-change: opacity, transform;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .login-dot-drift,
+          .login-shimmer-glow {
+            animation: none !important;
+          }
+          .login-shimmer-glow {
+            opacity: 0.4;
+            transform: none;
+          }
+        }
+      `}</style>
     </aside>
   );
 }

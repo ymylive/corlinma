@@ -35,6 +35,25 @@
     --ok: 142 71% 45%;
     --warn: 38 92% 50%;
     --err: 0 72% 51%;
+
+    /* additional accents (B1-FE1) */
+    --accent-2: 174 60% 50%;
+    --accent-3: 38 92% 55%;
+
+    /* shadow scale (B1-FE1) */
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.04);
+    --shadow-2: 0 4px 16px rgb(0 0 0 / 0.08);
+    --shadow-3: 0 12px 32px rgb(0 0 0 / 0.14);
+    --glow-primary: 0 0 16px rgb(var(--accent) / 0.4);
+
+    /* state tokens — hue-shifted from surface for light theme */
+    --state-hover: 240 5% 94%;
+    --state-focus: 244 75% 92%;
+    --state-press: 240 6% 88%;
+    --state-loading: 240 5% 96%;
+    --state-skeleton: 240 5% 92%;
+    --state-empty: 240 5% 97%;
+    --state-error: 0 72% 95%;
   }
 
   .dark {
@@ -65,6 +84,25 @@
     --ok: 142 71% 45%;
     --warn: 38 92% 50%;
     --err: 0 72% 55%;
+
+    /* additional accents (B1-FE1) */
+    --accent-2: 174 60% 45%;
+    --accent-3: 38 92% 60%;
+
+    /* shadow scale (B1-FE1) */
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.3);
+    --shadow-2: 0 4px 16px rgb(0 0 0 / 0.45);
+    --shadow-3: 0 12px 32px rgb(0 0 0 / 0.6);
+    --glow-primary: 0 0 16px rgb(var(--accent) / 0.4);
+
+    /* state tokens — hue-shifted from surface for dark theme */
+    --state-hover: 240 6% 12%;
+    --state-focus: 244 44% 22%;
+    --state-press: 240 6% 16%;
+    --state-loading: 240 4% 10%;
+    --state-skeleton: 240 5% 14%;
+    --state-empty: 240 6% 9%;
+    --state-error: 0 45% 18%;
   }
 
   * {

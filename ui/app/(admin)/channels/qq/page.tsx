@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { ChannelShell } from "@/components/channels/channel-shell";
 import {
   fetchQqStatus,
   reconnectQq,
@@ -78,17 +79,27 @@ export default function QqChannelPage() {
 
   const [scanLoginOpen, setScanLoginOpen] = React.useState(false);
 
+  const connected = status.data?.runtime === "connected";
+  const connectionLabel = !status.data
+    ? undefined
+    : !status.data.configured
+      ? t("channels.connectionNotConfigured")
+      : !status.data.enabled
+        ? t("channels.connectionDisabled")
+        : status.data.runtime === "connected"
+          ? t("channels.connectionConnected")
+          : status.data.runtime === "disconnected"
+            ? t("channels.connectionDisconnected")
+            : t("channels.connectionUnknown");
+
   return (
-    <>
-      <header className="flex items-start justify-between gap-3">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            {t("channels.title")}
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            {t("channels.subtitle")}
-          </p>
-        </div>
+    <ChannelShell
+      channelId="qq"
+      title={t("channels.title")}
+      subtitle={t("channels.subtitle")}
+      connected={connected}
+      connectionLabel={connectionLabel}
+      actions={
         <Button
           size="sm"
           variant="outline"
@@ -97,7 +108,8 @@ export default function QqChannelPage() {
         >
           {t("channels.qq.scanLogin.openButton")}
         </Button>
-      </header>
+      }
+    >
       <ScanLoginDialog open={scanLoginOpen} onOpenChange={setScanLoginOpen} />
 
       {status.isPending ? (
@@ -183,7 +195,7 @@ export default function QqChannelPage() {
           )}
         </div>
       </section>
-    </>
+    </ChannelShell>
   );
 }
 

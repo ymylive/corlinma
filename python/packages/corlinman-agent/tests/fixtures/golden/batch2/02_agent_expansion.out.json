@@ -1,0 +1,16 @@
+{
+  "expanded_agent": "mentor",
+  "messages": [
+    {
+      "content": "intro\nI am a senior developer.\nI favor simple code.\n\noutro",
+      "role": "system"
+    },
+    {
+      "content": "help",
+      "role": "user"
+    }
+  ],
+  "muted_agents": [],
+  "skill_errors": [],
+  "unresolved_keys": []
+}

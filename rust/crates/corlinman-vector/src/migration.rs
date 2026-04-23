@@ -6,8 +6,8 @@
 //! it" instead of "edit the ladder and pray".
 //!
 //! Shipped steps: [`V1ToV2FtsBackfill`], [`V2ToV3PendingApprovals`],
-//! [`V3ToV4ChunkTags`], [`V4ToV5ChunksNamespace`].
-//! [`MigrationRegistry::target_version`] is `5`.
+//! [`V3ToV4ChunkTags`], [`V4ToV5ChunksNamespace`], [`V5ToV6TagNodesAndEpa`].
+//! [`MigrationRegistry::target_version`] is `6`.
 //!
 //! # Architecture
 //!
@@ -105,7 +105,7 @@ impl MigrationRegistry {
 
     /// The scripts shipped by corlinman-vector today: v1→v2 (FTS5
     /// backfill), v2→v3 (pending_approvals), v3→v4 (chunk_tags), v4→v5
-    /// (chunks.namespace).
+    /// (chunks.namespace), v5→v6 (tag_nodes + chunk_epa + chunk_tags FK retarget).
     pub fn builtin() -> Self {
         Self {
             scripts: vec![
@@ -113,6 +113,7 @@ impl MigrationRegistry {
                 Arc::new(V2ToV3PendingApprovals) as Arc<dyn MigrationScript>,
                 Arc::new(V3ToV4ChunkTags) as Arc<dyn MigrationScript>,
                 Arc::new(V4ToV5ChunksNamespace) as Arc<dyn MigrationScript>,
+                Arc::new(V5ToV6TagNodesAndEpa) as Arc<dyn MigrationScript>,
             ],
         }
     }
@@ -424,12 +425,19 @@ impl MigrationScript for V3ToV4ChunkTags {
         .execute(&mut **tx)
         .await
         .map_err(|e| CorlinmanError::Storage(format!("v3→v4 create chunk_tags: {e}")))?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_chunk_tags_tag ON chunk_tags(tag)")
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| {
-                CorlinmanError::Storage(format!("v3→v4 create idx_chunk_tags_tag: {e}"))
-            })?;
+        // On a fresh v6 DB, `SCHEMA_SQL` already materialised the v6-shaped
+        // `chunk_tags(chunk_id, tag_node_id)` before this migration runs —
+        // the CREATE above is a no-op and the legacy `tag` column doesn't
+        // exist. Skip the legacy index creation in that case; the v5→v6
+        // script owns the replacement `idx_chunk_tags_tag_node`.
+        if chunk_tags_has_tag_column(tx).await? {
+            sqlx::query("CREATE INDEX IF NOT EXISTS idx_chunk_tags_tag ON chunk_tags(tag)")
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| {
+                    CorlinmanError::Storage(format!("v3→v4 create idx_chunk_tags_tag: {e}"))
+                })?;
+        }
         Ok(())
     }
 
@@ -599,6 +607,201 @@ impl MigrationScript for V4ToV5ChunksNamespace {
     }
 }
 
+/// v5 → v6: introduce the hierarchical `tag_nodes` tree, retarget
+/// `chunk_tags` to reference `tag_nodes.id` instead of a flat TEXT tag,
+/// and add the (initially empty) `chunk_epa` per-chunk cache used by the
+/// TagMemo engine.
+///
+/// On a fresh v6 DB the [`crate::sqlite::SCHEMA_SQL`] script already
+/// ships all three tables in their final shape, so `up()` is careful to
+/// be idempotent: it probes the current `chunk_tags` layout and skips
+/// the rebuild if `tag_node_id` is already present.
+///
+/// Rebuild flow for a legacy v5 DB (flat `chunk_tags(chunk_id, tag)`):
+/// 1. Materialise `tag_nodes` + indexes + `chunk_epa`.
+/// 2. Snapshot distinct `chunk_tags.tag` values into depth-0 `tag_nodes`.
+/// 3. Rename `chunk_tags` → `chunk_tags_v5`.
+/// 4. Create the new `chunk_tags` (chunk_id, tag_node_id) + index.
+/// 5. Copy `(chunk_id, tag) → (chunk_id, tag_nodes.id)` using the path = name lookup.
+/// 6. Drop `chunk_tags_v5`.
+///
+/// `down()` is intentionally unsupported for now: the TagMemo engine
+/// stores data nowhere else, and a clean rollback would require
+/// reconstructing the flat `tag` string from the path tree while
+/// re-computing FKs — work that nobody has asked for. Returning a
+/// `Storage("down not supported…")` error matches the v1→v2 precedent.
+pub struct V5ToV6TagNodesAndEpa;
+
+#[async_trait]
+impl MigrationScript for V5ToV6TagNodesAndEpa {
+    fn from(&self) -> u32 {
+        5
+    }
+    fn to(&self) -> u32 {
+        6
+    }
+    fn name(&self) -> &'static str {
+        "v5_to_v6_tag_nodes_and_epa"
+    }
+
+    async fn up(&self, tx: &mut SqliteTransaction<'_>) -> Result<(), CorlinmanError> {
+        // 1. Always-safe DDL (IF NOT EXISTS keeps fresh-v6 DBs happy).
+        //    `tag_nodes` + indexes.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tag_nodes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id   INTEGER REFERENCES tag_nodes(id) ON DELETE CASCADE,
+                name        TEXT NOT NULL,
+                path        TEXT NOT NULL UNIQUE,
+                depth       INTEGER NOT NULL,
+                created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            )",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("v5→v6 create tag_nodes: {e}")))?;
+        for stmt in [
+            "CREATE INDEX IF NOT EXISTS idx_tag_nodes_parent ON tag_nodes(parent_id)",
+            "CREATE INDEX IF NOT EXISTS idx_tag_nodes_path   ON tag_nodes(path)",
+            "CREATE INDEX IF NOT EXISTS idx_tag_nodes_depth  ON tag_nodes(depth)",
+        ] {
+            sqlx::query(stmt).execute(&mut **tx).await.map_err(|e| {
+                CorlinmanError::Storage(format!("v5→v6 tag_nodes index '{stmt}': {e}"))
+            })?;
+        }
+
+        // 2. chunk_epa (empty at creation time; populated later by TagMemo).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS chunk_epa (
+                chunk_id     INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+                projections  BLOB    NOT NULL,
+                entropy      REAL    NOT NULL,
+                logic_depth  REAL    NOT NULL,
+                computed_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            )",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("v5→v6 create chunk_epa: {e}")))?;
+
+        // 3. Probe chunk_tags layout. Fresh-v6 DBs already have
+        //    tag_node_id and the migration is a no-op past this point.
+        let already_retargeted = chunk_tags_has_tag_node_id(tx).await?;
+        if already_retargeted {
+            return Ok(());
+        }
+
+        // 4. Backfill tag_nodes from distinct tag strings in the legacy
+        //    chunk_tags_v5 layout.
+        sqlx::query(
+            "INSERT OR IGNORE INTO tag_nodes(parent_id, name, path, depth) \
+             SELECT NULL, tag, tag, 0 FROM (SELECT DISTINCT tag FROM chunk_tags)",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("v5→v6 seed tag_nodes: {e}")))?;
+
+        // 5. Rename old chunk_tags so rollback stays feasible for the
+        //    duration of this transaction, then materialise the new one.
+        sqlx::query("ALTER TABLE chunk_tags RENAME TO chunk_tags_v5")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| CorlinmanError::Storage(format!("v5→v6 rename chunk_tags: {e}")))?;
+        // Old index was named idx_chunk_tags_tag in v5; drop it (its column
+        // moved with the rename anyway and won't collide with the new index).
+        sqlx::query("DROP INDEX IF EXISTS idx_chunk_tags_tag")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| {
+                CorlinmanError::Storage(format!("v5→v6 drop legacy idx_chunk_tags_tag: {e}"))
+            })?;
+
+        sqlx::query(
+            "CREATE TABLE chunk_tags (
+                chunk_id     INTEGER NOT NULL,
+                tag_node_id  INTEGER NOT NULL,
+                PRIMARY KEY (chunk_id, tag_node_id),
+                FOREIGN KEY (chunk_id)    REFERENCES chunks(id)    ON DELETE CASCADE,
+                FOREIGN KEY (tag_node_id) REFERENCES tag_nodes(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("v5→v6 create new chunk_tags: {e}")))?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_chunk_tags_tag_node ON chunk_tags(tag_node_id)",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+            CorlinmanError::Storage(format!("v5→v6 create idx_chunk_tags_tag_node: {e}"))
+        })?;
+
+        // 6. Copy (chunk_id, tag) → (chunk_id, tag_nodes.id WHERE path=tag).
+        //    INSERT OR IGNORE survives duplicate (chunk_id, node_id) rows.
+        sqlx::query(
+            "INSERT OR IGNORE INTO chunk_tags(chunk_id, tag_node_id) \
+             SELECT v5.chunk_id, tn.id \
+             FROM chunk_tags_v5 v5 \
+             JOIN tag_nodes tn ON tn.path = v5.tag",
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+            CorlinmanError::Storage(format!("v5→v6 copy chunk_tags_v5 → chunk_tags: {e}"))
+        })?;
+
+        // 7. Drop the snapshot.
+        sqlx::query("DROP TABLE chunk_tags_v5")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| CorlinmanError::Storage(format!("v5→v6 drop chunk_tags_v5: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn down(&self, _tx: &mut SqliteTransaction<'_>) -> Result<(), CorlinmanError> {
+        Err(CorlinmanError::Storage(
+            "down not supported for v5→v6 tag_nodes+chunk_epa".into(),
+        ))
+    }
+}
+
+/// Probe helper: return `true` iff `chunk_tags` already has the v6
+/// `tag_node_id` column. Lets [`V5ToV6TagNodesAndEpa::up`] skip the
+/// rebuild on fresh v6 DBs (where `SCHEMA_SQL` already ships the new
+/// layout) or on a re-run against an already-migrated file.
+async fn chunk_tags_has_tag_node_id(
+    tx: &mut SqliteTransaction<'_>,
+) -> Result<bool, CorlinmanError> {
+    chunk_tags_has_column(tx, "tag_node_id").await
+}
+
+/// Probe helper: return `true` iff `chunk_tags` still carries the legacy
+/// v5 `tag` TEXT column. Complement of [`chunk_tags_has_tag_node_id`],
+/// used by the v3→v4 script to stay idempotent on fresh v6 DBs where the
+/// table is already retargeted.
+async fn chunk_tags_has_tag_column(tx: &mut SqliteTransaction<'_>) -> Result<bool, CorlinmanError> {
+    chunk_tags_has_column(tx, "tag").await
+}
+
+async fn chunk_tags_has_column(
+    tx: &mut SqliteTransaction<'_>,
+    want: &str,
+) -> Result<bool, CorlinmanError> {
+    let rows = sqlx::query("PRAGMA table_info(chunk_tags)")
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| CorlinmanError::Storage(format!("pragma chunk_tags: {e}")))?;
+    for r in rows {
+        let name: String = r.get("name");
+        if name == want {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Probe helper: return `true` iff the `chunks` table currently has a
 /// `namespace` column. Used by [`V4ToV5ChunksNamespace::up`] +
 /// [`V4ToV5ChunksNamespace::down`] to stay idempotent regardless of whether
@@ -726,14 +929,14 @@ mod tests {
         store.kv_set("schema_version", "1").await.unwrap();
 
         let registry = MigrationRegistry::builtin();
-        assert_eq!(registry.target_version(), 5);
+        assert_eq!(registry.target_version(), 6);
         let report = registry.migrate_up(store.pool()).await.unwrap();
         assert_eq!(report.from, 1);
-        assert_eq!(report.to, 5);
-        assert_eq!(report.scripts_applied.len(), 4);
+        assert_eq!(report.to, 6);
+        assert_eq!(report.scripts_applied.len(), 5);
         assert_eq!(
             store.kv_get("schema_version").await.unwrap().as_deref(),
-            Some("5")
+            Some("6")
         );
         // Tables the registry should have left in place:
         for t in [
@@ -743,6 +946,8 @@ mod tests {
             "chunks_fts",
             "pending_approvals",
             "chunk_tags",
+            "tag_nodes",
+            "chunk_epa",
         ] {
             assert!(store.table_exists(t).await.unwrap(), "missing table {t}");
         }
@@ -756,12 +961,12 @@ mod tests {
         store.kv_set("schema_version", "1").await.unwrap();
         let registry = MigrationRegistry::builtin();
         let first = registry.migrate_up(store.pool()).await.unwrap();
-        assert_eq!(first.to, 5);
+        assert_eq!(first.to, 6);
         assert!(!first.scripts_applied.is_empty());
 
         let second = registry.migrate_up(store.pool()).await.unwrap();
-        assert_eq!(second.from, 5);
-        assert_eq!(second.to, 5);
+        assert_eq!(second.from, 6);
+        assert_eq!(second.to, 6);
         assert!(second.scripts_applied.is_empty());
     }
 
@@ -832,17 +1037,17 @@ mod tests {
 
     // -- 5. partial_failure_rolls_back -------------------------------------
 
-    /// Synthetic v5→v6 step used to verify that `migrate_up` stops at the
+    /// Synthetic v6→v7 step used to verify that `migrate_up` stops at the
     /// last successful step when a later script fails. Deliberately reaches
     /// *past* the shipped target so we don't collide with any real migration.
     struct AlwaysFails;
     #[async_trait]
     impl MigrationScript for AlwaysFails {
         fn from(&self) -> u32 {
-            5
+            6
         }
         fn to(&self) -> u32 {
-            6
+            7
         }
         fn name(&self) -> &'static str {
             "always_fails"
@@ -862,20 +1067,22 @@ mod tests {
 
         let mut registry = MigrationRegistry::builtin();
         registry.register(Arc::new(AlwaysFails));
-        assert_eq!(registry.target_version(), 6);
+        assert_eq!(registry.target_version(), 7);
 
         let err = registry.migrate_up(store.pool()).await.unwrap_err();
         assert!(err.to_string().contains("synthetic failure"));
 
-        // v1→v2, v2→v3, v3→v4, v4→v5 committed successfully; v5→v6 failed
-        // and its transaction was rolled back, so we're parked at v5.
+        // v1→v2, v2→v3, v3→v4, v4→v5, v5→v6 committed successfully;
+        // v6→v7 synthetic step failed and its transaction rolled back,
+        // so we're parked at v6.
         assert_eq!(
             store.kv_get("schema_version").await.unwrap().as_deref(),
-            Some("5"),
+            Some("6"),
             "should be parked at last successful step"
         );
         assert!(store.table_exists("pending_approvals").await.unwrap());
         assert!(store.table_exists("chunk_tags").await.unwrap());
+        assert!(store.table_exists("tag_nodes").await.unwrap());
     }
 
     // -- 6. migrate_down_to_v2_then_up_to_5 --------------------------------
@@ -883,6 +1090,8 @@ mod tests {
     #[tokio::test]
     async fn migrate_down_to_v2_then_up_to_5() {
         let (store, _tmp) = fresh_store().await;
+        // v5→v6 is intentionally irreversible, so we start the round-trip
+        // at v5 (the floor the user can reach via ensure_schema).
         store.kv_set("schema_version", "5").await.unwrap();
 
         let registry = MigrationRegistry::builtin();
@@ -895,13 +1104,15 @@ mod tests {
         assert!(!store.table_exists("pending_approvals").await.unwrap());
         assert!(!store.table_exists("chunk_tags").await.unwrap());
 
-        // Re-apply v2→v3→v4→v5 and verify both tables come back.
+        // Re-apply v2→v3→v4→v5→v6 and verify tables come back.
         let up = registry.migrate_up(store.pool()).await.unwrap();
         assert_eq!(up.from, 2);
-        assert_eq!(up.to, 5);
-        assert_eq!(up.scripts_applied.len(), 3);
+        assert_eq!(up.to, 6);
+        assert_eq!(up.scripts_applied.len(), 4);
         assert!(store.table_exists("pending_approvals").await.unwrap());
         assert!(store.table_exists("chunk_tags").await.unwrap());
+        assert!(store.table_exists("tag_nodes").await.unwrap());
+        assert!(store.table_exists("chunk_epa").await.unwrap());
     }
 
     // -- 7. v5_up_adds_namespace_and_default ------------------------------
@@ -992,9 +1203,10 @@ mod tests {
         let registry = MigrationRegistry::builtin();
         let report = registry.migrate_up(store.pool()).await.unwrap();
         assert_eq!(report.from, 4);
-        assert_eq!(report.to, 5);
-        assert_eq!(report.scripts_applied.len(), 1);
+        assert_eq!(report.to, 6);
+        assert_eq!(report.scripts_applied.len(), 2);
         assert_eq!(report.scripts_applied[0], "v4_to_v5_chunks_namespace");
+        assert_eq!(report.scripts_applied[1], "v5_to_v6_tag_nodes_and_epa");
 
         // Existing row now carries the 'general' default.
         let ns: String = sqlx::query_scalar("SELECT namespace FROM chunks LIMIT 1")
@@ -1019,14 +1231,14 @@ mod tests {
     #[tokio::test]
     async fn v5_up_is_idempotent_on_fresh_db() {
         // Fresh DB already has the column via SCHEMA_SQL — running v4→v5
-        // must succeed without errors (the ALTER is skipped) and leave the
-        // schema at v5.
+        // (and v5→v6) must succeed without errors (the ALTER is skipped
+        // and the tag_nodes rebuild is skipped) and leave the schema at v6.
         let (store, _tmp) = fresh_store().await;
         store.kv_set("schema_version", "4").await.unwrap();
 
         let registry = MigrationRegistry::builtin();
         let report = registry.migrate_up(store.pool()).await.unwrap();
-        assert_eq!(report.to, 5);
+        assert_eq!(report.to, 6);
         // The column is still there and usable.
         let file_id = store.insert_file("x.md", "d", "h", 0, 0).await.unwrap();
         let _ = store
@@ -1133,5 +1345,259 @@ mod tests {
             err.to_string().contains("schema_version mismatch"),
             "unexpected: {err}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // v5 → v6 migration tests (B3-BE3)
+    // -----------------------------------------------------------------------
+
+    /// Build a v5-shaped DB fixture: strip the v6 additions (`tag_nodes`,
+    /// `chunk_epa`, retargeted `chunk_tags`) and re-create the legacy
+    /// `chunk_tags(chunk_id, tag TEXT)` table so the v5→v6 migration has
+    /// real work to do.
+    async fn force_v5_shape(store: &SqliteStore) {
+        let pool = store.pool();
+        sqlx::query("DROP INDEX IF EXISTS idx_chunk_tags_tag_node")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE IF EXISTS chunk_tags")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE IF EXISTS chunk_epa")
+            .execute(pool)
+            .await
+            .unwrap();
+        for idx in [
+            "idx_tag_nodes_parent",
+            "idx_tag_nodes_path",
+            "idx_tag_nodes_depth",
+        ] {
+            sqlx::query(&format!("DROP INDEX IF EXISTS {idx}"))
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DROP TABLE IF EXISTS tag_nodes")
+            .execute(pool)
+            .await
+            .unwrap();
+        // Re-create the v5-shaped chunk_tags (flat TEXT tag).
+        sqlx::query(
+            "CREATE TABLE chunk_tags (
+                chunk_id INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (chunk_id, tag),
+                FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE INDEX idx_chunk_tags_tag ON chunk_tags(tag)")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn v5_db_migrates_to_v6_tag_nodes_populated() {
+        let (store, _tmp) = fresh_store().await;
+        force_v5_shape(&store).await;
+
+        // Seed chunks + legacy flat tags.
+        let file_id = store
+            .insert_file("legacy.md", "d", "h", 0, 0)
+            .await
+            .unwrap();
+        let c1 = store
+            .insert_chunk(file_id, 0, "rust backend", None, "general")
+            .await
+            .unwrap();
+        let c2 = store
+            .insert_chunk(file_id, 1, "rust frontend", None, "general")
+            .await
+            .unwrap();
+        // Raw INSERTs — insert_tag() is the v6 API and would require the
+        // new schema to exist.
+        for (cid, tag) in [
+            (c1, "rust"),
+            (c1, "backend"),
+            (c2, "rust"),
+            (c2, "frontend"),
+        ] {
+            sqlx::query("INSERT INTO chunk_tags(chunk_id, tag) VALUES(?1, ?2)")
+                .bind(cid)
+                .bind(tag)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+        store.kv_set("schema_version", "5").await.unwrap();
+
+        let registry = MigrationRegistry::builtin();
+        let report = registry.migrate_up(store.pool()).await.unwrap();
+        assert_eq!(report.from, 5);
+        assert_eq!(report.to, 6);
+        assert_eq!(report.scripts_applied, vec!["v5_to_v6_tag_nodes_and_epa"]);
+
+        // tag_nodes populated with one depth-0 row per distinct legacy tag.
+        let paths: Vec<String> =
+            sqlx::query_scalar::<_, String>("SELECT path FROM tag_nodes ORDER BY path ASC")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(paths, vec!["backend", "frontend", "rust"]);
+
+        // Depth = 0 everywhere (flat seed).
+        let depths: Vec<i64> =
+            sqlx::query_scalar::<_, i64>("SELECT depth FROM tag_nodes ORDER BY path ASC")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert!(depths.iter().all(|d| *d == 0));
+
+        // chunk_tags retargeted: still points at the same chunks, via node ids.
+        let tags_c1 = store.get_tags(c1).await.unwrap();
+        assert_eq!(tags_c1, vec!["backend", "rust"]);
+        let tags_c2 = store.get_tags(c2).await.unwrap();
+        assert_eq!(tags_c2, vec!["frontend", "rust"]);
+
+        // chunk_epa exists but is empty until TagMemo populates it.
+        assert!(store.table_exists("chunk_epa").await.unwrap());
+        let epa_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chunk_epa")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(epa_count, 0);
+
+        // Legacy snapshot table is gone.
+        assert!(!store.table_exists("chunk_tags_v5").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn ensure_tag_path_is_idempotent() {
+        let (store, _tmp) = fresh_store().await;
+        let first = store.ensure_tag_path("role.protagonist").await.unwrap();
+        let second = store.ensure_tag_path("role.protagonist").await.unwrap();
+        assert_eq!(first, second, "duplicate upsert must return the same id");
+
+        // And the overall row count must not have doubled.
+        let node_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tag_nodes")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            node_count, 2,
+            "got {node_count}, expected role + role.protagonist"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_tag_path_creates_intermediate_nodes() {
+        let (store, _tmp) = fresh_store().await;
+        let leaf_id = store
+            .ensure_tag_path("role.protagonist.voice")
+            .await
+            .unwrap();
+
+        // All three segments should be present.
+        let paths: Vec<String> = sqlx::query_scalar::<_, String>(
+            "SELECT path FROM tag_nodes ORDER BY depth ASC, path ASC",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            paths,
+            vec!["role", "role.protagonist", "role.protagonist.voice"]
+        );
+
+        // Depths 0, 1, 2.
+        let depths: Vec<i64> = sqlx::query_scalar::<_, i64>(
+            "SELECT depth FROM tag_nodes ORDER BY depth ASC, path ASC",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(depths, vec![0, 1, 2]);
+
+        // parent_id chain links correctly: depth 0 has NULL.
+        let chain: Vec<(String, Option<i64>)> =
+            sqlx::query("SELECT path, parent_id FROM tag_nodes ORDER BY depth ASC")
+                .fetch_all(store.pool())
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| {
+                    (
+                        r.get::<String, _>("path"),
+                        r.get::<Option<i64>, _>("parent_id"),
+                    )
+                })
+                .collect();
+        assert_eq!(chain[0].1, None);
+        assert!(chain[1].1.is_some());
+        assert!(chain[2].1.is_some());
+
+        // leaf_id corresponds to the deepest (path = "role.protagonist.voice") row.
+        let leaf_path: String = sqlx::query_scalar("SELECT path FROM tag_nodes WHERE id = ?1")
+            .bind(leaf_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(leaf_path, "role.protagonist.voice");
+    }
+
+    #[tokio::test]
+    async fn chunk_tags_fk_carries_through_migration() {
+        let (store, _tmp) = fresh_store().await;
+        force_v5_shape(&store).await;
+
+        // Seed: one chunk, one legacy tag.
+        let file_id = store.insert_file("f.md", "d", "h", 0, 0).await.unwrap();
+        let cid = store
+            .insert_chunk(file_id, 0, "carry me", None, "general")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chunk_tags(chunk_id, tag) VALUES(?1, ?2)")
+            .bind(cid)
+            .bind("carryover")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store.kv_set("schema_version", "5").await.unwrap();
+
+        // Run migration.
+        MigrationRegistry::builtin()
+            .migrate_up(store.pool())
+            .await
+            .unwrap();
+
+        // The attachment survived: chunk still has the tag by path.
+        assert_eq!(store.get_tags(cid).await.unwrap(), vec!["carryover"]);
+
+        // Deleting the chunk cascades through the new FK to chunk_tags.
+        sqlx::query("DELETE FROM chunks WHERE id = ?1")
+            .bind(cid)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let orphaned: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM chunk_tags WHERE chunk_id = ?1")
+                .bind(cid)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(orphaned, 0, "ON DELETE CASCADE must remove chunk_tags rows");
+        // But the tag_node itself stays — it's a vocabulary entry, not
+        // owned by any single chunk.
+        let still_there: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM tag_nodes WHERE path = 'carryover'")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(still_there, 1);
     }
 }

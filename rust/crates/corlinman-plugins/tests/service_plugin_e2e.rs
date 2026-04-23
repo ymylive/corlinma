@@ -138,6 +138,7 @@ fn write_plugin(dir: &Path, python_bin: &Path, extra_pythonpath: Option<&Path>) 
     }
 
     PluginManifest {
+        manifest_version: 2,
         name: "e2e_service".into(),
         version: "0.1.0".into(),
         description: String::new(),
@@ -152,6 +153,9 @@ fn write_plugin(dir: &Path, python_bin: &Path, extra_pythonpath: Option<&Path>) 
         capabilities: Default::default(),
         sandbox: Default::default(),
         meta: None,
+        protocols: vec!["openai_function".into()],
+        hooks: vec![],
+        skill_refs: vec![],
     }
 }
 

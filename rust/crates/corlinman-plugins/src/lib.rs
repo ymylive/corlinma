@@ -11,6 +11,7 @@ pub mod async_task;
 pub mod discovery;
 pub mod manifest;
 pub mod preprocessor;
+pub mod protocol;
 pub mod registry;
 pub mod runtime;
 pub mod sandbox;

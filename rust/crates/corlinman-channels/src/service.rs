@@ -50,6 +50,11 @@ pub struct QqChannelParams {
     /// `corlinman_channels_rate_limited_total{channel, reason}` counter in
     /// production; tests leave it `None`.
     pub rate_limit_hook: Option<RateLimitHook>,
+    /// Optional shared hook bus (B4-BE6). When `Some`, rate-limit drops are
+    /// mirrored to [`corlinman_hooks::HookEvent::RateLimitTriggered`] in
+    /// addition to the legacy `rate_limit_hook` callback. Default `None`
+    /// preserves existing wiring byte-for-byte.
+    pub hook_bus: Option<Arc<corlinman_hooks::HookBus>>,
 }
 
 /// Spawn the QQ channel loop and run until `cancel` fires. Returns `Ok(())`
@@ -64,6 +69,7 @@ pub async fn run_qq_channel(
         model,
         chat_service,
         rate_limit_hook,
+        hook_bus,
     } = params;
 
     if config.ws_url.is_empty() {
@@ -104,6 +110,9 @@ pub async fn run_qq_channel(
     .with_rate_limits(group_limiter, sender_limiter);
     if let Some(hook) = rate_limit_hook {
         router = router.with_rate_limit_hook(hook);
+    }
+    if let Some(bus) = hook_bus {
+        router = router.with_hook_bus(bus);
     }
     let router = Arc::new(router);
 

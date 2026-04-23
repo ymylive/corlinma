@@ -1,0 +1,25 @@
+{
+  "expanded_agent": null,
+  "messages": [
+    {
+      "content": null,
+      "role": "system"
+    },
+    {
+      "content": "",
+      "role": "system"
+    },
+    {
+      "content": [
+        {
+          "text": "hi {{VarName}}",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "muted_agents": [],
+  "skill_errors": [],
+  "unresolved_keys": []
+}

@@ -58,6 +58,15 @@ use crate::usearch_index::UsearchIndex;
 /// - `any_of`: chunk must carry *at least one* tag (ignored when empty).
 /// - `excluded`: chunk must carry *none* of the listed tags.
 ///
+/// All tag strings match against `tag_nodes.path`, so a flat v5-style
+/// tag like `"rust"` is interpreted as the depth-0 path `"rust"` —
+/// backward-compatible with callers that predate the hierarchical tree.
+///
+/// Subtree filtering (Sprint 9 T-B3-BE3) is expressed via
+/// [`HybridParams::tag_subtree`] rather than on this struct so downstream
+/// callers that still build `TagFilter { required, excluded, any_of }`
+/// positionally keep compiling.
+///
 /// An all-empty `TagFilter` is equivalent to `None` — callers should not
 /// build one in that case (the searcher still short-circuits correctly
 /// if they do, it's just wasted work).
@@ -75,8 +84,144 @@ impl TagFilter {
     }
 }
 
+/// Sprint 9 T-B3-BE5: post-RRF candidate reweighter.
+///
+/// An implementation returns a multiplicative factor in `(0, ∞)` for a
+/// given `chunk_id`; the hybrid searcher multiplies the chunk's RRF
+/// score by this factor before the final sort + truncate. `1.0` means
+/// "no change" and is what implementations must return for chunks they
+/// don't recognise — that way sparse coverage (e.g. EPA rows only exist
+/// for some chunks) degrades cleanly rather than zeroing out recall.
+///
+/// The trait has two entry points:
+/// - `prepare(ids)` runs once per query before RRF, async. Default =
+///   no-op. Implementations that need to touch I/O (SQLite, HTTP) warm
+///   a per-call cache here so [`Self::boost`] can stay sync.
+/// - `boost(chunk_id)` runs inside fusion, sync. Must return `1.0` for
+///   any id the implementation doesn't recognise.
+#[async_trait::async_trait]
+pub trait CandidateBoost: Send + Sync + std::fmt::Debug {
+    /// Optional async prefetch hook. The searcher calls this with the
+    /// union of dense + sparse candidate ids before invoking
+    /// [`Self::boost`]. Errors propagate up through `search`.
+    async fn prepare(&self, _chunk_ids: &[i64]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Multiplicative factor applied to the candidate's fused score.
+    fn boost(&self, chunk_id: i64) -> f32;
+}
+
+/// Pure-Rust port of the Python `dynamic_boost` formula in
+/// [`corlinman_tagmemo.boost.dynamic_boost`]. Kept in sync so the Python
+/// side isn't in the per-query hot path.
+///
+/// All three free parameters are clamped to `[0, 1]` before being fed
+/// into the formula, matching the Python implementation exactly. The
+/// final value is then clamped to `boost_range`.
+pub(crate) fn dynamic_boost_rust(
+    logic_depth: f32,
+    resonance_boost: f32,
+    entropy_penalty: f32,
+    base_tag_boost: f32,
+    boost_range: (f32, f32),
+) -> f32 {
+    let ld = logic_depth.clamp(0.0, 1.0);
+    let rb = resonance_boost.clamp(0.0, 1.0);
+    let ep = entropy_penalty.clamp(0.0, 1.0);
+    let denom = 1.0 + ep * 0.5; // ep ∈ [0,1] ⇒ denom ∈ [1, 1.5], never zero.
+    let factor = ld * (1.0 + rb) / denom;
+    (base_tag_boost * factor).clamp(boost_range.0, boost_range.1)
+}
+
+/// [`CandidateBoost`] that sources its per-chunk signal from the
+/// `chunk_epa` cache (populated by B3-BE4 / the Python backfill job).
+///
+/// Lookups happen inside [`CandidateBoost::prepare`] — async, once per
+/// query — and are stashed in an internal cache so the sync
+/// [`CandidateBoost::boost`] hot path can read without touching SQLite.
+/// Chunks without an EPA row produce a cached `1.0` (pass-through).
+pub struct EpaBoost {
+    store: Arc<SqliteStore>,
+    base_tag_boost: f32,
+    boost_range: (f32, f32),
+    cache: std::sync::RwLock<HashMap<i64, f32>>,
+}
+
+impl EpaBoost {
+    /// Construct an `EpaBoost`. `base_tag_boost` is typically `1.0` so
+    /// unclamped factors stay near 1×; `boost_range` defaults to
+    /// `(0.5, 2.5)` (same as the Python `dynamic_boost` default).
+    pub fn new(store: Arc<SqliteStore>, base_tag_boost: f32, boost_range: (f32, f32)) -> Self {
+        Self {
+            store,
+            base_tag_boost,
+            boost_range,
+            cache: std::sync::RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+impl std::fmt::Debug for EpaBoost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EpaBoost")
+            .field("base_tag_boost", &self.base_tag_boost)
+            .field("boost_range", &self.boost_range)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl CandidateBoost for EpaBoost {
+    async fn prepare(&self, chunk_ids: &[i64]) -> Result<()> {
+        // Drop any stale per-query entries before refilling so the cache
+        // doesn't grow unboundedly across calls.
+        {
+            let mut c = self
+                .cache
+                .write()
+                .map_err(|_| anyhow::anyhow!("EpaBoost cache poisoned"))?;
+            c.clear();
+        }
+        let mut out: HashMap<i64, f32> = HashMap::with_capacity(chunk_ids.len());
+        for &id in chunk_ids {
+            let factor = match self
+                .store
+                .get_chunk_epa(id)
+                .await
+                .with_context(|| format!("EpaBoost::prepare(chunk_id={id})"))?
+            {
+                Some(row) => dynamic_boost_rust(
+                    row.logic_depth,
+                    0.0,
+                    0.0,
+                    self.base_tag_boost,
+                    self.boost_range,
+                ),
+                None => 1.0,
+            };
+            out.insert(id, factor);
+        }
+        let mut c = self
+            .cache
+            .write()
+            .map_err(|_| anyhow::anyhow!("EpaBoost cache poisoned"))?;
+        *c = out;
+        Ok(())
+    }
+
+    fn boost(&self, chunk_id: i64) -> f32 {
+        // Poisoned lock ⇒ pass through unchanged rather than panic.
+        self.cache
+            .read()
+            .ok()
+            .and_then(|c| c.get(&chunk_id).copied())
+            .unwrap_or(1.0)
+    }
+}
+
 /// Reciprocal-rank-fusion tuning knobs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridParams {
     /// Final number of fused hits to return.
     pub top_k: usize,
@@ -105,11 +250,27 @@ pub struct HybridParams {
     /// truncated to `top_k` (the noop reranker behaviour), so callers
     /// who leave this alone see the legacy RRF-only ordering.
     pub rerank_enabled: bool,
+    /// Sprint 9 T-B3-BE3: restrict results to chunks tagged anywhere in
+    /// the subtree rooted at the given dotted path — `tag_nodes.path = ?`
+    /// OR `tag_nodes.path LIKE ? || '.%'`. `None` ⇒ no subtree constraint.
+    /// Combines with `tag_filter` (AND) and `namespaces` (AND) when both
+    /// are set.
+    #[serde(default)]
+    pub tag_subtree: Option<String>,
+    /// Sprint 9 T-B3-BE5: optional post-RRF candidate reweighter. When
+    /// `Some`, the [`CandidateBoost::boost`] factor is multiplied into
+    /// every fused candidate's score before truncation. `None` (the
+    /// default) ⇒ byte-identical to pre-B3-BE5 behaviour.
+    ///
+    /// Skipped by serde — pluggable scorers aren't serialisable.
+    #[serde(skip)]
+    pub boost: Option<Arc<dyn CandidateBoost>>,
 }
 
 impl HybridParams {
     /// Library defaults: `top_k=10`, `overfetch=3`, equal weights, `k=60`,
-    /// no tag filter, namespace unset (→ `"general"`), rerank disabled.
+    /// no tag filter, namespace unset (→ `"general"`), rerank disabled,
+    /// no subtree constraint, no boost hook.
     pub const fn new() -> Self {
         Self {
             top_k: 10,
@@ -120,6 +281,8 @@ impl HybridParams {
             tag_filter: None,
             namespaces: None,
             rerank_enabled: false,
+            tag_subtree: None,
+            boost: None,
         }
     }
 }
@@ -249,7 +412,7 @@ impl HybridSearcher {
         let fetch = p.top_k.saturating_mul(p.overfetch_multiplier.max(1));
 
         // --- Tag filter: resolve once, reuse for both paths. ---------------
-        let tag_ids: Option<Vec<i64>> = match &p.tag_filter {
+        let base_tag_ids: Option<Vec<i64>> = match &p.tag_filter {
             Some(tf) if !tf.is_empty() => Some(
                 self.sqlite
                     .filter_chunk_ids_by_tags(tf)
@@ -257,6 +420,28 @@ impl HybridSearcher {
                     .context("tag filter pushdown")?,
             ),
             _ => None,
+        };
+        // --- Subtree filter (B3-BE3): `tag_nodes.path = root OR LIKE root.%`.
+        // Intersect with the flat tag filter when both are set so callers
+        // can still AND them.
+        let tag_ids: Option<Vec<i64>> = match (base_tag_ids, p.tag_subtree.as_deref()) {
+            (None, None) => None,
+            (Some(v), None) => Some(v),
+            (None, Some(root)) => Some(
+                self.sqlite
+                    .filter_chunk_ids_by_tag_subtree(root)
+                    .await
+                    .context("tag subtree pushdown")?,
+            ),
+            (Some(tags), Some(root)) => {
+                let sub = self
+                    .sqlite
+                    .filter_chunk_ids_by_tag_subtree(root)
+                    .await
+                    .context("tag subtree pushdown")?;
+                let sub_set: std::collections::HashSet<i64> = sub.into_iter().collect();
+                Some(tags.into_iter().filter(|id| sub_set.contains(id)).collect())
+            }
         };
 
         // --- Namespace filter (S9 T1). Default = ["general"] ---------------
@@ -337,8 +522,34 @@ impl HybridSearcher {
         // path). When rerank is enabled we keep the full fused set so the
         // cross-encoder has real candidates to re-order; truncation to
         // `top_k` happens inside the reranker.
+        //
+        // Sprint 9 T-B3-BE5: when `p.boost` is `Some`, we prefetch + apply
+        // the candidate-level multiplicative boost after RRF but before
+        // truncation so the reweight influences which `top_k` survives.
+        // When `None` (the default) this branch is a no-op and the fused
+        // list is byte-identical to the pre-B3-BE5 output.
         let fuse_start = Instant::now();
-        let fused = rrf_fuse(&dense_hits, &sparse_hits, &p);
+        let mut fused = rrf_fuse(&dense_hits, &sparse_hits, &p);
+        if let Some(boost) = &p.boost {
+            let ids: Vec<i64> = fused.iter().map(|(id, _, _)| *id).collect();
+            boost
+                .prepare(&ids)
+                .await
+                .context("candidate boost prepare")?;
+            for (id, score, _src) in fused.iter_mut() {
+                let factor = boost.boost(*id);
+                // Guard against pathological scorers returning NaN/inf.
+                if factor.is_finite() && factor > 0.0 {
+                    *score *= factor;
+                }
+            }
+            // Re-sort after reweight; tie-break by id so results stay stable.
+            fused.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+        }
         let candidates: Vec<(i64, f32, HitSource)> = if p.rerank_enabled {
             fused
         } else {
@@ -561,6 +772,8 @@ mod tests {
             tag_filter: None,
             namespaces: None,
             rerank_enabled: false,
+            tag_subtree: None,
+            boost: None,
         };
         let fused = rrf_fuse(&dense, &sparse, &p);
         assert_eq!(fused[0].0, 2);
@@ -588,6 +801,8 @@ mod tests {
             tag_filter: None,
             namespaces: None,
             rerank_enabled: false,
+            tag_subtree: None,
+            boost: None,
         };
         let fused = rrf_fuse(&[(1, 0.0)], &[(1, 0.0)], &p);
         assert_eq!(fused.len(), 1);
@@ -651,6 +866,8 @@ mod tests {
             tag_filter: Some(tf),
             namespaces: None,
             rerank_enabled: false,
+            tag_subtree: None,
+            boost: None,
         }
     }
 
@@ -757,6 +974,125 @@ mod tests {
         assert!(hits[0].content.contains("apple"));
     }
 
+    // ---- subtree filter (Sprint 9 T-B3-BE3) ---------------------------
+
+    /// Seed a searcher with hierarchical tag paths so subtree filters
+    /// have real depth to walk. Corpus layout:
+    ///  - chunk 0 "alpha" → role.protagonist.voice
+    ///  - chunk 1 "bravo" → role.antagonist
+    ///  - chunk 2 "charlie" → mood.calm
+    ///  - chunk 3 "delta" → (untagged)
+    async fn subtree_tagged_store() -> (HybridSearcher, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let sqlite = SqliteStore::open(&tmp.path().join("kb.sqlite"))
+            .await
+            .unwrap();
+        let file_id = sqlite
+            .insert_file("notes/st.md", "notes", "h", 0, 0)
+            .await
+            .unwrap();
+
+        let corpus: &[(&str, [f32; 4], &str)] = &[
+            ("alpha word", [1.0, 0.0, 0.0, 0.0], "role.protagonist.voice"),
+            ("bravo word", [0.9, 0.1, 0.0, 0.0], "role.antagonist"),
+            ("charlie word", [0.0, 0.0, 1.0, 0.0], "mood.calm"),
+            ("delta word", [0.0, 1.0, 0.0, 0.0], ""),
+        ];
+        let mut ids = [0_i64; 4];
+        let mut index = UsearchIndex::create_with_capacity(4, 16).unwrap();
+        for (i, (text, v, path)) in corpus.iter().enumerate() {
+            ids[i] = sqlite
+                .insert_chunk(file_id, i as i64, text, Some(v), "general")
+                .await
+                .unwrap();
+            if !path.is_empty() {
+                sqlite.attach_chunk_to_tag_path(ids[i], path).await.unwrap();
+            }
+            index.add(ids[i] as u64, v).unwrap();
+        }
+        let hybrid = HybridSearcher::new(
+            Arc::new(sqlite),
+            Arc::new(RwLock::new(index)),
+            HybridParams::new(),
+        );
+        (hybrid, tmp)
+    }
+
+    fn params_with_subtree(top_k: usize, root: &str) -> HybridParams {
+        HybridParams {
+            top_k,
+            overfetch_multiplier: 3,
+            bm25_weight: 1.0,
+            hnsw_weight: 1.0,
+            rrf_k: 60.0,
+            tag_filter: None,
+            namespaces: None,
+            rerank_enabled: false,
+            tag_subtree: Some(root.to_string()),
+            boost: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn subtree_filter_matches_nested_paths() {
+        let (searcher, _tmp) = subtree_tagged_store().await;
+        // Both `role.protagonist.voice` (descendant) and `role.antagonist`
+        // (direct child) are in the `role` subtree; `mood.calm` must not leak.
+        let hits = searcher
+            .search(
+                "word",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(params_with_subtree(10, "role")),
+            )
+            .await
+            .unwrap();
+        let contents: Vec<&str> = hits.iter().map(|h| h.content.as_str()).collect();
+        assert_eq!(hits.len(), 2, "got: {contents:?}");
+        assert!(contents.iter().any(|c| c.contains("alpha")));
+        assert!(contents.iter().any(|c| c.contains("bravo")));
+        assert!(!contents.iter().any(|c| c.contains("charlie")));
+        assert!(!contents.iter().any(|c| c.contains("delta")));
+    }
+
+    #[tokio::test]
+    async fn subtree_filter_does_not_leak_across_roots() {
+        let (searcher, _tmp) = subtree_tagged_store().await;
+        // `mood` subtree: only `mood.calm` → chunk 2.
+        let hits = searcher
+            .search(
+                "word",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(params_with_subtree(10, "mood")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].content.contains("charlie"));
+    }
+
+    #[tokio::test]
+    async fn flat_filter_still_works_post_migration() {
+        // Runs on a schema-v6 DB (fresh SqliteStore::open) but exercises
+        // the flat v5-style TagFilter API. After the v5→v6 retarget this
+        // must still behave identically to the pre-migration implementation.
+        let (searcher, _tmp) = tagged_store().await;
+        let tf = TagFilter {
+            required: vec!["backend".into()],
+            ..Default::default()
+        };
+        let hits = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(params_with_filter(10, tf)),
+            )
+            .await
+            .unwrap();
+        // Only chunk 0 has the "backend" tag.
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].content.contains("apple"));
+    }
+
     // ---- namespace filter (Sprint 9 T1) -------------------------------
 
     /// Seed a searcher with 4 chunks split across two namespaces:
@@ -802,6 +1138,8 @@ mod tests {
             tag_filter: None,
             namespaces,
             rerank_enabled: false,
+            tag_subtree: None,
+            boost: None,
         }
     }
 
@@ -925,6 +1263,8 @@ mod tests {
             tag_filter: None,
             namespaces: None,
             rerank_enabled: enabled,
+            tag_subtree: None,
+            boost: None,
         }
     }
 
@@ -1049,5 +1389,239 @@ mod tests {
             .await
             .unwrap();
         assert!(hits.len() <= 2);
+    }
+
+    // ---- EPA boost (Sprint 9 T-B3-BE5) -------------------------------
+
+    #[test]
+    fn dynamic_boost_clamps_to_range() {
+        // logic_depth=1, base=10 ⇒ unclamped would be 10, clamp to 2.5 top.
+        let hi = dynamic_boost_rust(1.0, 0.0, 0.0, 10.0, (0.5, 2.5));
+        assert!((hi - 2.5).abs() < 1e-6, "expected 2.5, got {hi}");
+        // logic_depth=0 ⇒ factor=0 ⇒ clamp to floor 0.5.
+        let lo = dynamic_boost_rust(0.0, 0.0, 0.0, 1.0, (0.5, 2.5));
+        assert!((lo - 0.5).abs() < 1e-6, "expected 0.5, got {lo}");
+        // Out-of-range inputs (>1) are clamped to 1 before the formula runs,
+        // so a huge logic_depth doesn't blow past the ceiling.
+        let capped = dynamic_boost_rust(99.0, 99.0, 0.0, 1.0, (0.5, 2.5));
+        assert!((capped - 2.0).abs() < 1e-6, "expected 2.0, got {capped}");
+    }
+
+    async fn seed_epa_store() -> (Arc<SqliteStore>, [i64; 3], tempfile::TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let sqlite = Arc::new(
+            SqliteStore::open(&tmp.path().join("kb.sqlite"))
+                .await
+                .unwrap(),
+        );
+        let file_id = sqlite
+            .insert_file("epa.md", "epa", "h", 0, 0)
+            .await
+            .unwrap();
+        let mut ids = [0_i64; 3];
+        let vecs = [
+            [1.0_f32, 0.0, 0.0, 0.0],
+            [0.9_f32, 0.1, 0.0, 0.0],
+            [0.8_f32, 0.2, 0.0, 0.0],
+        ];
+        for (i, v) in vecs.iter().enumerate() {
+            ids[i] = sqlite
+                .insert_chunk(
+                    file_id,
+                    i as i64,
+                    &format!("banana chunk {i}"),
+                    Some(v),
+                    "general",
+                )
+                .await
+                .unwrap();
+        }
+        // Only seed EPA for ids[0] and ids[2]; ids[1] stays missing so we
+        // can exercise the `None ⇒ pass-through` branch.
+        sqlite
+            .upsert_chunk_epa(ids[0], &[0.5_f32, 0.1], 0.3, 0.9)
+            .await
+            .unwrap();
+        sqlite
+            .upsert_chunk_epa(ids[2], &[0.2_f32, 0.4], 0.8, 0.1)
+            .await
+            .unwrap();
+        (sqlite, ids, tmp)
+    }
+
+    #[tokio::test]
+    async fn epa_boost_returns_one_for_missing_row() {
+        let (sqlite, ids, _tmp) = seed_epa_store().await;
+        let booster = EpaBoost::new(sqlite, 1.0, (0.5, 2.5));
+        // Prepare only the missing id so the cache is primed with 1.0.
+        booster.prepare(&[ids[1]]).await.unwrap();
+        let factor = booster.boost(ids[1]);
+        assert!(
+            (factor - 1.0).abs() < 1e-6,
+            "missing EPA row must pass through; got {factor}"
+        );
+        // An id that wasn't even prepared also returns 1.0 (cache miss).
+        assert!((booster.boost(9999) - 1.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn epa_boost_uses_logic_depth() {
+        let (sqlite, ids, _tmp) = seed_epa_store().await;
+        let booster = EpaBoost::new(sqlite, 1.0, (0.5, 2.5));
+        booster.prepare(&[ids[0], ids[2]]).await.unwrap();
+        let b_high_ld = booster.boost(ids[0]); // logic_depth = 0.9
+        let b_low_ld = booster.boost(ids[2]); // logic_depth = 0.1
+        assert!(
+            b_high_ld > b_low_ld,
+            "higher logic_depth must yield a larger boost; got {b_high_ld} vs {b_low_ld}"
+        );
+        // Concrete numeric check vs the reference formula.
+        let expected_hi = dynamic_boost_rust(0.9, 0.0, 0.0, 1.0, (0.5, 2.5));
+        assert!((b_high_ld - expected_hi).abs() < 1e-6);
+    }
+
+    fn boost_params(top_k: usize, boost: Option<Arc<dyn CandidateBoost>>) -> HybridParams {
+        HybridParams {
+            top_k,
+            overfetch_multiplier: 3,
+            bm25_weight: 1.0,
+            hnsw_weight: 1.0,
+            rrf_k: 60.0,
+            tag_filter: None,
+            namespaces: None,
+            rerank_enabled: false,
+            tag_subtree: None,
+            boost,
+        }
+    }
+
+    /// Baseline identity check: `boost = None` must produce the exact
+    /// same hit list (ids + scores + order) as pre-B3-BE5.
+    #[tokio::test]
+    async fn hybrid_search_without_boost_is_byte_identical_to_baseline() {
+        let (searcher, _tmp) = tagged_store().await;
+        let baseline = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(boost_params(10, None)),
+            )
+            .await
+            .unwrap();
+        // Same params again — should produce byte-identical output.
+        let repeat = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(boost_params(10, None)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(baseline.len(), repeat.len());
+        for (a, b) in baseline.iter().zip(repeat.iter()) {
+            assert_eq!(a.chunk_id, b.chunk_id);
+            assert!(
+                (a.score - b.score).abs() < 1e-9,
+                "baseline drift: {a:?} vs {b:?}"
+            );
+            assert_eq!(a.source, b.source);
+        }
+    }
+
+    /// With EPA rows attached and the boost hook active, a chunk with
+    /// higher `logic_depth` must be able to outrank a baseline-equal
+    /// competitor. We construct two chunks whose pre-boost RRF scores are
+    /// within a hair of each other and seed EPA rows with wildly different
+    /// logic_depth to make the reweight observable.
+    #[tokio::test]
+    async fn hybrid_search_with_epa_boost_reranks_higher_logic_depth_chunks() {
+        let tmp = TempDir::new().unwrap();
+        let sqlite = Arc::new(
+            SqliteStore::open(&tmp.path().join("kb.sqlite"))
+                .await
+                .unwrap(),
+        );
+        let file_id = sqlite.insert_file("r.md", "r", "h", 0, 0).await.unwrap();
+
+        // Two chunks with near-identical content ("banana") + very close
+        // vectors so RRF will rank them similarly before the boost kicks in.
+        let low_id = sqlite
+            .insert_chunk(
+                file_id,
+                0,
+                "banana one",
+                Some(&[1.0, 0.0, 0.0, 0.0]),
+                "general",
+            )
+            .await
+            .unwrap();
+        let high_id = sqlite
+            .insert_chunk(
+                file_id,
+                1,
+                "banana two",
+                Some(&[0.99, 0.01, 0.0, 0.0]),
+                "general",
+            )
+            .await
+            .unwrap();
+
+        // Seed EPA so high_id carries max logic_depth (near 1.0) and
+        // low_id carries near-zero. With base_tag_boost=1 + range (0.5, 2.5)
+        // that yields ~2.0 vs ~0.5 factors — a 4× gap, plenty to flip order.
+        sqlite
+            .upsert_chunk_epa(low_id, &[0.1_f32, 0.2], 0.95, 0.05)
+            .await
+            .unwrap();
+        sqlite
+            .upsert_chunk_epa(high_id, &[0.3_f32, 0.4], 0.05, 0.95)
+            .await
+            .unwrap();
+
+        let mut index = UsearchIndex::create_with_capacity(4, 16).unwrap();
+        index.add(low_id as u64, &[1.0_f32, 0.0, 0.0, 0.0]).unwrap();
+        index
+            .add(high_id as u64, &[0.99_f32, 0.01, 0.0, 0.0])
+            .unwrap();
+
+        let searcher = HybridSearcher::new(
+            sqlite.clone(),
+            Arc::new(RwLock::new(index)),
+            HybridParams::new(),
+        );
+
+        // Baseline (no boost): low_id ranks first because its vector is a
+        // tighter match to the query and it wins BM25 tie-break at rank 1.
+        let baseline = searcher
+            .search("banana", &[1.0, 0.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+        assert!(baseline.len() >= 2, "need both chunks in baseline");
+        assert_eq!(
+            baseline[0].chunk_id,
+            low_id,
+            "baseline should rank low_id first, got {:?}",
+            baseline.iter().map(|h| h.chunk_id).collect::<Vec<_>>()
+        );
+
+        // With EPA boost: high_id's logic_depth=0.95 boosts its score ~2×
+        // while low_id's logic_depth=0.05 drops to the floor factor, so
+        // high_id must climb above low_id.
+        let booster: Arc<dyn CandidateBoost> =
+            Arc::new(EpaBoost::new(sqlite.clone(), 1.0, (0.5, 2.5)));
+        let boosted = searcher
+            .search(
+                "banana",
+                &[1.0, 0.0, 0.0, 0.0],
+                Some(boost_params(10, Some(booster))),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            boosted[0].chunk_id,
+            high_id,
+            "EPA boost should flip order so high_id is first, got {:?}",
+            boosted.iter().map(|h| h.chunk_id).collect::<Vec<_>>()
+        );
     }
 }

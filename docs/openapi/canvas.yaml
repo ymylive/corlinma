@@ -1,0 +1,312 @@
+openapi: 3.1.0
+info:
+  title: corlinman Canvas Host API
+  version: 0.1.0
+  summary: Protocol stubs for hosted canvas sessions (B5-BE1).
+  description: |
+    Three HTTP endpoints let an admin-authenticated caller:
+
+      1. open a short-lived, in-memory canvas session,
+      2. post frame events to that session, and
+      3. subscribe to a Server-Sent-Events stream of frames for one session.
+
+    The endpoints are *protocol-only* — no renderer is attached in this
+    milestone. State lives in-process; restarting the gateway clears every
+    session. Session expiry is enforced by a background janitor that also
+    tears down open SSE streams on eviction.
+
+    Every route returns **503 Service Unavailable** with
+    `{"error":"canvas_host_disabled"}` unless `[canvas]
+    host_endpoint_enabled = true` is set in `config.toml`.
+servers:
+  - url: http://127.0.0.1:6005
+    description: Local gateway default bind.
+security:
+  - adminBasic: []
+  - adminCookie: []
+
+paths:
+  /canvas/session:
+    post:
+      operationId: createCanvasSession
+      summary: Create a canvas session.
+      description: |
+        Allocates an in-memory session and returns its id, creation timestamp,
+        and computed expiry. The session lives for `ttl_secs` seconds (default
+        `[canvas] session_ttl_secs`, typically 1800). IDs look like
+        `cs_` + 8 lowercase hex chars.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '201':
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateSessionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/CanvasHostDisabled'
+
+  /canvas/frame:
+    post:
+      operationId: postCanvasFrame
+      summary: Post a frame event into a canvas session.
+      description: |
+        The `kind` must be one of the whitelisted values. Accepted frames
+        are assigned a server-side `event_id` (UUIDv4) and fan out to any
+        active SSE subscribers on that session. Returns **202 Accepted**
+        because delivery is fire-and-forget — subscribers may lag or not
+        exist at all.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostFrameRequest'
+      responses:
+        '202':
+          description: Frame accepted and broadcast.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostFrameResponse'
+        '400':
+          description: Frame kind is not in the whitelist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvalidFrameKindError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/SessionNotFound'
+        '503':
+          $ref: '#/components/responses/CanvasHostDisabled'
+
+  /canvas/session/{id}/events:
+    get:
+      operationId: streamCanvasEvents
+      summary: Subscribe to canvas frames for one session (SSE).
+      description: |
+        Long-lived `text/event-stream` response. Frames arrive as
+        `event: canvas\ndata: <json>\n\n`. When the session expires (or is
+        torn down for any reason) the server emits a single terminal
+        `event: end\ndata: "expired"\n\n` and closes the connection. Laggy
+        subscribers receive an `event: lag` frame rather than tearing
+        the stream down; the client should re-sync from an authoritative
+        source after seeing one.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: '^cs_[0-9a-f]{8}$'
+      responses:
+        '200':
+          description: Event stream open.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE frames; see the `CanvasEvent`, `CanvasEndEvent`, and
+                  `CanvasLagEvent` schemas for JSON payload shapes.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/SessionNotFound'
+        '503':
+          $ref: '#/components/responses/CanvasHostDisabled'
+
+components:
+  securitySchemes:
+    adminBasic:
+      type: http
+      scheme: basic
+      description: Admin HTTP Basic auth (argon2id hash in `config.admin`).
+    adminCookie:
+      type: apiKey
+      in: cookie
+      name: corlinman_session
+      description: |
+        Opaque session token issued by `POST /admin/login`. Alternative to
+        Basic auth; either is accepted.
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid admin credentials.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/UnauthorizedError'
+    CanvasHostDisabled:
+      description: Canvas host feature is off in the gateway config.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/CanvasHostDisabledError'
+    SessionNotFound:
+      description: The referenced session does not exist (or already expired).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SessionNotFoundError'
+
+  schemas:
+    CreateSessionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          description: Human-readable label. Defaults to "untitled".
+          example: Topology snapshot
+        initial_state:
+          description: Opaque JSON blob the renderer can pick up later.
+          example:
+            nodes: []
+            edges: []
+        ttl_secs:
+          type: integer
+          minimum: 1
+          maximum: 86400
+          description: |
+            Session lifetime in seconds. Falls back to `[canvas]
+            session_ttl_secs` when omitted.
+    CreateSessionResponse:
+      type: object
+      required: [session_id, created_at_ms, expires_at_ms]
+      properties:
+        session_id:
+          type: string
+          pattern: '^cs_[0-9a-f]{8}$'
+          example: cs_a1b2c3d4
+        created_at_ms:
+          type: integer
+          format: int64
+          description: Unix epoch milliseconds when the session was created.
+        expires_at_ms:
+          type: integer
+          format: int64
+          description: Unix epoch milliseconds after which the session is evicted.
+
+    PostFrameRequest:
+      type: object
+      required: [session_id, kind]
+      additionalProperties: false
+      properties:
+        session_id:
+          type: string
+          pattern: '^cs_[0-9a-f]{8}$'
+        kind:
+          type: string
+          description: |
+            Frame kind. Chosen as a plain string `enum` (rather than `oneOf`
+            of discriminated variants) because the payload schema is
+            intentionally *unconstrained* for the stub — renderers negotiate
+            their own payload shape per kind in follow-up workstreams.
+          enum:
+            - present
+            - hide
+            - navigate
+            - eval
+            - snapshot
+            - a2ui_push
+            - a2ui_reset
+        payload:
+          description: |
+            Opaque JSON payload. Any shape is accepted by the transport; the
+            renderer is responsible for validating the shape it expects for
+            each `kind`.
+    PostFrameResponse:
+      type: object
+      required: [event_id]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+
+    CanvasEvent:
+      description: SSE `event: canvas` data payload.
+      type: object
+      required: [event_id, session_id, kind, payload, at_ms]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          pattern: '^cs_[0-9a-f]{8}$'
+        kind:
+          type: string
+          enum:
+            - present
+            - hide
+            - navigate
+            - eval
+            - snapshot
+            - a2ui_push
+            - a2ui_reset
+        payload: {}
+        at_ms:
+          type: integer
+          format: int64
+    CanvasEndEvent:
+      description: |
+        SSE `event: end` data payload. Fixed string `"expired"`; included
+        here as a schema so consumer codegen has a name to attach to it.
+      type: string
+      const: expired
+    CanvasLagEvent:
+      description: |
+        SSE `event: lag` data payload. Human-readable string describing how
+        many frames were skipped.
+      type: string
+
+    UnauthorizedError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          const: unauthorized
+        reason:
+          type: string
+    CanvasHostDisabledError:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          const: canvas_host_disabled
+        message:
+          type: string
+    SessionNotFoundError:
+      type: object
+      required: [error, session_id]
+      properties:
+        error:
+          type: string
+          const: session_not_found
+        session_id:
+          type: string
+    InvalidFrameKindError:
+      type: object
+      required: [error, message, allowed]
+      properties:
+        error:
+          type: string
+          const: invalid_frame_kind
+        message:
+          type: string
+        allowed:
+          type: array
+          items:
+            type: string

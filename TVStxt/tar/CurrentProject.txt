@@ -1,0 +1,1 @@
+corlinman — a Rust+Python agent harness with multi-provider LLM routing, hybrid RAG (BM25 + HNSW + RRF + optional cross-encoder), and multi-channel ingress (QQ/OneBot, Telegram, HTTP). The Rust gateway owns config, approvals, and channels; the Python agent owns the reasoning loop, placeholder engine, and variable cascade.

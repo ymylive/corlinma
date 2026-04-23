@@ -420,6 +420,8 @@ ops/                Grafana dashboard + observability compose
 
 - [Architecture](docs/architecture.md) — message flow, crate/package graph, gRPC bus
 - [Plugin authoring](docs/plugin-authoring.md) — write your own sync / async / service plugin
+- [Skills, agents & the variable cascade](docs/guides/skills-and-agents.md) — author `skills/`, `agents/`, `TVStxt/*`
+- [v0.1 → v0.2 migration](docs/migration/v1-to-v2.md) — manifest v2, vector v6, new config sections, block protocol
 - [Runbook](docs/runbook.md) — production deployment + incident handling
 - [Milestones](docs/milestones.md) — per-milestone status
 - [Roadmap](docs/roadmap.md) — sprint-level plan beyond 1.0

@@ -1,0 +1,15 @@
+{
+  "messages": [
+    {"role": "system", "content": "First: {{agent.mentor}}"},
+    {"role": "system", "content": "Second: {{agent.researcher}}"},
+    {"role": "user", "content": "go"}
+  ],
+  "session_key": "sess-09",
+  "model_name": "gpt-4",
+  "metadata": {},
+  "agents": {
+    "mentor": "name: mentor\ndescription: primary\nsystem_prompt: |\n  MENTOR body.\n",
+    "researcher": "name: researcher\ndescription: muted by gate\nsystem_prompt: |\n  RESEARCHER body.\n"
+  },
+  "single_agent_gate": true
+}

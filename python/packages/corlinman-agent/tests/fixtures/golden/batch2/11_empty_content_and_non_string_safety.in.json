@@ -1,0 +1,10 @@
+{
+  "messages": [
+    {"role": "system", "content": null},
+    {"role": "system", "content": ""},
+    {"role": "user", "content": [{"type": "text", "text": "hi {{VarName}}"}]}
+  ],
+  "session_key": "sess-11",
+  "model_name": "gpt-4",
+  "metadata": {}
+}

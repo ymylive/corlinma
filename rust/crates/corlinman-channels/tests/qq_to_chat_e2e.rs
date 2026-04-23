@@ -129,6 +129,7 @@ async fn qq_message_triggers_chat_and_replies_via_send_group_msg() {
         model: "fake-model".into(),
         chat_service,
         rate_limit_hook: None,
+        hook_bus: None,
     };
 
     let cancel = CancellationToken::new();

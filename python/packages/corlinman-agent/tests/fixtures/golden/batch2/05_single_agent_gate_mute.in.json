@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {"role": "system", "content": "first {{agent.alpha}} then {{agent.beta}} end"},
+    {"role": "user", "content": "go"}
+  ],
+  "session_key": "sess-05",
+  "model_name": "gpt-4",
+  "metadata": {},
+  "agents": {
+    "alpha": "name: alpha\ndescription: A\nsystem_prompt: |\n  I am ALPHA.\n",
+    "beta": "name: beta\ndescription: B\nsystem_prompt: |\n  I am BETA.\n"
+  },
+  "single_agent_gate": true
+}

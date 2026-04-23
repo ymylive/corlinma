@@ -21,8 +21,9 @@ pub struct Update {
     pub message: Option<Message>,
 }
 
-/// A Telegram [`Message`]. Fields outside our scope (photo/video/voice/
-/// sticker/document/edit_date) are left off — they deserialise as ignored.
+/// A Telegram [`Message`]. We decode the subset needed for routing + media
+/// download; richer fields (video / sticker / edit_date) deserialise as
+/// ignored defaults.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     pub message_id: i64,
@@ -40,6 +41,79 @@ pub struct Message {
     /// message (Telegram convention for "talking to the bot").
     #[serde(default)]
     pub reply_to_message: Option<Box<Message>>,
+    /// Array of `PhotoSize` — Telegram ships several resolutions per image;
+    /// the webhook handler picks the largest to download.
+    #[serde(default)]
+    pub photo: Vec<PhotoSize>,
+    /// Voice note (OGG/OPUS). `file_id` is the download handle.
+    #[serde(default)]
+    pub voice: Option<Voice>,
+    /// Generic file attachment (includes images sent as "file" instead of
+    /// "photo", which preserves original resolution). `file_id` + a best-
+    /// effort `file_name` / `mime_type`.
+    #[serde(default)]
+    pub document: Option<Document>,
+}
+
+/// One resolution variant of a photo upload. Telegram always sends several;
+/// the webhook picks the item with the largest `file_size` (or the last in
+/// the array when sizes are missing, which is conventionally the largest).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PhotoSize {
+    pub file_id: String,
+    #[serde(default)]
+    pub file_unique_id: Option<String>,
+    #[serde(default)]
+    pub width: i64,
+    #[serde(default)]
+    pub height: i64,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+/// Telegram voice note (OGG/OPUS, up to 20MB per API docs).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Voice {
+    pub file_id: String,
+    #[serde(default)]
+    pub file_unique_id: Option<String>,
+    #[serde(default)]
+    pub duration: i64,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+/// Generic document attachment.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Document {
+    pub file_id: String,
+    #[serde(default)]
+    pub file_unique_id: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub file_size: Option<i64>,
+}
+
+impl Message {
+    /// Pick the largest `PhotoSize` by `file_size` (falls back to the last
+    /// element when sizes are absent — Telegram conventionally orders
+    /// smallest→largest).
+    pub fn largest_photo(&self) -> Option<&PhotoSize> {
+        if self.photo.is_empty() {
+            return None;
+        }
+        let with_size = self
+            .photo
+            .iter()
+            .filter(|p| p.file_size.is_some())
+            .max_by_key(|p| p.file_size.unwrap_or(0));
+        with_size.or_else(|| self.photo.last())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
