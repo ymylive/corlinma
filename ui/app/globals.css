@@ -13,8 +13,11 @@
     --popover: 0 0% 100%;
     --popover-foreground: 240 10% 3.9%;
     /* Primary = Tidepool amber (day). Shared by <Button variant="default">
-       and other shadcn primitives via `hsl(var(--primary))`. */
-    --primary: 20 80% 45%;
+       and other shadcn primitives via `hsl(var(--primary))`. Deeper amber
+       than the ambient tp-amber token (which is tuned for border/glow use,
+       not text-on-background): white-on-primary needs WCAG AA 4.5:1 which
+       requires L ≤ ~0.19 → hsl 20 82% 33% (~amber-800). */
+    --primary: 20 82% 33%;
     --primary-foreground: 0 0% 98%;
     --secondary: 240 5% 96%;
     --secondary-foreground: 240 10% 3.9%;
