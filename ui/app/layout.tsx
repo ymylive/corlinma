@@ -2,7 +2,19 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
+import { Instrument_Serif } from "next/font/google";
 import { Providers } from "@/components/providers";
+
+// Tidepool display serif (Phase 0). Used only where explicitly opted in
+// via `font-serif` (hero greeting, uptime streak card, italic emphasis).
+// Single weight + italic keeps the payload under ~30KB total.
+const instrumentSerif = Instrument_Serif({
+  weight: "400",
+  style: ["normal", "italic"],
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-instrument-serif",
+});
 
 export const metadata: Metadata = {
   title: "corlinman admin",
@@ -32,7 +44,7 @@ export default function RootLayout({
     <html
       lang="zh-CN"
       suppressHydrationWarning
-      className={`${GeistSans.variable} ${GeistMono.variable} dark`}
+      className={`${GeistSans.variable} ${GeistMono.variable} ${instrumentSerif.variable} dark`}
     >
       <head>
         <script dangerouslySetInnerHTML={{ __html: LANG_BOOT }} />

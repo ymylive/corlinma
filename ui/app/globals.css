@@ -54,6 +54,63 @@
     --state-skeleton: 240 5% 92%;
     --state-empty: 240 5% 97%;
     --state-error: 0 72% 95%;
+
+    /* ──────────────────────────────────────────────────────────────
+     * Tidepool — Phase 0 additive palette (warm-orange glass).
+     * Consumed by new primitive components in Phase 1+. Nothing in the
+     * current UI references these yet, so they are non-visual until
+     * Phase 2 cutover flips the shell to use them.
+     * Day values (light theme).
+     * ────────────────────────────────────────────────────────────── */
+    --tp-bg-a: #fbf4e8;
+    --tp-bg-b: #f7ecde;
+    --tp-bg-c: #fbf1e0;
+    --tp-aurora-1: oklch(0.82 0.13 58 / 0.30);
+    --tp-aurora-2: oklch(0.80 0.12 30 / 0.25);
+    --tp-aurora-3: oklch(0.84 0.09 15 / 0.20);
+
+    --tp-glass: rgba(255, 255, 255, 0.58);
+    --tp-glass-2: rgba(255, 255, 255, 0.78);
+    --tp-glass-3: rgba(255, 255, 255, 0.9);
+    --tp-glass-edge: rgba(255, 255, 255, 0.92);
+    --tp-glass-edge-strong: rgba(255, 255, 255, 1);
+    --tp-glass-hl: rgba(255, 255, 255, 1);
+    --tp-glass-inner: rgba(255, 255, 255, 0.48);
+    --tp-glass-inner-hover: rgba(255, 255, 255, 0.78);
+    --tp-glass-inner-strong: rgba(255, 255, 255, 0.58);
+    --tp-row-alt: rgba(255, 255, 255, 0.4);
+
+    --tp-ink: #271810;
+    --tp-ink-2: #513e2d;
+    --tp-ink-3: #7c6850;
+    --tp-ink-4: #a89580;
+    --tp-ink-5: #c4b4a0;
+
+    --tp-amber: oklch(0.56 0.19 50);
+    --tp-amber-soft: oklch(0.56 0.19 50 / 0.12);
+    --tp-amber-glow: oklch(0.56 0.19 50 / 0.28);
+    --tp-ember: oklch(0.48 0.19 30);
+    --tp-peach: oklch(0.68 0.16 44);
+    --tp-ok: oklch(0.52 0.14 145);
+    --tp-ok-soft: oklch(0.52 0.14 145 / 0.14);
+    --tp-warn: oklch(0.58 0.16 78);
+    --tp-warn-soft: oklch(0.58 0.16 78 / 0.14);
+    --tp-err: oklch(0.55 0.22 20);
+    --tp-err-soft: oklch(0.55 0.22 20 / 0.12);
+
+    --tp-grad-text: linear-gradient(135deg, oklch(0.52 0.2 30), oklch(0.58 0.19 55));
+    --tp-grad-border: linear-gradient(
+      135deg,
+      color-mix(in oklch, var(--tp-amber) 55%, transparent),
+      color-mix(in oklch, var(--tp-ember) 45%, transparent)
+    );
+
+    --tp-shadow-panel: 0 6px 18px -8px rgba(80, 45, 20, 0.12);
+    --tp-shadow-hero: 0 24px 48px -24px rgba(80, 45, 20, 0.22);
+    --tp-shadow-primary:
+      0 0 0 1px color-mix(in oklch, var(--tp-amber) 45%, transparent),
+      0 0 28px -4px var(--tp-amber-glow),
+      var(--tp-shadow-panel);
   }
 
   .dark {
@@ -103,6 +160,58 @@
     --state-skeleton: 240 5% 14%;
     --state-empty: 240 6% 9%;
     --state-error: 0 45% 18%;
+
+    /* Tidepool — Night values (warm dusk). */
+    --tp-bg-a: #1a120d;
+    --tp-bg-b: #25170f;
+    --tp-bg-c: #1e1410;
+    --tp-aurora-1: oklch(0.55 0.18 55 / 0.28);
+    --tp-aurora-2: oklch(0.52 0.18 32 / 0.24);
+    --tp-aurora-3: oklch(0.48 0.15 15 / 0.20);
+
+    --tp-glass: oklch(0.22 0.02 55 / 0.5);
+    --tp-glass-2: oklch(0.25 0.025 55 / 0.65);
+    --tp-glass-3: oklch(0.27 0.03 55 / 0.72);
+    --tp-glass-edge: oklch(1 0 0 / 0.08);
+    --tp-glass-edge-strong: oklch(1 0 0 / 0.14);
+    --tp-glass-hl: oklch(1 0 0 / 0.16);
+    --tp-glass-inner: rgba(255, 255, 255, 0.04);
+    --tp-glass-inner-hover: rgba(255, 255, 255, 0.08);
+    --tp-glass-inner-strong: rgba(255, 255, 255, 0.06);
+    --tp-row-alt: rgba(255, 255, 255, 0.015);
+
+    --tp-ink: #f8f1e5;
+    --tp-ink-2: #ccbfa8;
+    --tp-ink-3: #938774;
+    --tp-ink-4: #685c49;
+    --tp-ink-5: #4a4035;
+
+    --tp-amber: oklch(0.80 0.17 58);
+    --tp-amber-soft: oklch(0.80 0.17 58 / 0.14);
+    --tp-amber-glow: oklch(0.80 0.17 58 / 0.38);
+    --tp-ember: oklch(0.70 0.19 32);
+    --tp-peach: oklch(0.84 0.14 48);
+    --tp-ok: oklch(0.80 0.14 145);
+    --tp-ok-soft: oklch(0.80 0.14 145 / 0.16);
+    --tp-warn: oklch(0.82 0.17 85);
+    --tp-warn-soft: oklch(0.82 0.17 85 / 0.16);
+    --tp-err: oklch(0.70 0.22 20);
+    --tp-err-soft: oklch(0.70 0.22 20 / 0.16);
+
+    --tp-grad-text: linear-gradient(135deg, oklch(0.82 0.18 58), oklch(0.76 0.2 32));
+    --tp-grad-border: linear-gradient(
+      135deg,
+      color-mix(in oklch, var(--tp-amber) 55%, transparent),
+      color-mix(in oklch, var(--tp-ember) 45%, transparent)
+    );
+
+    --tp-shadow-panel: 0 8px 24px -10px rgba(15, 8, 2, 0.4);
+    --tp-shadow-hero: 0 30px 60px -30px rgba(15, 8, 2, 0.55);
+    --tp-shadow-primary:
+      0 0 0 1px color-mix(in oklch, var(--tp-amber) 35%, transparent),
+      0 0 28px -4px var(--tp-amber-glow),
+      inset 0 1px 0 var(--tp-glass-hl),
+      var(--tp-shadow-panel);
   }
 
   * {
@@ -181,6 +290,97 @@
     40%,
     80% {
       transform: translateX(4px);
+    }
+  }
+
+  /* ────────────────────────────────────────────────────────────────
+   * Tidepool — CSS animation primitives (Phase 0).
+   * Continuous animations are implemented as CSS keyframes rather than
+   * Framer Motion variants for performance (no per-frame React work).
+   * All three respect prefers-reduced-motion. Consumers apply class
+   * names: `.tp-breathe` on live dots, `.tp-draw-in` on accent
+   * underlines, `.tp-just-now` on transient row highlights.
+   * ──────────────────────────────────────────────────────────────── */
+
+  @keyframes tp-breathe {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in oklch, var(--tp-ok) 50%, transparent);
+    }
+    50% {
+      box-shadow: 0 0 0 6px color-mix(in oklch, var(--tp-ok) 0%, transparent);
+    }
+  }
+  .tp-breathe {
+    animation: tp-breathe 2.2s ease-in-out infinite;
+  }
+  @keyframes tp-breathe-amber {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in oklch, var(--tp-amber) 50%, transparent);
+    }
+    50% {
+      box-shadow: 0 0 8px color-mix(in oklch, var(--tp-amber) 40%, transparent);
+    }
+  }
+  .tp-breathe-amber {
+    animation: tp-breathe-amber 2.2s ease-in-out infinite;
+  }
+
+  @keyframes tp-draw-in {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: scaleX(1);
+    }
+  }
+  .tp-draw-in {
+    transform-origin: left;
+    animation: tp-draw-in 1.8s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+  }
+
+  @keyframes tp-just-now-fade {
+    0% {
+      opacity: 1;
+    }
+    70% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
+  .tp-just-now {
+    animation: tp-just-now-fade 2.8s ease-out 0.2s forwards;
+  }
+
+  @keyframes tp-badge-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in oklch, var(--tp-amber) 40%, transparent);
+    }
+    50% {
+      box-shadow: 0 0 0 4px color-mix(in oklch, var(--tp-amber) 0%, transparent);
+    }
+  }
+  .tp-badge-pulse {
+    animation: tp-badge-pulse 2.2s ease-in-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tp-breathe,
+    .tp-breathe-amber,
+    .tp-badge-pulse {
+      animation: none;
+    }
+    .tp-draw-in {
+      animation: none;
+      transform: scaleX(1);
+    }
+    .tp-just-now {
+      animation: none;
+      opacity: 0;
     }
   }
 }

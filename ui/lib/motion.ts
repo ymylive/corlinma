@@ -51,6 +51,35 @@ export const sharedCard = {
   transition: { type: "spring", stiffness: 380, damping: 30 } as Transition,
 };
 
+// ────────────────────────────────────────────────────────────────
+// Tidepool — Phase 0 additions.
+// Continuous animations (breathing dots, drawing underlines, just-now
+// fades, badge pulses) live in CSS keyframes under .tp-* utility
+// classes in globals.css — they're cheaper than per-frame React work.
+// Only transient entrance animations need Framer variants:
+// ────────────────────────────────────────────────────────────────
+
+/** Stat-value tick-up on mount. Sequential via stagger.delayChildren. */
+export const tickUp: Variants = {
+  hidden: { opacity: 0, y: 8 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    transition: { duration: 0.8, ease: [0.16, 1, 0.3, 1] },
+  },
+};
+
+/** Command palette entrance. 260ms, subtle rise + scale. */
+export const paletteIn: Variants = {
+  hidden: { opacity: 0, y: -12, scale: 0.98 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    transition: { duration: 0.26, ease: [0.16, 1, 0.3, 1] },
+  },
+};
+
 // ---------- reduced-motion friendly copies ----------
 
 const instantFadeUp: Variants = {
@@ -78,12 +107,29 @@ const instantSharedCard = {
   transition: { duration: 0 } as Transition,
 };
 
+const instantTickUp: Variants = {
+  hidden: { opacity: 0, y: 0 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0 } },
+};
+
+const instantPaletteIn: Variants = {
+  hidden: { opacity: 0, y: 0, scale: 1 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    transition: { duration: 0 },
+  },
+};
+
 export interface MotionVariants {
   fadeUp: Variants;
   stagger: Variants;
   springPop: Variants;
   listItem: Variants;
   sharedCard: { layout: true; transition: Transition };
+  tickUp: Variants;
+  paletteIn: Variants;
 }
 
 /**
@@ -99,7 +145,9 @@ export function useMotionVariants(): MotionVariants {
       springPop: instantSpringPop,
       listItem: instantListItem,
       sharedCard: instantSharedCard,
+      tickUp: instantTickUp,
+      paletteIn: instantPaletteIn,
     };
   }
-  return { fadeUp, stagger, springPop, listItem, sharedCard };
+  return { fadeUp, stagger, springPop, listItem, sharedCard, tickUp, paletteIn };
 }
