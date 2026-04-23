@@ -1,9 +1,17 @@
 "use client";
 
 import { useTranslation } from "react-i18next";
-import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
-/** Batch-action toolbar that lights up when the operator has selection. */
+/**
+ * Batch-action toolbar — pins to the viewport bottom when the operator has
+ * selection. Tidepool (Phase 5a) refresh: glass surface, amber primary, ember
+ * destructive, muted clear affordance. Keyboard hint appears on the clear
+ * button (⌫).
+ *
+ * The component stays dumb: caller owns the selection set, this only shows
+ * counts and fires callbacks.
+ */
 export interface BatchToolbarProps {
   selectedCount: number;
   onApproveAll: () => void;
@@ -25,26 +33,70 @@ export function BatchToolbar({
     <div
       role="region"
       aria-label={t("approvals.batchActionsAria")}
-      className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm"
+      className={cn(
+        "sticky bottom-4 z-20 mx-auto flex w-full max-w-3xl items-center gap-3",
+        "rounded-full border border-tp-glass-edge bg-tp-glass-2",
+        "px-4 py-2.5 text-[13px] text-tp-ink-2",
+        "backdrop-blur-glass backdrop-saturate-glass shadow-tp-hero",
+      )}
     >
-      <span className="font-medium">
-        {t("approvals.selectedCount", { n: selectedCount })}
+      <span
+        className={cn(
+          "inline-flex items-center gap-2 font-mono text-[11px] tracking-wide",
+          "rounded-full border border-tp-amber/25 bg-tp-amber-soft px-2.5 py-[3px] text-tp-amber",
+        )}
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-tp-amber" aria-hidden />
+        {t("approvals.tp.batchBarLabel", { n: selectedCount })}
       </span>
       <div className="flex-1" />
-      <Button size="sm" onClick={onApproveAll} disabled={disabled}>
-        {t("approvals.batchApprove")}
-      </Button>
-      <Button
-        size="sm"
-        variant="destructive"
+      <button
+        type="button"
+        onClick={onApproveAll}
+        disabled={disabled}
+        aria-label={t("approvals.batchApprove")}
+        className={cn(
+          "inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-[12.5px] font-medium",
+          "bg-tp-amber text-[#1a120d] shadow-tp-primary",
+          "transition-transform duration-150 hover:-translate-y-[1px]",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/50",
+          "disabled:pointer-events-none disabled:opacity-50",
+        )}
+      >
+        {t("approvals.tp.batchBarApprove", { n: selectedCount })}
+      </button>
+      <button
+        type="button"
         onClick={onDenyAll}
         disabled={disabled}
+        aria-label={t("approvals.batchDeny")}
+        className={cn(
+          "inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-[12.5px] font-medium",
+          "border-tp-err/40 bg-tp-err-soft text-tp-err",
+          "hover:bg-[color-mix(in_oklch,var(--tp-err)_14%,transparent)]",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-err/40",
+          "disabled:pointer-events-none disabled:opacity-50",
+        )}
       >
-        {t("approvals.batchDeny")}
-      </Button>
-      <Button size="sm" variant="ghost" onClick={onClear} disabled={disabled}>
+        {t("approvals.tp.batchBarDeny", { n: selectedCount })}
+      </button>
+      <button
+        type="button"
+        onClick={onClear}
+        disabled={disabled}
+        aria-label={t("approvals.clear")}
+        className={cn(
+          "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px]",
+          "bg-tp-glass-inner text-tp-ink-3 hover:bg-tp-glass-inner-hover hover:text-tp-ink",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+          "disabled:pointer-events-none disabled:opacity-50",
+        )}
+      >
+        <kbd className="font-mono text-[10px] text-tp-ink-4">
+          {t("approvals.tp.batchHintKey")}
+        </kbd>
         {t("approvals.clear")}
-      </Button>
+      </button>
     </div>
   );
 }

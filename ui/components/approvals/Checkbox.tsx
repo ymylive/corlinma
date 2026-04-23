@@ -17,8 +17,12 @@ export const Checkbox = React.forwardRef<HTMLInputElement, CheckboxProps>(
     <input
       ref={ref}
       type="checkbox"
+      // Tidepool (Phase 5a): amber accent, glass border, amber focus ring.
       className={cn(
-        "h-4 w-4 cursor-pointer rounded border-input bg-background accent-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+        "h-[15px] w-[15px] cursor-pointer rounded border border-tp-glass-edge bg-tp-glass-inner",
+        "accent-[color:var(--tp-amber)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/45 focus-visible:ring-offset-0",
+        "disabled:cursor-not-allowed disabled:opacity-50",
         className,
       )}
       {...props}

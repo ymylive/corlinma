@@ -1,6 +1,7 @@
 "use client";
 
 import { useTranslation } from "react-i18next";
+import { Maximize2 } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -9,15 +10,18 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
+import { JsonView } from "@/components/ui/json-view";
+import { cn } from "@/lib/utils";
 import type { Approval } from "./types";
 
-/** Full-args Dialog.
+/**
+ * Full-args Dialog — secondary affordance on the approval card. The primary
+ * path to inspect arguments is the right-side detail drawer; this dialog is
+ * kept for mobile / modal-style inspection.
  *
- * Reason we stuck with `<pre>` + `JSON.stringify` instead of pulling in
- * react-syntax-highlighter: the args are short (tool call payloads, not
- * logs) and an extra ~40 KB bundle for color is not worth it. If that
- * changes, the rendering is isolated in this one component.
+ * Tidepool (Phase 5a) refresh: swaps the hand-rolled `<pre>` for the shared
+ * `<JsonView>` primitive (syntax-highlighted) and wraps content in the
+ * glass card aesthetic.
  */
 function formatTime(iso: string): string {
   try {
@@ -27,61 +31,74 @@ function formatTime(iso: string): string {
   }
 }
 
-function prettifyJson(raw: string): string {
-  try {
-    return JSON.stringify(JSON.parse(raw), null, 2);
-  } catch {
-    // Non-JSON payload (base64-encoded bytes) — render verbatim.
-    return raw;
-  }
-}
-
 export function ArgsDialog({ approval }: { approval: Approval }) {
   const { t } = useTranslation();
   return (
     <Dialog>
       <DialogTrigger asChild>
-        <Button size="sm" variant="outline">
+        <button
+          type="button"
+          aria-label={t("approvals.viewArgs")}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px]",
+            "border-tp-glass-edge bg-tp-glass-inner text-tp-ink-3",
+            "hover:bg-tp-glass-inner-hover hover:text-tp-ink-2",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+          )}
+        >
+          <Maximize2 className="h-3 w-3" aria-hidden />
           {t("approvals.viewArgs")}
-        </Button>
+        </button>
       </DialogTrigger>
-      <DialogContent className="max-w-2xl">
+      <DialogContent
+        className={cn(
+          "max-w-2xl rounded-2xl border-tp-glass-edge bg-tp-glass-2 p-6",
+          "backdrop-blur-glass-strong backdrop-saturate-glass-strong",
+          "shadow-tp-hero",
+        )}
+      >
         <DialogHeader>
-          <DialogTitle>
-            {approval.plugin}.{approval.tool}
+          <DialogTitle className="font-mono text-[15px] font-medium text-tp-ink">
+            <span className="text-tp-amber">{approval.plugin}</span>
+            <span className="text-tp-ink-3">.</span>
+            {approval.tool}
           </DialogTitle>
           <DialogDescription asChild>
-            <div className="space-y-1 text-xs">
+            <div className="space-y-1 text-[12px] text-tp-ink-3">
               <div>
                 {t("approvals.argsSessionKey")}:{" "}
-                <span className="font-mono">
+                <span className="font-mono text-tp-ink-2">
                   {approval.session_key || t("approvals.emptyValue")}
                 </span>
               </div>
               <div>
                 {t("approvals.argsRequestedAt")}:{" "}
-                <span className="font-mono">
+                <span className="font-mono text-tp-ink-2">
                   {formatTime(approval.requested_at)}
                 </span>
               </div>
               {approval.decided_at ? (
                 <div>
                   {t("approvals.argsDecidedAt")}:{" "}
-                  <span className="font-mono">
+                  <span className="font-mono text-tp-ink-2">
                     {formatTime(approval.decided_at)}
                   </span>{" "}
-                  — {approval.decision ?? "?"}
+                  <span className="text-tp-ink-3">— {approval.decision ?? "?"}</span>
                 </div>
               ) : null}
-              {/* TODO(S5+): render approved_by once the Rust `ApprovalOut`
-                  exposes the operator identity (currently not tracked). */}
             </div>
           </DialogDescription>
         </DialogHeader>
-        <pre className="max-h-96 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">
-          {prettifyJson(approval.args_json)}
-        </pre>
+        <JsonView raw={prettifyJson(approval.args_json)} className="max-h-96" />
       </DialogContent>
     </Dialog>
   );
+}
+
+function prettifyJson(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
 }

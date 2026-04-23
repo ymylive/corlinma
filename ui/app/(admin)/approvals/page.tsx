@@ -5,19 +5,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { CountdownRing } from "@/components/ui/countdown-ring";
+
 import { useMotion } from "@/components/ui/motion-safe";
-import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { FilterChipGroup } from "@/components/ui/filter-chip-group";
 import { cn } from "@/lib/utils";
 import {
   apiFetch,
@@ -28,148 +18,93 @@ import {
   type Approval,
 } from "@/lib/api";
 
+import { ApprovalCard } from "@/components/approvals/ApprovalCard";
 import { ApprovalsEmptyState } from "@/components/approvals/EmptyState";
-import { ArgsDialog } from "@/components/approvals/ArgsDialog";
-import { DenyReasonDialog } from "@/components/approvals/DenyReasonDialog";
 import { BatchToolbar } from "@/components/approvals/BatchToolbar";
-import { FilterBar } from "@/components/approvals/FilterBar";
-import { Checkbox } from "@/components/approvals/Checkbox";
+import { DenyReasonDialog } from "@/components/approvals/DenyReasonDialog";
+import { DetailDrawerContent } from "@/components/approvals/DetailDrawerContent";
+import { PageHeader } from "@/components/approvals/PageHeader";
+import { StatsRow } from "@/components/approvals/StatsRow";
 import type { StreamEvent, Tab } from "@/components/approvals/types";
 
-// Framer-motion-wrapped buttons so we can add whileTap scale feedback without
-// touching the shared Button primitive.
-const MotionButton = motion.create(Button);
-
-// 5-minute approval TTL — the countdown ring is relative to `requested_at`.
-// Rows flip to the "urgent" glow state once under this threshold.
-const APPROVAL_TTL_MS = 5 * 60 * 1000;
-const URGENT_THRESHOLD_MS = 60 * 1000;
-
-function computeRemainingMs(requestedAt: string, now: number): number {
-  const t = new Date(requestedAt).getTime();
-  if (Number.isNaN(t)) return APPROVAL_TTL_MS;
-  return Math.max(0, APPROVAL_TTL_MS - (now - t));
-}
-
 /**
- * Admin approvals page — Sprint 2 T3 wiring + Sprint 5 T4 polish.
+ * Approvals — Tidepool (Phase 5a) cutover.
  *
- * Dual-channel data model (unchanged from T3):
- *   1. React Query polls `GET /admin/approvals` (authoritative, 15s
- *      safety net).
- *   2. `EventSource` subscribes to `/admin/approvals/stream` and nudges
- *      the cache so pending/decided events reflect instantly.
+ * Layout:
+ *   [ page header (prose) ]
+ *   [ StatChip × 4 ]
+ *   [ FilterChipGroup: all · pending · decided ]
+ *   [ list column (ApprovalCard stack)          │ DetailDrawer ]
+ *   [ sticky BatchToolbar when selection > 0 ]
  *
- * T4 additions:
- *   - Empty states, search + plugin filter, batch select/approve/deny.
- *   - Deny requires a reason (frontend-enforced; Rust already accepts it).
- *   - SSE `lag` named event surfaces as an inline banner.
- *   - SSE `pending` highlights the new row for ~1.2s; `decided` fades it
- *     out before it's removed (purely visual — the cache mutation is what
- *     actually removes it).
- *   - SSE reconnect uses exponential backoff in `lib/sse.ts`.
+ * Data flow is unchanged from the pre-cutover page:
+ *   1. React Query polls `/admin/approvals` (15s safety net).
+ *   2. SSE `/admin/approvals/stream` nudges the cache on pending/decided.
+ *   3. Optimistic removal on approve/deny; rollback on mutation failure.
  *
- * TODO(S5+): approve-with-reason audit trail + a `sonner` toast host for
- * lag/error notifications. Virtual scroll (@tanstack/react-virtual) if we
- * ever see >500 pending approvals in steady state.
+ * Keyboard:
+ *   - A  → approve the active row (or selection if > 0)
+ *   - D  → open deny dialog for active row (or selection if > 0)
+ *   - ⌫  → clear selection
+ *   - Esc → deselect the active row (close the drawer)
+ *
+ * Shortcuts are suppressed while the user is typing in an input/textarea
+ * or inside the deny-reason dialog.
  */
 
-// --- helpers ----------------------------------------------------------------
+// Highlight window for a freshly-pushed Pending row.
+const HIGHLIGHT_MS = 1_200;
+// Fade-out window for a row that was just decided.
+const FADE_MS = 400;
 
-const ARGS_PREVIEW_LIMIT = 60;
-
-function truncateArgs(raw: string): string {
-  // Prefer a one-line JSON preview; fall back to raw bytes otherwise.
-  try {
-    const serialized = JSON.stringify(JSON.parse(raw));
-    return serialized.length > ARGS_PREVIEW_LIMIT
-      ? serialized.slice(0, ARGS_PREVIEW_LIMIT) + "…"
-      : serialized;
-  } catch {
-    return raw.length > ARGS_PREVIEW_LIMIT
-      ? raw.slice(0, ARGS_PREVIEW_LIMIT) + "…"
-      : raw;
-  }
-}
-
-function formatTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-}
-
-function DecisionBadge({ decision }: { decision: string | null }) {
-  const { t } = useTranslation();
-  if (!decision)
-    return <Badge variant="secondary">{t("approvals.statusPending")}</Badge>;
-  if (decision === "approved")
-    return (
-      <Badge className="border-transparent bg-emerald-600/20 text-emerald-300">
-        {t("approvals.statusApproved")}
-      </Badge>
-    );
-  if (decision === "denied")
-    return (
-      <Badge variant="destructive">{t("approvals.statusDenied")}</Badge>
-    );
-  return <Badge variant="outline">{decision}</Badge>;
-}
+type Filter = "all" | "pending" | "decided";
 
 // Keep `apiFetch` referenced so tree-shaking doesn't drop it — the rest of
 // the admin surface still uses it and importing from `@/lib/api` here is
 // load-bearing for the test suite.
 void apiFetch;
 
-// Visual highlight window for a freshly-pushed Pending row.
-const HIGHLIGHT_MS = 1_200;
-// Fade-out window for a row that was just decided.
-const FADE_MS = 400;
-
-// --- page -------------------------------------------------------------------
-
 export default function ApprovalsPage() {
   const { t } = useTranslation();
   const { reduced } = useMotion();
-  // Coarse 1s tick purely for the urgent-row flip; CountdownRing does its own
-  // sub-second rAF so the visible number stays smooth.
+
+  // Filter state drives which tab the backend query uses. `all` and
+  // `decided` need the history response (includes decided + pending);
+  // `pending` uses the pending-only response.
+  const [filter, setFilter] = useState<Filter>("pending");
+  const tab: Tab = filter === "pending" ? "pending" : "history";
+
+  // Coarse 1s tick purely for held-for pill / urgent flip.
   const [now, setNow] = useState<number>(() => Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(id);
   }, []);
-  const [tab, setTab] = useState<Tab>("pending");
-  const [search, setSearch] = useState("");
-  const [pluginFilter, setPluginFilter] = useState("");
+
+  // Row-level UI state
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [denyDialog, setDenyDialog] = useState<
     | { kind: "single"; id: string }
     | { kind: "batch"; ids: string[] }
     | null
   >(null);
-  // Rows that were just inserted via SSE Pending → get a pulse highlight.
   const [highlightIds, setHighlightIds] = useState<Set<string>>(() => new Set());
-  // Rows that were just resolved → fade before cache removal catches up.
   const [fadingIds, setFadingIds] = useState<Set<string>>(() => new Set());
-  // Transient lag-event banner.
   const [lagBanner, setLagBanner] = useState<string | null>(null);
-  // Aggregated batch-failure banner.
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
+  // ─── queries ──────────────────────────────────────────────────────────
   const qc = useQueryClient();
   const queryKey = useMemo(() => ["admin", "approvals", tab], [tab]);
   const query = useQuery<Approval[]>({
     queryKey,
     queryFn: () => fetchApprovals(tab === "history"),
     refetchInterval: 15_000,
+    retry: false,
   });
 
-  // -- mutations ------------------------------------------------------------
-
-  // Tracks the previous pending snapshot for optimistic rollback. We stash
-  // it here rather than in mutation context so a batch failure can revert
-  // just the failed ids rather than the whole list.
+  // ─── mutations (unchanged from pre-cutover) ───────────────────────────
   const pendingSnapshotRef = useRef<Approval[] | undefined>(undefined);
 
   const snapshotPending = () => {
@@ -194,7 +129,6 @@ export default function ApprovalsPage() {
     qc.setQueryData<Approval[]>(["admin", "approvals", "pending"], (prev) => {
       const current = prev ?? [];
       const seen = new Set(current.map((r) => r.id));
-      // Reinsert any row that we optimistically removed but whose POST failed.
       const missing = snap.filter((r) => failed.has(r.id) && !seen.has(r.id));
       return [...current, ...missing];
     });
@@ -276,11 +210,8 @@ export default function ApprovalsPage() {
 
   const anyMutating = singleMutation.isPending || batchMutation.isPending;
 
-  // -- SSE wiring -----------------------------------------------------------
-
+  // ─── SSE wiring (unchanged) ───────────────────────────────────────────
   useEffect(() => {
-    // `pending` and `decided` arrive as default `"message"` events; `lag`
-    // uses the named event `"lag"` (see Rust `broadcast_to_sse`).
     const close = openEventStream<StreamEvent | { message?: string }>(
       "/admin/approvals/stream",
       {
@@ -294,7 +225,6 @@ export default function ApprovalsPage() {
                   ? (data as string)
                   : t("approvals.lagEventSkipped");
             setLagBanner(t("approvals.lagBanner", { msg: message }));
-            // Force a refetch so ground truth resyncs.
             qc.invalidateQueries({ queryKey: ["admin", "approvals"] });
             return;
           }
@@ -354,45 +284,59 @@ export default function ApprovalsPage() {
     return close;
   }, [qc, t]);
 
-  // -- derived --------------------------------------------------------------
-
+  // ─── derived rows ─────────────────────────────────────────────────────
   const rawRows = useMemo(() => query.data ?? [], [query.data]);
 
-  const pluginOptions = useMemo(() => {
-    const seen = new Set<string>();
-    for (const r of rawRows) seen.add(r.plugin);
-    return Array.from(seen).sort();
+  const visibleRows = useMemo(() => {
+    if (filter === "pending") return rawRows.filter((r) => r.decision === null);
+    if (filter === "decided") return rawRows.filter((r) => r.decision !== null);
+    return rawRows;
+  }, [rawRows, filter]);
+
+  // Count rows per filter for the chip labels.
+  const counts = useMemo(() => {
+    let pending = 0;
+    let decided = 0;
+    for (const r of rawRows) {
+      if (r.decision === null) pending += 1;
+      else decided += 1;
+    }
+    return { pending, decided, all: rawRows.length };
   }, [rawRows]);
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return rawRows.filter((r) => {
-      if (pluginFilter && r.plugin !== pluginFilter) return false;
-      if (q) {
-        const hay = `${r.plugin}.${r.tool}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [rawRows, search, pluginFilter]);
+  // `pendingCount` reflects the live pending total (ground truth from the
+  // backend), not just the currently-visible filter — keeps the header
+  // prose honest when the operator is looking at decided rows.
+  const pendingLive = !query.isError;
+  const pendingCount = useMemo(() => {
+    if (filter === "pending") return visibleRows.length;
+    return rawRows.filter((r) => r.decision === null).length;
+  }, [filter, rawRows, visibleRows]);
 
-  const selectableIds = useMemo(
-    () => filtered.filter((r) => r.decision === null).map((r) => r.id),
-    [filtered],
+  const oldestHeldMs = useMemo(() => {
+    let oldest: number | null = null;
+    for (const r of rawRows) {
+      if (r.decision !== null) continue;
+      const held = now - new Date(r.requested_at).getTime();
+      if (oldest === null || held > oldest) oldest = held;
+    }
+    return oldest;
+  }, [rawRows, now]);
+
+  const activeApproval = useMemo(
+    () => visibleRows.find((r) => r.id === activeId) ?? null,
+    [visibleRows, activeId],
   );
 
-  const allSelected =
-    selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
-  const someSelected = selectableIds.some((id) => selected.has(id));
-
-  const toggleAll = () => {
-    if (allSelected) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(selectableIds));
+  // When the active row disappears from the visible set (filter change,
+  // decided-fade removal), drop it.
+  useEffect(() => {
+    if (activeId && !visibleRows.some((r) => r.id === activeId)) {
+      setActiveId(null);
     }
-  };
+  }, [activeId, visibleRows]);
 
+  // ─── selection helpers ────────────────────────────────────────────────
   const toggleOne = (id: string) => {
     setSelected((prev) => {
       const n = new Set(prev);
@@ -402,8 +346,7 @@ export default function ApprovalsPage() {
     });
   };
 
-  // -- batch action dispatch ------------------------------------------------
-
+  // ─── batch dispatch ───────────────────────────────────────────────────
   const confirmAndBatchApprove = () => {
     const ids = Array.from(selected);
     if (ids.length === 0) return;
@@ -433,280 +376,180 @@ export default function ApprovalsPage() {
     }
   };
 
-  // --- render --------------------------------------------------------------
+  // ─── keyboard shortcuts ───────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Skip if the user is typing or a modifier is held.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase() ?? "";
+      if (tag === "input" || tag === "textarea" || target?.isContentEditable) {
+        return;
+      }
+      // Skip when the deny dialog is open.
+      if (denyDialog !== null) return;
 
-  const showEmpty =
-    !query.isPending && !query.isError && filtered.length === 0;
+      const key = e.key.toLowerCase();
+      if (key === "a") {
+        if (selected.size > 0) {
+          e.preventDefault();
+          confirmAndBatchApprove();
+          return;
+        }
+        if (activeId) {
+          const row = visibleRows.find((r) => r.id === activeId);
+          if (row && row.decision === null) {
+            e.preventDefault();
+            singleMutation.mutate({ id: activeId, approve: true });
+          }
+        }
+      } else if (key === "d") {
+        if (selected.size > 0) {
+          e.preventDefault();
+          openBatchDeny();
+          return;
+        }
+        if (activeId) {
+          const row = visibleRows.find((r) => r.id === activeId);
+          if (row && row.decision === null) {
+            e.preventDefault();
+            setDenyDialog({ kind: "single", id: activeId });
+          }
+        }
+      } else if (key === "escape") {
+        if (activeId) {
+          e.preventDefault();
+          setActiveId(null);
+        }
+      } else if (key === "backspace" || key === "delete") {
+        if (selected.size > 0) {
+          e.preventDefault();
+          setSelected(new Set());
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // The mutate functions are stable references from react-query;
+    // dependency list is deliberately compact to avoid re-binding on every
+    // `now` tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, activeId, visibleRows, denyDialog]);
+
+  // ─── render ───────────────────────────────────────────────────────────
+  const filterOptions = [
+    {
+      value: "all",
+      label: t("approvals.tp.filterAll"),
+      count: counts.all,
+      tone: "neutral" as const,
+    },
+    {
+      value: "pending",
+      label: t("approvals.tp.filterPending"),
+      count: counts.pending,
+      tone: counts.pending > 0 ? ("warn" as const) : ("neutral" as const),
+    },
+    {
+      value: "decided",
+      label: t("approvals.tp.filterDecided"),
+      count: counts.decided,
+      tone: "neutral" as const,
+    },
+  ];
+
+  const listIsEmpty =
+    !query.isPending && !query.isError && visibleRows.length === 0;
 
   return (
-    <>
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {t("approvals.title")}
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {t("approvals.subtitle")}
-        </p>
-      </header>
+    <motion.div
+      className="flex flex-col gap-5"
+      initial={reduced ? undefined : { opacity: 0, y: 6 }}
+      animate={reduced ? undefined : { opacity: 1, y: 0 }}
+      transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+    >
+      <PageHeader pendingCount={pendingCount} oldestHeldMs={oldestHeldMs} />
 
+      <StatsRow pendingCount={pendingCount} pendingLive={pendingLive} />
+
+      {/* Banners — lag / error / offline ──────────────────────────────── */}
       {lagBanner ? (
-        <div
-          role="alert"
-          className="flex items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200"
-        >
-          <span>{lagBanner}</span>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setLagBanner(null)}
-            aria-label={t("approvals.closeLagAria")}
-          >
-            {t("common.close")}
-          </Button>
-        </div>
+        <Banner
+          tone="warn"
+          text={lagBanner}
+          onDismiss={() => setLagBanner(null)}
+          dismissAria={t("approvals.closeLagAria")}
+        />
       ) : null}
       {errorBanner ? (
-        <div
-          role="alert"
-          className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground"
-        >
-          <span>{errorBanner}</span>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setErrorBanner(null)}
-            aria-label={t("approvals.closeErrorAria")}
-          >
-            {t("common.close")}
-          </Button>
-        </div>
+        <Banner
+          tone="err"
+          text={errorBanner}
+          onDismiss={() => setErrorBanner(null)}
+          dismissAria={t("approvals.closeErrorAria")}
+        />
       ) : null}
-
-      <div
-        role="tablist"
-        aria-label={t("approvals.tabsAria")}
-        className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface p-0.5"
-      >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "pending"}
-          onClick={() => {
-            setTab("pending");
-            setSelected(new Set());
-          }}
-          className={cn(
-            "inline-flex h-7 items-center rounded px-3 text-xs font-medium transition-colors",
-            tab === "pending"
-              ? "bg-background text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          {t("approvals.tabPending")}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === "history"}
-          onClick={() => {
-            setTab("history");
-            setSelected(new Set());
-          }}
-          className={cn(
-            "inline-flex h-7 items-center rounded px-3 text-xs font-medium transition-colors",
-            tab === "history"
-              ? "bg-background text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          {t("approvals.tabHistory")}
-        </button>
-      </div>
-
-      <FilterBar
-        search={search}
-        onSearchChange={setSearch}
-        pluginFilter={pluginFilter}
-        onPluginFilterChange={setPluginFilter}
-        pluginOptions={pluginOptions}
-      />
-
-      {tab === "pending" ? (
-        <BatchToolbar
-          selectedCount={selected.size}
-          onApproveAll={confirmAndBatchApprove}
-          onDenyAll={openBatchDeny}
-          onClear={() => setSelected(new Set())}
-          disabled={anyMutating}
+      {query.isError && !lagBanner && !errorBanner ? (
+        <Banner
+          tone="info"
+          text={t("approvals.tp.endpointOfflineBanner")}
         />
       ) : null}
 
-      <section
-        aria-live="polite"
-        aria-relevant="additions text"
-        className="overflow-hidden rounded-lg border border-border bg-panel"
-      >
-        <Table>
-          <TableHeader>
-            <TableRow>
-              {tab === "pending" ? (
-                <TableHead className="w-10">
-                  <Checkbox
-                    aria-label={
-                      allSelected
-                        ? t("approvals.deselectAll")
-                        : t("approvals.selectAll")
-                    }
-                    checked={allSelected}
-                    ref={(el) => {
-                      if (el) el.indeterminate = !allSelected && someSelected;
-                    }}
-                    onChange={toggleAll}
-                    disabled={selectableIds.length === 0 || anyMutating}
-                  />
-                </TableHead>
-              ) : null}
-              <TableHead>{t("approvals.colPluginTool")}</TableHead>
-              <TableHead>{t("approvals.colSession")}</TableHead>
-              <TableHead>{t("approvals.colArgs")}</TableHead>
-              <TableHead>{t("approvals.colRequested")}</TableHead>
-              <TableHead>{t("approvals.colStatus")}</TableHead>
-              <TableHead className="w-72">
-                {t("approvals.colActions")}
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {query.isPending ? (
-              Array.from({ length: 3 }).map((_, i) => (
-                <TableRow key={`sk-${i}`}>
-                  {Array.from({ length: tab === "pending" ? 7 : 6 }).map(
-                    (_, j) => (
-                      <TableCell key={j}>
-                        <Skeleton className="h-4 w-24" />
-                      </TableCell>
-                    ),
-                  )}
-                </TableRow>
-              ))
-            ) : query.isError ? (
-              <TableRow>
-                <TableCell
-                  colSpan={tab === "pending" ? 7 : 6}
-                  className="py-8 text-center text-sm text-destructive"
-                >
-                  {t("approvals.loadFailed")}: {(query.error as Error).message}
-                </TableCell>
-              </TableRow>
-            ) : showEmpty ? (
-              <TableRow>
-                <TableCell colSpan={tab === "pending" ? 7 : 6} className="p-0">
-                  <ApprovalsEmptyState tab={tab} />
-                </TableCell>
-              </TableRow>
-            ) : (
-              filtered.map((row) => {
-                const isPending = row.decision === null;
-                const isSelected = selected.has(row.id);
-                const isHighlight = highlightIds.has(row.id);
-                const isFading = fadingIds.has(row.id);
-                const remainingMs = isPending
-                  ? computeRemainingMs(row.requested_at, now)
-                  : 0;
-                const isUrgent =
-                  isPending && remainingMs > 0 && remainingMs < URGENT_THRESHOLD_MS;
-                return (
-                  <TableRow
-                    key={row.id}
-                    className={cn(
-                      "transition-opacity duration-300",
-                      isHighlight && "bg-emerald-500/10",
-                      isFading && "opacity-30",
-                      // Urgent: red border tint, plus pulse-glow if the user
-                      // allows motion. The glow is purely visual — screen-
-                      // reader announcements ride on the CountdownRing's
-                      // role="timer" + aria-valuenow.
-                      isUrgent && "border-l-2 border-l-err bg-state-error/40",
-                      isUrgent && !reduced && "animate-pulse-glow",
-                    )}
-                  >
-                    {tab === "pending" ? (
-                      <TableCell>
-                        {isPending ? (
-                          <Checkbox
-                            aria-label={t("approvals.selectOneAria", {
-                              plugin: row.plugin,
-                              tool: row.tool,
-                            })}
-                            checked={isSelected}
-                            onChange={() => toggleOne(row.id)}
-                            disabled={anyMutating}
-                          />
-                        ) : null}
-                      </TableCell>
-                    ) : null}
-                    <TableCell className="font-mono text-xs">
-                      {row.plugin}.{row.tool}
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
-                      {row.session_key || t("approvals.noneValue")}
-                    </TableCell>
-                    <TableCell className="max-w-[16rem] truncate font-mono text-xs text-muted-foreground">
-                      {truncateArgs(row.args_json)}
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {formatTime(row.requested_at)}
-                    </TableCell>
-                    <TableCell>
-                      <DecisionBadge decision={row.decision} />
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <ArgsDialog approval={row} />
-                        {isPending ? (
-                          <>
-                            <MotionButton
-                              size="sm"
-                              whileTap={reduced ? undefined : { scale: 0.96 }}
-                              onClick={() =>
-                                singleMutation.mutate({
-                                  id: row.id,
-                                  approve: true,
-                                })
-                              }
-                              disabled={anyMutating}
-                            >
-                              {t("approvals.approve")}
-                            </MotionButton>
-                            <MotionButton
-                              size="sm"
-                              variant="destructive"
-                              whileTap={reduced ? undefined : { scale: 0.96 }}
-                              onClick={() =>
-                                setDenyDialog({ kind: "single", id: row.id })
-                              }
-                              disabled={anyMutating}
-                            >
-                              {t("approvals.deny")}
-                            </MotionButton>
-                            <CountdownRing
-                              remainingMs={remainingMs}
-                              totalMs={APPROVAL_TTL_MS}
-                              size={24}
-                              label={`${row.plugin}.${row.tool} expires in`}
-                              className="ml-auto"
-                            />
-                          </>
-                        ) : null}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                );
-              })
-            )}
-          </TableBody>
-        </Table>
+      <FilterChipGroup
+        label={t("approvals.tabsAria")}
+        options={filterOptions}
+        value={filter}
+        onChange={(next) => {
+          setFilter(next as Filter);
+          setSelected(new Set());
+        }}
+      />
+
+      {/* Two-column layout: list + detail drawer ──────────────────────── */}
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="flex flex-col gap-2.5">
+          {query.isPending ? (
+            <ListSkeleton />
+          ) : listIsEmpty ? (
+            <ApprovalsEmptyState tab={tab} />
+          ) : (
+            visibleRows.map((row) => (
+              <ApprovalCard
+                key={row.id}
+                approval={row}
+                now={now}
+                isPending={row.decision === null}
+                isSelected={selected.has(row.id)}
+                isActive={activeId === row.id}
+                isHighlighted={highlightIds.has(row.id)}
+                isFading={fadingIds.has(row.id)}
+                onToggleSelect={toggleOne}
+                onActivate={(id) =>
+                  setActiveId((prev) => (prev === id ? null : id))
+                }
+                onApprove={(id) =>
+                  singleMutation.mutate({ id, approve: true })
+                }
+                onDeny={(id) => setDenyDialog({ kind: "single", id })}
+                disabled={anyMutating}
+                showShortcuts={activeId === row.id && selected.size === 0}
+              />
+            ))
+          )}
+        </div>
+        <aside className="lg:sticky lg:top-4 lg:self-start">
+          <DetailDrawerContent approval={activeApproval} />
+        </aside>
       </section>
+
+      <BatchToolbar
+        selectedCount={selected.size}
+        onApproveAll={confirmAndBatchApprove}
+        onDenyAll={openBatchDeny}
+        onClear={() => setSelected(new Set())}
+        disabled={anyMutating}
+      />
 
       <DenyReasonDialog
         open={denyDialog !== null}
@@ -721,6 +564,68 @@ export default function ApprovalsPage() {
         onConfirm={handleDenyConfirm}
         submitting={anyMutating}
       />
-    </>
+    </motion.div>
+  );
+}
+
+// ─── atomic pieces ────────────────────────────────────────────────────────
+
+function Banner({
+  tone,
+  text,
+  onDismiss,
+  dismissAria,
+}: {
+  tone: "warn" | "err" | "info";
+  text: string;
+  onDismiss?: () => void;
+  dismissAria?: string;
+}) {
+  const { t } = useTranslation();
+  const cls = {
+    warn: "border-tp-warn/30 bg-tp-warn-soft text-tp-warn",
+    err: "border-tp-err/40 bg-tp-err-soft text-tp-err",
+    info: "border-tp-glass-edge bg-tp-glass-inner text-tp-ink-3",
+  }[tone];
+  return (
+    <div
+      role="alert"
+      className={cn(
+        "flex items-center justify-between gap-3 rounded-xl border px-3 py-2 text-[12.5px]",
+        cls,
+      )}
+    >
+      <span>{text}</span>
+      {onDismiss ? (
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label={dismissAria}
+          className={cn(
+            "rounded-md px-2 py-1 text-[11px] font-medium",
+            "bg-transparent hover:bg-tp-glass-inner-hover",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+          )}
+        >
+          {t("common.close")}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function ListSkeleton() {
+  return (
+    <div className="flex flex-col gap-2.5">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <div
+          key={i}
+          className={cn(
+            "h-[84px] animate-pulse rounded-2xl border border-tp-glass-edge",
+            "bg-tp-glass-inner/70",
+          )}
+        />
+      ))}
+    </div>
   );
 }

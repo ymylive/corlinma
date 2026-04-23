@@ -10,15 +10,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 
 /** Controlled deny-with-reason dialog.
  *
  * Required minimum length = 5 chars, matching the copy in the task spec.
  * Reason travels to the Rust `DecideBody { approve: false, reason }` which
  * is stored alongside the decision (see `approvals.rs::decide_approval`).
+ *
+ * Tidepool (Phase 5a) refresh: glass dialog card with warm-orange primary
+ * affordances and ember destructive. API is unchanged so the existing
+ * component test stays authoritative.
  */
 export interface DenyReasonDialogProps {
   open: boolean;
@@ -50,41 +53,72 @@ export function DenyReasonDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent
+        className={cn(
+          "max-w-md rounded-2xl border-tp-glass-edge bg-tp-glass-2 p-6",
+          "backdrop-blur-glass-strong backdrop-saturate-glass-strong",
+          "shadow-tp-hero",
+        )}
+      >
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="font-sans text-[18px] font-medium tracking-[-0.01em] text-tp-ink">
             {t("approvals.denyDialogTitle", { target: targetLabel })}
           </DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="text-[13px] text-tp-ink-3">
             {t("approvals.denyDialogBody", { min: MIN_REASON })}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <Label htmlFor="deny-reason">{t("approvals.denyReasonLabel")}</Label>
-          <Input
+          <Label
+            htmlFor="deny-reason"
+            className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-4"
+          >
+            {t("approvals.denyReasonLabel")}
+          </Label>
+          <input
             id="deny-reason"
             value={reason}
             autoFocus
             onChange={(e) => setReason(e.target.value)}
             placeholder={t("approvals.denyReasonPlaceholder")}
             disabled={submitting}
+            className={cn(
+              "flex h-9 w-full rounded-lg border px-3 py-1 text-sm",
+              "bg-tp-glass-inner border-tp-glass-edge text-tp-ink placeholder:text-tp-ink-4",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/45",
+              "disabled:cursor-not-allowed disabled:opacity-50",
+            )}
           />
         </div>
-        <DialogFooter>
-          <Button
-            variant="outline"
+        <DialogFooter className="gap-2">
+          <button
+            type="button"
             onClick={() => onOpenChange(false)}
             disabled={submitting}
+            className={cn(
+              "inline-flex h-9 items-center justify-center rounded-lg border px-3 text-sm font-medium",
+              "border-tp-glass-edge bg-tp-glass-inner text-tp-ink-2",
+              "hover:bg-tp-glass-inner-hover hover:text-tp-ink",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+              "disabled:pointer-events-none disabled:opacity-50",
+            )}
           >
             {t("approvals.denyCancel")}
-          </Button>
-          <Button
-            variant="destructive"
+          </button>
+          <button
+            type="button"
             onClick={() => onConfirm(trimmed)}
             disabled={tooShort || submitting}
+            className={cn(
+              "inline-flex h-9 items-center justify-center rounded-lg border px-3 text-sm font-medium",
+              "border-tp-err/40 bg-tp-err-soft text-tp-err",
+              "hover:bg-[color-mix(in_oklch,var(--tp-err)_14%,transparent)]",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-err/50",
+              "disabled:pointer-events-none disabled:opacity-50",
+            )}
           >
             {t("approvals.denyConfirm")}
-          </Button>
+          </button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

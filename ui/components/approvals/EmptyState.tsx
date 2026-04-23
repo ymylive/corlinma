@@ -2,29 +2,46 @@
 
 import { Inbox, History } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { cn } from "@/lib/utils";
 import type { Tab } from "./types";
 
-/** Friendly empty state for the approvals table. */
+/** Friendly empty state for the approvals list.
+ *
+ * Tidepool (Phase 5a) refresh: retuned to the warm-glass aesthetic. Text
+ * content unchanged so the existing EmptyState test remains authoritative.
+ */
 export function ApprovalsEmptyState({ tab }: { tab: Tab }) {
   const { t } = useTranslation();
   if (tab === "pending") {
     return (
-      <div className="flex flex-col items-center justify-center gap-2 py-10">
-        <Inbox className="h-8 w-8 text-muted-foreground" aria-hidden />
-        <p className="text-sm font-medium">
+      <div
+        className={cn(
+          "flex flex-col items-center justify-center gap-2.5 py-12 text-center",
+          "rounded-2xl border border-dashed border-tp-glass-edge bg-tp-glass-inner/40",
+        )}
+      >
+        <Inbox className="h-8 w-8 text-tp-ink-4" aria-hidden />
+        <p className="font-sans text-[14px] font-medium text-tp-ink">
           {t("approvals.emptyPendingTitle")}
         </p>
-        <p className="text-xs text-muted-foreground">
+        <p className="max-w-[36ch] text-[12px] text-tp-ink-3">
           {t("approvals.emptyPendingHint")}
         </p>
       </div>
     );
   }
   return (
-    <div className="flex flex-col items-center justify-center gap-2 py-10">
-      <History className="h-8 w-8 text-muted-foreground" aria-hidden />
-      <p className="text-sm font-medium">{t("approvals.emptyHistoryTitle")}</p>
-      <p className="text-xs text-muted-foreground">
+    <div
+      className={cn(
+        "flex flex-col items-center justify-center gap-2.5 py-12 text-center",
+        "rounded-2xl border border-dashed border-tp-glass-edge bg-tp-glass-inner/40",
+      )}
+    >
+      <History className="h-8 w-8 text-tp-ink-4" aria-hidden />
+      <p className="font-sans text-[14px] font-medium text-tp-ink">
+        {t("approvals.emptyHistoryTitle")}
+      </p>
+      <p className="max-w-[36ch] text-[12px] text-tp-ink-3">
         {t("approvals.emptyHistoryHint")}
       </p>
     </div>
