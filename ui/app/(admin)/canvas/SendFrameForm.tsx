@@ -4,7 +4,7 @@ import * as React from "react";
 import { Send } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import { GlassPanel } from "@/components/ui/glass-panel";
 import {
   CANVAS_FRAME_KINDS,
   type CanvasFrameKind,
@@ -35,9 +35,12 @@ const DEFAULT_PAYLOAD = `{
  * Small form panel for posting a frame to the canvas host. Validates the JSON
  * payload on submit and surfaces a red inline error when it fails to parse.
  *
- * Native `<select>` is used for the kind dropdown — the task calls for it
- * explicitly (simpler a11y semantics, keyboard + screen-reader support come
- * for free).
+ * Tidepool retoken: the surrounding card is now a `<GlassPanel variant="soft">`
+ * and inputs use the `tp-*` token palette so the form blends with the rest of
+ * the page.
+ *
+ * Native `<select>` is used for the kind dropdown — keyboard + screen-reader
+ * support come for free.
  */
 export function SendFrameForm({
   disabled,
@@ -66,74 +69,100 @@ export function SendFrameForm({
     onSubmit(kind, parsed as Record<string, unknown>);
   };
 
+  const inactive = Boolean(disabled || sending);
+
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="flex flex-col gap-3 rounded-lg border border-border bg-panel p-4"
+    <GlassPanel
+      as="section"
+      variant="soft"
+      className="flex flex-col gap-3 p-4"
       data-testid="canvas-send-frame-form"
     >
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-foreground">
-          {labels.title}
-        </h3>
-      </div>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <h3 className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-tp-ink-3">
+            {labels.title}
+          </h3>
+        </div>
 
-      <label className="flex flex-col gap-1">
-        <span className="text-xs text-muted-foreground">{labels.kind}</span>
-        <select
-          value={kind}
-          onChange={(e) => setKind(e.target.value as CanvasFrameKind)}
-          disabled={disabled || sending}
-          data-testid="canvas-send-kind"
-          className="h-9 rounded-md border border-input bg-background px-2 text-sm"
-        >
-          {CANVAS_FRAME_KINDS.map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
-        </select>
-      </label>
+        <label className="flex flex-col gap-1">
+          <span className="font-mono text-[10.5px] uppercase tracking-[0.08em] text-tp-ink-4">
+            {labels.kind}
+          </span>
+          <select
+            value={kind}
+            onChange={(e) => setKind(e.target.value as CanvasFrameKind)}
+            disabled={inactive}
+            data-testid="canvas-send-kind"
+            className={cn(
+              "h-9 rounded-md border px-2 text-[13px]",
+              "bg-tp-glass-inner border-tp-glass-edge text-tp-ink-2",
+              "hover:bg-tp-glass-inner-hover",
+              "focus:outline-none focus:ring-2 focus:ring-tp-amber/40",
+              "disabled:cursor-not-allowed disabled:opacity-60",
+            )}
+          >
+            {CANVAS_FRAME_KINDS.map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
+        </label>
 
-      <label className="flex flex-col gap-1">
-        <span className="text-xs text-muted-foreground">{labels.payload}</span>
-        <textarea
-          value={raw}
-          onChange={(e) => setRaw(e.target.value)}
-          disabled={disabled || sending}
-          placeholder={labels.payloadPlaceholder}
-          data-testid="canvas-send-payload"
-          rows={5}
-          className={cn(
-            "rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs",
-            error && "border-err/60 focus-visible:ring-err",
-          )}
-          spellCheck={false}
-        />
-      </label>
+        <label className="flex flex-col gap-1">
+          <span className="font-mono text-[10.5px] uppercase tracking-[0.08em] text-tp-ink-4">
+            {labels.payload}
+          </span>
+          <textarea
+            value={raw}
+            onChange={(e) => setRaw(e.target.value)}
+            disabled={inactive}
+            placeholder={labels.payloadPlaceholder}
+            data-testid="canvas-send-payload"
+            rows={6}
+            spellCheck={false}
+            className={cn(
+              "rounded-md border px-2 py-1.5 font-mono text-[11.5px] leading-relaxed",
+              "bg-tp-glass-inner border-tp-glass-edge text-tp-ink-2",
+              "placeholder:text-tp-ink-4",
+              "focus:outline-none focus:ring-2 focus:ring-tp-amber/40",
+              "disabled:cursor-not-allowed disabled:opacity-60",
+              error && "border-tp-err/60 focus:ring-tp-err/40",
+            )}
+          />
+        </label>
 
-      {error ? (
-        <p
-          role="alert"
-          className="text-xs text-err"
-          data-testid="canvas-send-error"
-        >
-          {error}
-        </p>
-      ) : null}
+        {error ? (
+          <p
+            role="alert"
+            className="font-mono text-[11.5px] text-tp-err"
+            data-testid="canvas-send-error"
+          >
+            {error}
+          </p>
+        ) : null}
 
-      <div className="flex items-center justify-end">
-        <Button
-          type="submit"
-          disabled={disabled || sending}
-          data-testid="canvas-send-submit"
-          size="sm"
-        >
-          <Send className="h-3.5 w-3.5" />
-          {sending ? labels.sending : labels.send}
-        </Button>
-      </div>
-    </form>
+        <div className="flex items-center justify-end">
+          <button
+            type="submit"
+            disabled={inactive}
+            data-testid="canvas-send-submit"
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5",
+              "font-mono text-[11.5px]",
+              "bg-tp-amber-soft text-tp-amber border-tp-amber/30",
+              "hover:bg-tp-amber-soft hover:border-tp-amber/50",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tp-amber/40",
+              "disabled:cursor-not-allowed disabled:opacity-50",
+            )}
+          >
+            <Send className="h-3 w-3" aria-hidden />
+            {sending ? labels.sending : labels.send}
+          </button>
+        </div>
+      </form>
+    </GlassPanel>
   );
 }
 

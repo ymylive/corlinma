@@ -1,18 +1,17 @@
 "use client";
 
 import * as React from "react";
+import { AlertTriangle } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { AlertTriangle, Plus } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
-import { LiveDot } from "@/components/ui/live-dot";
-import { CountdownRing } from "@/components/ui/countdown-ring";
+import { StatChip } from "@/components/ui/stat-chip";
+import type { StreamState } from "@/components/ui/stream-pill";
 import { useMotion } from "@/components/ui/motion-safe";
 import {
+  canvasEventsPath,
   createCanvasSession,
   sendCanvasFrame,
-  canvasEventsPath,
 } from "@/lib/api/canvas";
 import { openEventStream } from "@/lib/sse";
 import {
@@ -23,19 +22,47 @@ import {
   formatCanvasTime,
 } from "@/lib/mocks/canvas";
 
-import { ProtocolInspector } from "./ProtocolInspector";
+import {
+  CanvasHero,
+  type CanvasHeroState,
+} from "@/components/canvas/canvas-hero";
+import { CanvasViewer } from "@/components/canvas/canvas-viewer";
+import { MessageInspector } from "@/components/canvas/message-inspector";
+import {
+  buildPlaceholderHtml,
+  formatBytes,
+} from "@/components/canvas/placeholder-html";
 import { SendFrameForm } from "./SendFrameForm";
 
 /**
- * B5-FE3 Canvas viewer stub.
+ * B5-FE3 Canvas viewer — Phase 5d Tidepool cutover.
  *
- * Demonstrates the Canvas Host protocol without a real renderer:
- *   - sandboxed iframe surface with a skeleton shimmer overlay
- *   - live SSE protocol-inspector at the bottom
- *   - session controls (new / send frame) that transparently fall back to a
- *     rotating mock stream when the gateway responds 503 (canvas host
- *     disabled in config).
+ * Thin coordinator: owns the session + SSE lifecycle and delegates visuals to
+ * four sub-components under `components/canvas/*`:
+ *
+ *   - `<CanvasHero>` — warm glass-strong hero with lead pill, prose, CTA,
+ *     StreamPill, and the TTL countdown ring.
+ *   - `<CanvasViewer>` — sandboxed iframe inside a glass-strong panel, with a
+ *     centred prose overlay when no frames have landed yet.
+ *   - `<SendFrameForm>` (pre-existing, already retokened in Phase 5a) —
+ *     small composer to post a frame into the current session.
+ *   - `<MessageInspector>` — bottom-docked glass-soft protocol inspector with
+ *     filter chips, compact rows, and a side-docked JSON payload at wide
+ *     viewports (inline expand at narrow).
+ *
+ * Fallback path: a rotating mock stream drives the UI when the gateway
+ * reports the Canvas Host is disabled — kept identical to the pre-cutover
+ * behaviour so the stub stays demoable in dev.
  */
+
+const EVENT_RING_MAX = 200;
+
+/** Baked sparks — same geometry language as other Tidepool pages. */
+const FRAMES_SPARK =
+  "M0 28 L30 26 L60 20 L90 24 L120 16 L150 22 L180 14 L210 18 L240 10 L270 14 L300 8 L300 36 L0 36 Z";
+const BYTES_SPARK =
+  "M0 22 L30 24 L60 20 L90 22 L120 18 L150 20 L180 14 L210 18 L240 12 L270 16 L300 10 L300 36 L0 36 Z";
+
 export default function CanvasPage() {
   const { t } = useTranslation();
   const { reduced } = useMotion();
@@ -49,20 +76,18 @@ export default function CanvasPage() {
   const [creating, setCreating] = React.useState(false);
   const [nowTick, setNowTick] = React.useState<number>(Date.now());
 
-  // Track the last-known expiry so the countdown stays correct after mount.
+  // Keep the countdown ring fresh after mount.
   React.useEffect(() => {
     const i = window.setInterval(() => setNowTick(Date.now()), 1_000);
     return () => window.clearInterval(i);
   }, []);
 
   const pushEvent = React.useCallback((ev: CanvasEvent) => {
-    setEvents((prev) => [ev, ...prev].slice(0, 200));
+    setEvents((prev) => [ev, ...prev].slice(0, EVENT_RING_MAX));
     setNewestId(ev.id);
   }, []);
 
-  // ---------------------------------------------------------------------
-  // Session lifecycle
-  // ---------------------------------------------------------------------
+  // ── Session lifecycle ───────────────────────────────────────
 
   const newSession = React.useCallback(async () => {
     setCreating(true);
@@ -82,22 +107,17 @@ export default function CanvasPage() {
     }
   }, []);
 
-  // Create a session on first mount so the page has something to show.
+  // Bootstrap a session on first mount.
   React.useEffect(() => {
     void newSession();
-    // `newSession` is stable (useCallback with empty deps)
   }, [newSession]);
 
-  // ---------------------------------------------------------------------
-  // SSE / fallback rotation
-  // ---------------------------------------------------------------------
+  // ── SSE / fallback rotation ─────────────────────────────────
 
   React.useEffect(() => {
     if (!session) return;
 
     if (fallback) {
-      // Rotate a mock event every 2s to keep the UI alive when the canvas
-      // host endpoint is disabled.
       let idx = 0;
       pushEvent(buildMockEvent(idx));
       idx += 1;
@@ -108,7 +128,6 @@ export default function CanvasPage() {
       return () => window.clearInterval(timer);
     }
 
-    // Live SSE path.
     const close = openEventStream<{
       kind: CanvasFrameKind;
       payload: Record<string, unknown>;
@@ -132,9 +151,7 @@ export default function CanvasPage() {
     return close;
   }, [session, fallback, pushEvent]);
 
-  // ---------------------------------------------------------------------
-  // Send frame
-  // ---------------------------------------------------------------------
+  // ── Send frame ──────────────────────────────────────────────
 
   const handleSend = async (
     kind: CanvasFrameKind,
@@ -150,10 +167,8 @@ export default function CanvasPage() {
       });
       if (res.kind === "fallback") setFallback(true);
 
-      // Whether live or fallback, mirror the frame into the inspector
-      // immediately so the user sees their action land. (For a live session
-      // the SSE stream will also echo it — duplicates are acceptable in the
-      // stub viewer.)
+      // Mirror the frame into the inspector immediately — the `_sent` suffix
+      // is what `<MessageInspector>` reads to flag the direction as outbound.
       pushEvent({
         id: `ev_${Date.now()}_sent`,
         timestamp: formatCanvasTime(Date.now()),
@@ -165,9 +180,58 @@ export default function CanvasPage() {
     }
   };
 
-  // ---------------------------------------------------------------------
-  // Rendering
-  // ---------------------------------------------------------------------
+  // ── Derived state ───────────────────────────────────────────
+
+  const sessionCount = session ? 1 : 0;
+  const pendingFrames = events.length;
+
+  /** Approximate frames-per-minute from the in-memory ring. Real metrics will
+   * ship in B5 — this stays honest for the stub by capping the window. */
+  const framesPerMin = React.useMemo(() => {
+    if (events.length === 0) return 0;
+    const windowCount = Math.min(events.length, 30);
+    return windowCount * 2;
+  }, [events]);
+
+  const bytesPerMin = React.useMemo(() => {
+    if (events.length === 0) return 0;
+    let total = 0;
+    for (const e of events.slice(0, 30)) {
+      try {
+        total += JSON.stringify(e.payload).length;
+      } catch {
+        /* skip unserialisable payloads */
+      }
+    }
+    return total * 2;
+  }, [events]);
+
+  const heroState: CanvasHeroState = ended
+    ? "ended"
+    : fallback
+      ? "fallback"
+      : session
+        ? "live"
+        : "idle";
+
+  const streamState: StreamState =
+    heroState === "ended" || heroState === "idle"
+      ? "paused"
+      : heroState === "fallback"
+        ? "throttled"
+        : "live";
+
+  const streamRate = React.useMemo(() => {
+    if (heroState === "ended") return undefined;
+    if (events.length === 0) return "0 ev/min";
+    return `${framesPerMin} ev/min`;
+  }, [heroState, events.length, framesPerMin]);
+
+  const statSessionsFoot = ended
+    ? t("canvas.tp.statSessionsFootEnded")
+    : session
+      ? t("canvas.tp.statSessionsFootActive")
+      : t("canvas.tp.statSessionsFootIdle");
 
   const placeholderHtml = React.useMemo(
     () => buildPlaceholderHtml(session?.id ?? "(no session)"),
@@ -175,90 +239,72 @@ export default function CanvasPage() {
   );
 
   const remainingMs = session ? Math.max(0, session.expires_at - nowTick) : 0;
-  void nowTick; // used by the countdown label refresh
-
-  const runtimeChip = (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider",
-        ended
-          ? "border-muted-foreground/30 bg-muted-foreground/5 text-muted-foreground"
-          : fallback
-            ? "border-warn/40 bg-warn/10 text-warn"
-            : "border-ok/40 bg-ok/10 text-ok",
-      )}
-    >
-      <LiveDot
-        variant={ended ? "muted" : fallback ? "warn" : "ok"}
-        pulse={!ended}
-      />
-      {ended
-        ? t("canvas.chipEnded")
-        : fallback
-          ? t("canvas.chipFallback")
-          : t("canvas.chipLive")}
-    </span>
-  );
+  // `nowTick` drives the effect above + the remaining-ms recalculation.
+  void nowTick;
 
   return (
-    <div className="flex flex-col gap-6">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight text-foreground">
-            {t("canvas.title")}
-          </h1>
-          <p className="text-xs text-muted-foreground">
-            {t("canvas.subtitle")}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {session ? (
-            <span
-              className="font-mono text-xs text-muted-foreground"
-              data-testid="canvas-session-id"
-            >
-              {session.id}
-            </span>
-          ) : null}
-          {session ? (
-            <CountdownRing
-              remainingMs={remainingMs}
-              totalMs={session.ttl_ms}
-              label={t("canvas.ttlLabel")}
-            />
-          ) : null}
-          {runtimeChip}
-          <Button
-            size="sm"
-            onClick={newSession}
-            disabled={creating}
-            data-testid="canvas-new-session"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {creating ? t("common.loading") : t("canvas.newSession")}
-          </Button>
-        </div>
-      </header>
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
+      <CanvasHero
+        state={heroState}
+        session={session}
+        pendingFrames={pendingFrames}
+        remainingMs={remainingMs}
+        streamState={streamState}
+        streamRate={streamRate}
+        creating={creating}
+        onNewSession={newSession}
+      />
 
       {fallback ? (
         <div
           role="status"
           data-testid="canvas-fallback-banner"
-          className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn/5 px-3 py-2 text-xs text-warn"
+          className={cn(
+            "flex items-start gap-2 rounded-xl border px-3 py-2 text-[12.5px]",
+            "border-tp-warn/30 bg-tp-warn-soft text-tp-warn",
+          )}
         >
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
           <span>{t("canvas.fallbackBanner")}</span>
         </div>
       ) : null}
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        <div className="flex flex-col overflow-hidden rounded-lg border border-border bg-panel">
-          <CanvasSurface
-            srcDoc={placeholderHtml}
-            reduced={reduced}
-            sessionId={session?.id}
-          />
-        </div>
+      <section className="grid grid-cols-1 gap-3.5 md:grid-cols-3">
+        <StatChip
+          variant={session && !ended ? "primary" : "default"}
+          live={!!session && !ended && !fallback}
+          label={t("canvas.tp.statSessions")}
+          value={sessionCount}
+          foot={statSessionsFoot}
+          sparkPath={FRAMES_SPARK}
+          sparkTone="amber"
+        />
+        <StatChip
+          label={t("canvas.tp.statFrames")}
+          value={framesPerMin}
+          foot={t("canvas.tp.statFramesFoot")}
+          sparkPath={FRAMES_SPARK}
+          sparkTone="ember"
+        />
+        <StatChip
+          label={t("canvas.tp.statBytes")}
+          value={formatBytes(bytesPerMin)}
+          foot={t("canvas.tp.statBytesFoot")}
+          sparkPath={BYTES_SPARK}
+          sparkTone="peach"
+        />
+      </section>
+
+      <section className="grid gap-3.5 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <CanvasViewer
+          srcDoc={placeholderHtml}
+          sessionId={session?.id ?? null}
+          reduced={reduced}
+          showOverlay={events.length === 0 || !session}
+          hintText={
+            fallback ? t("canvas.tp.viewerFallbackHint") : undefined
+          }
+        />
         <SendFrameForm
           disabled={!session || ended}
           sending={sending}
@@ -273,117 +319,14 @@ export default function CanvasPage() {
             invalidJson: t("common.invalidJson"),
           }}
         />
-      </div>
+      </section>
 
-      <ProtocolInspector
+      <MessageInspector
         events={events}
         newestId={newestId}
         ended={ended}
-        labels={{
-          title: t("canvas.inspectorTitle"),
-          expand: t("canvas.inspectorExpanded"),
-          collapse: t("canvas.inspectorCollapsed"),
-          empty: t("canvas.inspectorEmpty"),
-          sessionEnded: t("canvas.sessionEnded"),
-        }}
+        reduced={reduced}
       />
     </div>
   );
-}
-
-/* ---------------------------------------------------------------------- */
-/*                        Sandboxed iframe surface                        */
-/* ---------------------------------------------------------------------- */
-
-interface CanvasSurfaceProps {
-  srcDoc: string;
-  reduced: boolean;
-  sessionId: string | undefined;
-}
-
-const SKELETON_MS = 800;
-
-function CanvasSurface({ srcDoc, reduced, sessionId }: CanvasSurfaceProps) {
-  const [showSkeleton, setShowSkeleton] = React.useState(true);
-
-  React.useEffect(() => {
-    if (reduced) {
-      setShowSkeleton(false);
-      return;
-    }
-    setShowSkeleton(true);
-    const t = window.setTimeout(() => setShowSkeleton(false), SKELETON_MS);
-    return () => window.clearTimeout(t);
-  }, [reduced, sessionId]);
-
-  return (
-    <div className="relative" style={{ height: 420 }}>
-      <iframe
-        data-testid="canvas-iframe"
-        title="Canvas surface placeholder"
-        sandbox="allow-same-origin"
-        srcDoc={srcDoc}
-        className="h-full w-full border-0"
-      />
-      {showSkeleton ? (
-        <div
-          aria-hidden
-          data-testid="canvas-skeleton"
-          className={cn(
-            "absolute inset-0",
-            reduced ? "bg-muted/60" : "shimmer",
-          )}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * Build the inert HTML document used as the iframe's `srcDoc`. Kept out of
- * the render path so new renders don't re-serialise the template.
- */
-function buildPlaceholderHtml(sessionId: string): string {
-  const safeId = String(sessionId).replace(/[<>&"]/g, "");
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Canvas placeholder</title>
-<style>
-  :root { color-scheme: light dark; }
-  html, body { margin: 0; height: 100%; }
-  body {
-    display: flex; align-items: center; justify-content: center;
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    background:
-      radial-gradient(1200px 400px at 20% 0%, rgba(99,102,241,0.15), transparent 60%),
-      radial-gradient(800px 400px at 80% 100%, rgba(20,184,166,0.15), transparent 60%),
-      #0f1115;
-    color: #e5e7eb;
-  }
-  .card {
-    text-align: center;
-    letter-spacing: 0.02em;
-  }
-  .title { font-size: 14px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.16em; }
-  .session { margin-top: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 18px; color: #e5e7eb; }
-  @media (prefers-color-scheme: light) {
-    body { background:
-      radial-gradient(1200px 400px at 20% 0%, rgba(99,102,241,0.18), transparent 60%),
-      radial-gradient(800px 400px at 80% 100%, rgba(20,184,166,0.18), transparent 60%),
-      #ffffff;
-      color: #111827; }
-    .title { color: #6b7280; }
-    .session { color: #111827; }
-  }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="title">Canvas placeholder</div>
-  <div class="session">Session: ${safeId}</div>
-</div>
-</body>
-</html>`;
 }
