@@ -2,7 +2,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/ymylive/corlinman/ci.yml?branch=main&label=CI)](https://github.com/ymylive/corlinman/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.2-orange)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.0-orange)](CHANGELOG.md)
 [![Docs](https://img.shields.io/badge/docs-architecture-informational)](docs/architecture.md)
 
 **A self-hosted intelligent-agent platform.** Give a language model durable
@@ -44,10 +44,11 @@ What you get out of the box:
 - **Channels are first-class agent I/O.** Production adapters for QQ
   (OneBot v11) and Telegram, a scheduler for cron-driven tasks, an
   OpenAI-compatible HTTP/SSE endpoint for your own clients.
-- **An admin plane that treats operations seriously.** A Linear-style
-  web console for plugin management, RAG inspection, live log streaming,
-  approval queues, config live-reload, and model routing — plus OTel
-  traces, Prometheus metrics, and a 20+ check `doctor` command.
+- **An admin plane that treats operations seriously.** A warm-amber
+  glass web console (**Tidepool** design system, day + night themes) for
+  plugin management, RAG inspection, live log streaming, approval
+  queues, config live-reload, and model routing — plus OTel traces,
+  Prometheus metrics, and a 20+ check `doctor` command.
 
 If you want something you can hand your teammate a URL to, then audit on
 Sunday morning without reverse-engineering twenty repos — that's corlinman.
@@ -258,10 +259,11 @@ prefix in `registry.py`, and you're in the agent loop. See
 
 ## Admin UI
 
-A Next.js 14 static-export bundle served by nginx (or directly from the
-gateway at `/`). Linear/Vercel aesthetic — dark-first with an indigo
-accent, Geist typography, `⌘K` command palette, framer-motion page
-transitions, live SSE dashboards.
+A Next.js 15 static-export bundle served by nginx (or directly from the
+gateway at `/`). **Tidepool** design system — warm-amber glass with
+day + night themes (sun/moon pill in the top nav), Instrument Serif
+hero display over Geist sans/mono, `⌘K` command palette, framer-motion
+page transitions, live SSE dashboards.
 
 Ten pages covering the full control plane:
 
@@ -482,7 +484,7 @@ MIT. See [`LICENSE`](LICENSE).
 - **真工具，不是 prompt 模板**：同步 / 异步 / 常驻三种插件类型，统一 JSON-RPC 2.0 stdio 或 gRPC 通信，可选 Docker 沙箱 + 人工审批闸。
 - **跨会话的记忆**：SQLite 会话历史 + HNSW/BM25 混合检索（RRF 融合 + 可选 cross-encoder rerank），RAG 是智能体内置能力而非外挂。
 - **通道作为一等公民**：QQ (OneBot v11) / Telegram / 定时任务 / OpenAI 兼容 HTTP/SSE 并行接入，共享同一 agent 循环。
-- **严肃的运维面板**：Linear 风格 Next.js 管理界面（插件 / 知识库 / 日志 / 审批 / 配置 / 调度器 / 模型路由），OTel + Prometheus 埋点，21 项 `doctor` 体检。
+- **严肃的运维面板**：**Tidepool** 暖橙玻璃风格 Next.js 管理界面（日 / 夜双主题，插件 / 知识库 / 日志 / 审批 / 配置 / 调度器 / 模型路由），OTel + Prometheus 埋点，21 项 `doctor` 体检。
 
 **在线 demo**：<https://corlinman.cornna.xyz>
 

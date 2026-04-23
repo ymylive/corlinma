@@ -4,7 +4,107 @@ All notable changes to corlinman are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] — Unreleased
+## [0.4.0] — 2026-04-23
+
+Admin UI redesign: **Tidepool** design system. Warm-amber glass
+aesthetic, day+night themes, and a reusable primitive library power a
+from-scratch re-skin of all 15 admin pages. Backend and API unchanged —
+this is a pure frontend release.
+
+### Added
+
+- **Design tokens** (`ui/app/globals.css`): `--tp-*` namespace for
+  amber / ember / peach accents, ink ramp, glass layers, edge colours,
+  gradients, shadows, and row alternation. Day and night palettes share
+  every variable name; `data-theme="light|dark"` (mirrored to the
+  `.dark` class for Tailwind compatibility) selects the active set.
+- **12 new UI primitives** (`ui/components/ui/`):
+  `<GlassPanel>` (soft/strong/subtle/primary variants respecting the
+  ≤5 blur-layer/viewport budget), `<AuroraBackground>`,
+  `<ThemeToggle>` (sun/moon pill with no-FOUC boot script),
+  `<MiniSparkline>`, `<StreamPill>`, `<FilterChipGroup>`,
+  `<StatChip>` (tick-up animation + ambient sparkline),
+  `<JsonView>` (syntax-highlighted), `<LogRow>`, `<DetailDrawer>`,
+  `<CommandPalette>` (configurable via `PaletteGroup[]`), plus
+  `<UptimeStreak>`.
+- **Motion tokens** (`ui/lib/motion.ts`): `tickUp` and `paletteIn`
+  framer-motion variants alongside existing `fadeUp` / `stagger` /
+  `springPop`. Continuous ambient animations (breathing, draw-in,
+  just-now fades, badge pulses) live as CSS keyframes under `.tp-*`
+  utility classes — cheaper than per-frame React work.
+- **Typography**: Instrument Serif (display) loaded via `next/font`
+  as `var(--font-instrument-serif)`, paired with existing Geist sans
+  and Geist mono.
+- **Theme persistence**: shared `corlinman-theme` storage key between
+  `next-themes` and the inline boot script in `app/layout.tsx`.
+  Hydration is race-free because the boot script writes
+  `data-theme` + `.dark` before React mounts.
+- **UI docs**: new "Tidepool design system" section in `ui/README.md`
+  documenting tokens, primitive APIs, motion patterns, performance
+  budget, and a new-page quick-start.
+
+### Changed
+
+- **All 15 admin pages retokened** onto Tidepool: Dashboard, Logs,
+  Plugins, Approvals, Skills, Characters, Hooks, Scheduler, Nodes,
+  Playground, Canvas, Tag Memo, Diary, Channels (QQ + Telegram),
+  Config, Login, Models, Providers, Embedding, RAG, Agents. Direct
+  colour/background classes replaced with `tp-*` tokens, `<Card>`
+  uses swapped for `<GlassPanel>` where the glass treatment applies.
+- **Admin layout** (`app/(admin)/layout.tsx`): `<AuroraBackground>`
+  mounted once behind the sidebar + main grid; container spacing
+  normalised to `gap-4 p-4`.
+- **Command palette** (`components/cmdk-palette.tsx`): inner
+  rendering delegated to the new `<CommandPalette>` primitive via a
+  declarative `PaletteGroup[]` config. `useCommandPalette` hook,
+  `CommandPaletteProvider`, `NAV_CMDS` registry, recent-routes, and
+  test-chat drawer preserved.
+- **i18n**: pages that gained Tidepool prose (hero copy, empty
+  states, filter chips) now partition their new keys under a
+  `<page>.tp.*` sub-namespace to keep diffs legible.
+
+### Fixed
+
+- **WCAG AA contrast**: darkened day-mode `--primary` to amber-800
+  (`hsl(20 82% 33%)`) after `<Button>` primary text failed 4.5:1
+  against foreground on the warm base. Night mode uses amber-400
+  (`hsl(35 90% 65%)`) on dark ink.
+- **Aurora visibility**: removed `bg-background` from `<body>` in
+  `app/layout.tsx`; the admin layout now owns the backdrop, while
+  the login route re-adds `bg-background` on its own root.
+- **Offline-state HTML dumps**: plugins and scheduler pages detected
+  backend HTML error responses (rather than JSON) and rendered the
+  raw markup; `OfflineBlock` now suppresses dumps whose first line
+  starts with `<`.
+- **Telegram page `<dl>` a11y**: nested `<FilterStatCell>` broke
+  definition-list semantics. Converted the wrapper to
+  `<div>/<div>/<div>` so axe passes.
+
+### Performance
+
+- Dashboard blur-layer count dropped from 7 → 4 per viewport by
+  defaulting non-primary `<StatChip>` instances to `<GlassPanel
+  variant="subtle">` (tp-glass-inner, no `backdrop-filter`). Primary
+  chip retains the full glass treatment to anchor the eye.
+- All continuous animations (breathing dots, draw-in underlines,
+  badge pulses, just-now fades) run as CSS keyframes gated by
+  `@media (prefers-reduced-motion: reduce)`.
+
+### Migration notes
+
+- No backend changes. Existing deployments can upgrade by pulling the
+  new `ui-static/` bundle only.
+- Custom pages that used raw `bg-card` / `text-muted-foreground`
+  continue to render — Tidepool tokens compose alongside legacy
+  shadcn tokens rather than replacing them.
+- Users with persisted theme preferences from the previous
+  `next-themes` default key will see a one-time flip to dark on
+  first visit; the new `corlinman-theme` key is then used
+  consistently.
+
+[0.4.0]: https://github.com/ymylive/corlinman/releases/tag/v0.4.0
+
+## [0.3.0] — 2026-04-23
 
 Sprint 9 (Batch 1–4) rollup: hierarchical tags + EPA cache in the
 vector store, manifest v2, reserved placeholder namespaces, and
