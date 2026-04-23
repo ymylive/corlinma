@@ -1,0 +1,55 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { GlassPanel } from "./glass-panel";
+
+afterEach(() => {
+  cleanup();
+});
+
+describe("GlassPanel", () => {
+  it("defaults to the soft variant", () => {
+    render(<GlassPanel data-testid="panel">content</GlassPanel>);
+    const el = screen.getByTestId("panel");
+    expect(el).toHaveAttribute("data-glass-variant", "soft");
+    expect(el).toHaveClass("bg-tp-glass");
+    expect(el).toHaveClass("backdrop-blur-glass");
+  });
+
+  it("renders subtle variant without backdrop-filter classes", () => {
+    render(
+      <GlassPanel variant="subtle" data-testid="panel">
+        content
+      </GlassPanel>,
+    );
+    const el = screen.getByTestId("panel");
+    expect(el).toHaveAttribute("data-glass-variant", "subtle");
+    // subtle avoids blur on purpose (perf budget)
+    expect(el.className).not.toContain("backdrop-blur-glass");
+    expect(el.className).toContain("bg-tp-glass-inner");
+  });
+
+  it("renders the primary ring/glow when variant=primary", () => {
+    render(
+      <GlassPanel variant="primary" data-testid="panel">
+        x
+      </GlassPanel>,
+    );
+    expect(screen.getByTestId("panel")).toHaveClass("shadow-tp-primary");
+  });
+
+  it("can render as a different element", () => {
+    render(
+      <GlassPanel as="section" data-testid="panel">
+        x
+      </GlassPanel>,
+    );
+    expect(screen.getByTestId("panel").tagName).toBe("SECTION");
+  });
+
+  it("mounts a top inset highlight layer", () => {
+    const { container } = render(<GlassPanel>x</GlassPanel>);
+    const hl = container.querySelector(".bg-tp-glass-hl");
+    expect(hl).not.toBeNull();
+    expect(hl).toHaveAttribute("aria-hidden", "true");
+  });
+});
