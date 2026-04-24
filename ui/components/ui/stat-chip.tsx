@@ -48,15 +48,15 @@ const sparkGradientStops: Record<
   { top: string; bottom: string }
 > = {
   amber: {
-    top: "color-mix(in oklch, var(--tp-amber) 55%, transparent)",
+    top: "color-mix(in oklch, var(--tp-amber) 32%, transparent)",
     bottom: "color-mix(in oklch, var(--tp-amber) 0%, transparent)",
   },
   ember: {
-    top: "color-mix(in oklch, var(--tp-ember) 42%, transparent)",
+    top: "color-mix(in oklch, var(--tp-ember) 24%, transparent)",
     bottom: "color-mix(in oklch, var(--tp-ember) 0%, transparent)",
   },
   peach: {
-    top: "color-mix(in oklch, var(--tp-peach) 38%, transparent)",
+    top: "color-mix(in oklch, var(--tp-peach) 22%, transparent)",
     bottom: "color-mix(in oklch, var(--tp-peach) 0%, transparent)",
   },
 };
@@ -138,8 +138,11 @@ export const StatChip = React.forwardRef<HTMLDivElement, StatChipProps>(
             viewBox="0 0 300 36"
             preserveAspectRatio="none"
             className={cn(
-              "pointer-events-none absolute inset-x-0 bottom-0 h-9 w-full",
-              isPrimary ? "opacity-75" : "opacity-50",
+              // Ambient underline, not a layer. Low opacity + short height
+              // so it reads as a glow at the base rather than a tinted block
+              // behind the foot text.
+              "pointer-events-none absolute inset-x-0 bottom-0 h-6 w-full",
+              isPrimary ? "opacity-40" : "opacity-20",
             )}
           >
             <defs>
