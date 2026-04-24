@@ -14,6 +14,7 @@ behaviour for callers that haven't migrated to alias configs yet.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -21,6 +22,11 @@ import structlog
 from corlinman_providers.anthropic_provider import AnthropicProvider
 from corlinman_providers.base import CorlinmanProvider
 from corlinman_providers.china import DeepSeekProvider, GLMProvider, QwenProvider
+from corlinman_providers.declarative import (
+    DeclarativeProvider,
+    DeclarativeProviderSpec,
+    load_all_specs,
+)
 from corlinman_providers.google_provider import GoogleProvider
 from corlinman_providers.openai_compatible import OpenAICompatibleProvider
 from corlinman_providers.openai_provider import OpenAIProvider
@@ -59,22 +65,46 @@ MODEL_PREFIX_DEFAULTS: list[tuple[str, type[Any]]] = [
 ]
 
 
+#: Default location for declarative ``*.toml`` specs. Resolved relative to
+#: the package root so operators drop files next to ``src/`` without
+#: touching ``PYTHONPATH``.
+DEFAULT_SPEC_DIR: Path = Path(__file__).resolve().parent.parent.parent / "spec"
+
+
 class ProviderRegistry:
     """Eagerly-built registry of provider adapters keyed by spec name."""
 
-    def __init__(self, specs: list[ProviderSpec] | None = None) -> None:
+    def __init__(
+        self,
+        specs: list[ProviderSpec] | None = None,
+        *,
+        declarative_specs: list[DeclarativeProviderSpec] | None = None,
+        spec_dir: Path | None = None,
+    ) -> None:
         """Build each enabled spec. Disabled specs are retained for listing.
 
         ``specs=None`` constructs an empty registry — every call then falls
         through to the :data:`MODEL_PREFIX_DEFAULTS` legacy path. Kept
         default-able so pre-Feature-C callers that did ``ProviderRegistry()``
         still work.
+
+        ``declarative_specs`` lets callers pass pre-loaded
+        :class:`DeclarativeProviderSpec` values (used by tests). When
+        ``None``, we scan ``spec_dir`` (falling back to
+        :data:`DEFAULT_SPEC_DIR`) for ``*.toml`` files. Class-based
+        providers are built first; any TOML spec whose ``id`` collides
+        with an already-built provider is dropped with a WARNING —
+        class-based wins so operators can't accidentally shadow a
+        vetted built-in adapter.
         """
         specs = specs or []
         self._specs: dict[str, ProviderSpec] = {s.name: s for s in specs}
         self._providers: dict[str, CorlinmanProvider] = {}
         # Cache of legacy-fallback providers keyed by adapter class.
         self._legacy_cache: dict[type[Any], CorlinmanProvider] = {}
+        # Declarative specs are retained for admin-listing alongside
+        # class-based ``_specs``; distinct dict because the shape differs.
+        self._declarative_specs: dict[str, DeclarativeProviderSpec] = {}
         for spec in specs:
             if not spec.enabled:
                 continue
@@ -91,6 +121,45 @@ class ProviderRegistry:
                     kind=spec.kind,
                     error=str(exc),
                 )
+
+        # Declarative TOML specs — loaded *after* class-based so conflicts
+        # resolve in favour of the built-in adapter.
+        self._ingest_declarative(declarative_specs, spec_dir)
+
+    def _ingest_declarative(
+        self,
+        declarative_specs: list[DeclarativeProviderSpec] | None,
+        spec_dir: Path | None,
+    ) -> None:
+        """Build :class:`DeclarativeProvider` instances from TOML specs.
+
+        Honours the class-based-wins conflict policy: if a TOML spec's
+        ``id`` matches an already-built provider name, skip + warn.
+        """
+        if declarative_specs is None:
+            resolved_dir = spec_dir or DEFAULT_SPEC_DIR
+            declarative_specs = load_all_specs(resolved_dir)
+        for dspec in declarative_specs:
+            if dspec.id in self._providers:
+                logger.warning(
+                    "provider.declarative_conflict",
+                    id=dspec.id,
+                    reason="class-based provider already registered; TOML spec ignored",
+                )
+                continue
+            try:
+                self._providers[dspec.id] = DeclarativeProvider(dspec)
+                self._declarative_specs[dspec.id] = dspec
+            except Exception as exc:
+                logger.error(
+                    "provider.declarative_build_failed",
+                    id=dspec.id,
+                    error=str(exc),
+                )
+
+    def list_declarative_specs(self) -> list[DeclarativeProviderSpec]:
+        """Return every TOML-declared spec that actually built successfully."""
+        return list(self._declarative_specs.values())
 
     def list_specs(self) -> list[ProviderSpec]:
         """Return all specs (enabled + disabled) for ``/admin/providers``."""

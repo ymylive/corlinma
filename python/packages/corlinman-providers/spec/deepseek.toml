@@ -1,0 +1,27 @@
+# DeepSeek — OpenAI-compatible chat completions.
+# Note: a class-based `DeepSeekProvider` already exists and is wired via
+# ProviderKind.DEEPSEEK; this TOML spec is provided as a declarative
+# alternative. Class-based wins on conflict (see ProviderRegistry).
+# Docs: https://api-docs.deepseek.com
+
+id = "deepseek"
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+auth_kind = "bearer_api_key"
+request_format = "openai_compatible"
+chat_endpoint = "/chat/completions"
+
+[auth_config]
+env_var = "DEEPSEEK_API_KEY"
+
+[models.default]
+id = "deepseek-chat"
+context_length = 65536
+supports_tools = true
+supports_vision = false
+
+[models.reasoner]
+id = "deepseek-reasoner"
+context_length = 65536
+supports_tools = false
+supports_vision = false

@@ -1,0 +1,28 @@
+# Zhipu GLM (智谱 BigModel) — OpenAI-compatible paas/v4 endpoint.
+# Note: a class-based `GLMProvider` already exists and is wired via
+# ProviderKind.GLM; this TOML spec is provided for operators who prefer
+# the declarative path. If both are registered under the same name the
+# class-based one wins (see ProviderRegistry conflict policy).
+# Docs: https://bigmodel.cn/dev/api
+
+id = "zhipu"
+name = "Zhipu GLM (智谱)"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+auth_kind = "bearer_api_key"
+request_format = "openai_compatible"
+chat_endpoint = "/chat/completions"
+
+[auth_config]
+env_var = "ZHIPU_API_KEY"
+
+[models.default]
+id = "glm-4-plus"
+context_length = 131072
+supports_tools = true
+supports_vision = false
+
+[models.fast]
+id = "glm-4-flash"
+context_length = 131072
+supports_tools = true
+supports_vision = false

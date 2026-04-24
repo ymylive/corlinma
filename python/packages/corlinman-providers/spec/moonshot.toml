@@ -1,0 +1,30 @@
+# Moonshot AI (月之暗面) — OpenAI-compatible chat completions.
+# Docs: https://platform.moonshot.cn/docs/api-reference
+
+id = "moonshot"
+name = "Moonshot (月之暗面)"
+base_url = "https://api.moonshot.cn/v1"
+auth_kind = "bearer_api_key"
+request_format = "openai_compatible"
+chat_endpoint = "/chat/completions"
+
+[auth_config]
+env_var = "MOONSHOT_API_KEY"
+
+[models.default]
+id = "moonshot-v1-32k"
+context_length = 32768
+supports_tools = true
+supports_vision = false
+
+[models.short]
+id = "moonshot-v1-8k"
+context_length = 8192
+supports_tools = true
+supports_vision = false
+
+[models.long]
+id = "moonshot-v1-128k"
+context_length = 131072
+supports_tools = true
+supports_vision = false
