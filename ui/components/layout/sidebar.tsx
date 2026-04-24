@@ -304,10 +304,14 @@ function SidebarItem({
       href={item.href as never}
       onKeyDown={onKeyDown}
       className={cn(
-        "relative flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors",
+        "group relative flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors",
+        // Tidepool: hover = text lift + a dim amber left hint (consistent
+        // with the animated active indicator). No filled bg — a plain
+        // rgba(255,255,255,0.04–0.08) rectangle reads as a stray layer on
+        // top of the already-glass sidebar.
         active
-          ? "bg-tp-glass-inner-hover text-tp-ink shadow-[inset_0_1px_0_var(--tp-glass-hl)]"
-          : "text-tp-ink-2 hover:bg-tp-glass-inner hover:text-tp-ink",
+          ? "text-tp-ink"
+          : "text-tp-ink-2 hover:text-tp-ink",
         collapsed && "justify-center px-0",
         nested && !collapsed && "pl-8",
       )}
@@ -330,7 +334,21 @@ function SidebarItem({
             mass: 0.6,
           }}
         />
-      ) : null}
+      ) : (
+        // Dim amber tick that appears on hover only — previews the active
+        // indicator without the layoutId dance (kept separate so it doesn't
+        // fight the animated bar when the user hovers a sibling).
+        <span
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute left-[-6px] top-1/2 h-3 w-[2px] -translate-y-1/2 rounded-[2px]",
+            "opacity-0 transition-opacity duration-150 group-hover:opacity-60",
+          )}
+          style={{
+            background: "var(--tp-amber)",
+          }}
+        />
+      )}
       <Icon className="h-[14px] w-[14px] shrink-0 opacity-80" />
       {collapsed ? null : <span className="truncate">{label}</span>}
     </Link>
@@ -436,9 +454,11 @@ function SidebarGroup({
         data-testid={`sidebar-group-toggle-${group.id}`}
         className={cn(
           "relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors",
+          // Same "no filled-bg hover" rule as SidebarItem — full-width
+          // rectangles on glass read as a stray layer.
           hasActiveChild
             ? "font-medium text-tp-ink"
-            : "text-tp-ink-2 hover:bg-tp-glass-inner hover:text-tp-ink",
+            : "text-tp-ink-2 hover:text-tp-ink",
         )}
       >
         <Icon className="h-[14px] w-[14px] shrink-0 opacity-80" />
