@@ -171,9 +171,13 @@
     --tp-bg-a: #1a120d;
     --tp-bg-b: #25170f;
     --tp-bg-c: #1e1410;
-    --tp-aurora-1: oklch(0.55 0.18 55 / 0.28);
-    --tp-aurora-2: oklch(0.52 0.18 32 / 0.24);
-    --tp-aurora-3: oklch(0.48 0.15 15 / 0.20);
+    /* Dark-mode aurora was bleeding a visible bright strip through the
+       sidebar↔main gap — halved alphas keep the warm ambient feel while
+       closing the contrast gap between glass panels and the exposed
+       aurora between them. */
+    --tp-aurora-1: oklch(0.55 0.18 55 / 0.14);
+    --tp-aurora-2: oklch(0.52 0.18 32 / 0.12);
+    --tp-aurora-3: oklch(0.48 0.15 15 / 0.10);
 
     --tp-glass: oklch(0.22 0.02 55 / 0.5);
     --tp-glass-2: oklch(0.25 0.025 55 / 0.65);
