@@ -13,6 +13,13 @@ from __future__ import annotations
 from corlinman_providers.anthropic_provider import AnthropicProvider
 from corlinman_providers.base import CorlinmanProvider, ProviderChunk
 from corlinman_providers.china import DeepSeekProvider, GLMProvider, QwenProvider
+from corlinman_providers.declarative import (
+    DeclarativeProvider,
+    DeclarativeProviderSpec,
+    ModelSpec,
+    load_all_specs,
+    load_spec_from_toml,
+)
 from corlinman_providers.failover import (
     AuthError,
     AuthPermanentError,
@@ -41,12 +48,15 @@ __all__ = [
     "ContextOverflowError",
     "CorlinmanError",
     "CorlinmanProvider",
+    "DeclarativeProvider",
+    "DeclarativeProviderSpec",
     "DeepSeekProvider",
     "EmbeddingSpec",
     "FormatError",
     "GLMProvider",
     "GoogleProvider",
     "ModelNotFoundError",
+    "ModelSpec",
     "OpenAICompatibleProvider",
     "OpenAIProvider",
     "OverloadedError",
@@ -57,5 +67,7 @@ __all__ = [
     "QwenProvider",
     "RateLimitError",
     "TimeoutError",
+    "load_all_specs",
+    "load_spec_from_toml",
     "resolve",
 ]
