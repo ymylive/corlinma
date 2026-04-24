@@ -424,6 +424,86 @@ export function fetchConfigSchema(): Promise<unknown> {
 }
 
 // ---------------------------------------------------------------------------
+// Channel enable toggle — convenience wrappers over /admin/config that
+// mutate only the `enabled` field of `[channels.qq]` / `[channels.telegram]`
+// while preserving the rest of the TOML (including comments and ordering).
+//
+// Regex-scoped to a single `enabled = true|false` line inside the addressed
+// section header. Trailing comments on that line are preserved. If the
+// section or the `enabled` key is missing, it's appended/inserted rather
+// than touching anything else.
+// ---------------------------------------------------------------------------
+
+export type ChannelName = "qq" | "telegram";
+
+/** Read the current `enabled` flag for a channel from a TOML string. */
+export function readChannelEnabled(toml: string, channel: ChannelName): boolean {
+  const headerRe = new RegExp(`^\\[channels\\.${channel}\\]\\s*$`, "m");
+  const headerMatch = headerRe.exec(toml);
+  if (!headerMatch) return false;
+  const body = sectionBody(toml, headerMatch.index + headerMatch[0].length);
+  const enabledMatch = /^\s*enabled\s*=\s*(true|false)/m.exec(body);
+  return enabledMatch?.[1] === "true";
+}
+
+/**
+ * Return `toml` with the `enabled` field of `[channels.<channel>]` set to
+ * `next`. Creates the section if absent. Preserves the rest of the file.
+ * Exported for unit testing — prefer `setChannelEnabled()` in UI code.
+ */
+export function patchChannelEnabled(
+  toml: string,
+  channel: ChannelName,
+  next: boolean,
+): string {
+  const header = `[channels.${channel}]`;
+  const headerRe = new RegExp(`^\\[channels\\.${channel}\\]\\s*$`, "m");
+  const headerMatch = headerRe.exec(toml);
+
+  if (!headerMatch) {
+    const sep = toml.endsWith("\n\n") ? "" : toml.endsWith("\n") ? "\n" : "\n\n";
+    return `${toml}${sep}${header}\nenabled = ${next}\n`;
+  }
+
+  const headerStart = headerMatch.index;
+  const headerEnd = headerStart + headerMatch[0].length;
+  const body = sectionBody(toml, headerEnd);
+  const bodyEnd = headerEnd + body.length;
+
+  const enabledRe = /^(\s*enabled\s*=\s*)(true|false)/m;
+  if (enabledRe.test(body)) {
+    const newBody = body.replace(enabledRe, `$1${next}`);
+    return toml.slice(0, headerEnd) + newBody + toml.slice(bodyEnd);
+  }
+
+  // Section exists but lacks an `enabled` line — insert right after header.
+  const insertion = `\nenabled = ${next}`;
+  return toml.slice(0, headerEnd) + insertion + body + toml.slice(bodyEnd);
+}
+
+/** Extract the body of a TOML section starting at `from` up to the next `^\[` header or EOF. */
+function sectionBody(toml: string, from: number): string {
+  const rest = toml.slice(from);
+  const nextHeader = /\n\[/.exec(rest);
+  return nextHeader ? rest.slice(0, nextHeader.index) : rest;
+}
+
+/**
+ * Fetch current config, flip `channels.<channel>.enabled`, POST back.
+ * Returns the raw `/admin/config` response — callers should inspect
+ * `status === "invalid"` and surface `issues` to the user (e.g. Telegram
+ * rejecting enable when `bot_token` is missing).
+ */
+export async function setChannelEnabled(
+  channel: ChannelName,
+  enabled: boolean,
+): Promise<ConfigPostResponse> {
+  const current = await fetchConfig();
+  const nextToml = patchChannelEnabled(current.toml, channel, enabled);
+  return postConfig(nextToml, false);
+}
+
+// ---------------------------------------------------------------------------
 // S6 T5 — Models admin surface
 // ---------------------------------------------------------------------------
 

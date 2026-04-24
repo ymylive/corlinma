@@ -7,6 +7,7 @@ import { Loader2, QrCode, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { StreamPill } from "@/components/ui/stream-pill";
+import { ChannelEnableSwitch } from "@/components/channels/channel-enable-switch";
 import type { QqConnection } from "./qq-util";
 import { streamStateFor } from "./qq-util";
 
@@ -113,6 +114,11 @@ export function QqHero({
 
         <div className="mt-1 flex flex-wrap items-center gap-2.5">
           <StreamPill state={streamState} rate={t(`channels.qq.tp.pillRate.${streamState}`)} />
+
+          <ChannelEnableSwitch
+            channel="qq"
+            invalidateOnSuccess={[["qq-status"], ["qq-recent"]]}
+          />
 
           <button
             type="button"

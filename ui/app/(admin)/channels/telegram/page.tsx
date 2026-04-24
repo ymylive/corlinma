@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { GlassPanel } from "@/components/ui/glass-panel";
 import { StatChip } from "@/components/ui/stat-chip";
 import { StreamPill, type StreamState } from "@/components/ui/stream-pill";
+import { ChannelEnableSwitch } from "@/components/channels/channel-enable-switch";
 import {
   FilterChipGroup,
   type FilterChipOption,
@@ -308,6 +309,10 @@ function TelegramHero({
         </p>
 
         <div className="mt-1 flex flex-wrap items-center gap-2.5">
+          <ChannelEnableSwitch
+            channel="telegram"
+            invalidateOnSuccess={[["telegram-status"], ["telegram-messages"]]}
+          />
           <button
             type="button"
             onClick={onSendTest}
