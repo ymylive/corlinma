@@ -1,0 +1,590 @@
+//! Async repos for the three evolution tables.
+//!
+//! Phase 2 keeps these as concrete `Sqlite*Repo` structs over `SqlitePool`
+//! rather than traits — there's exactly one backing store and adding a
+//! trait now buys nothing. Make them traits when (if) we federate.
+//!
+//! Time-handling convention: callers pass `unix_now_ms()` from
+//! [`crate::now_ms()`] or supply explicit timestamps for replay/test paths.
+
+use serde_json::Value as Json;
+use sqlx::{Row, SqlitePool};
+
+use crate::types::{
+    EvolutionHistory, EvolutionKind, EvolutionProposal, EvolutionRisk, EvolutionSignal,
+    EvolutionStatus, ProposalId, ShadowMetrics, SignalSeverity,
+};
+
+#[derive(Debug, thiserror::Error)]
+pub enum RepoError {
+    #[error("sqlite: {0}")]
+    Sqlite(#[from] sqlx::Error),
+    #[error("malformed json column '{column}': {source}")]
+    MalformedJson {
+        column: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("malformed enum '{column}': {value}")]
+    MalformedEnum { column: &'static str, value: String },
+    #[error("not found: {0}")]
+    NotFound(String),
+}
+
+// ---------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct SignalsRepo {
+    pool: SqlitePool,
+}
+
+impl SignalsRepo {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Insert one signal. Returns the autoincrement id.
+    pub async fn insert(&self, signal: &EvolutionSignal) -> Result<i64, RepoError> {
+        let payload = serde_json::to_string(&signal.payload_json).map_err(|source| {
+            RepoError::MalformedJson {
+                column: "payload_json",
+                source,
+            }
+        })?;
+        let row = sqlx::query(
+            r#"INSERT INTO evolution_signals
+                 (event_kind, target, severity, payload_json, trace_id, session_id, observed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               RETURNING id"#,
+        )
+        .bind(&signal.event_kind)
+        .bind(&signal.target)
+        .bind(signal.severity.as_str())
+        .bind(payload)
+        .bind(&signal.trace_id)
+        .bind(&signal.session_id)
+        .bind(signal.observed_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("id"))
+    }
+
+    /// Read signals observed in `[since_ms, now]`, optionally filtered by
+    /// `event_kind`. Used by the Python engine when clustering.
+    pub async fn list_since(
+        &self,
+        since_ms: i64,
+        event_kind: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<EvolutionSignal>, RepoError> {
+        let rows = if let Some(kind) = event_kind {
+            sqlx::query(
+                r#"SELECT id, event_kind, target, severity, payload_json,
+                          trace_id, session_id, observed_at
+                   FROM evolution_signals
+                   WHERE observed_at >= ? AND event_kind = ?
+                   ORDER BY observed_at ASC
+                   LIMIT ?"#,
+            )
+            .bind(since_ms)
+            .bind(kind)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"SELECT id, event_kind, target, severity, payload_json,
+                          trace_id, session_id, observed_at
+                   FROM evolution_signals
+                   WHERE observed_at >= ?
+                   ORDER BY observed_at ASC
+                   LIMIT ?"#,
+            )
+            .bind(since_ms)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        rows.into_iter()
+            .map(|r| {
+                let severity_raw: String = r.get("severity");
+                let severity = severity_raw.parse::<SignalSeverity>().map_err(|_| {
+                    RepoError::MalformedEnum {
+                        column: "severity",
+                        value: severity_raw,
+                    }
+                })?;
+                let payload_str: String = r.get("payload_json");
+                let payload_json: Json = serde_json::from_str(&payload_str).map_err(|source| {
+                    RepoError::MalformedJson {
+                        column: "payload_json",
+                        source,
+                    }
+                })?;
+                Ok(EvolutionSignal {
+                    id: Some(r.get::<i64, _>("id")),
+                    event_kind: r.get("event_kind"),
+                    target: r.get("target"),
+                    severity,
+                    payload_json,
+                    trace_id: r.get("trace_id"),
+                    session_id: r.get("session_id"),
+                    observed_at: r.get("observed_at"),
+                })
+            })
+            .collect()
+    }
+
+    /// Delete signals older than `before_ms`. Returns rows affected.
+    pub async fn prune_before(&self, before_ms: i64) -> Result<u64, RepoError> {
+        let res = sqlx::query("DELETE FROM evolution_signals WHERE observed_at < ?")
+            .bind(before_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proposals
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct ProposalsRepo {
+    pool: SqlitePool,
+}
+
+impl ProposalsRepo {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn insert(&self, proposal: &EvolutionProposal) -> Result<(), RepoError> {
+        let signal_ids = serde_json::to_string(&proposal.signal_ids).map_err(|source| {
+            RepoError::MalformedJson {
+                column: "signal_ids",
+                source,
+            }
+        })?;
+        let trace_ids = serde_json::to_string(&proposal.trace_ids).map_err(|source| {
+            RepoError::MalformedJson {
+                column: "trace_ids",
+                source,
+            }
+        })?;
+        let shadow_metrics = match &proposal.shadow_metrics {
+            Some(m) => {
+                Some(
+                    serde_json::to_string(m).map_err(|source| RepoError::MalformedJson {
+                        column: "shadow_metrics",
+                        source,
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        sqlx::query(
+            r#"INSERT INTO evolution_proposals
+                 (id, kind, target, diff, reasoning, risk, budget_cost, status,
+                  shadow_metrics, signal_ids, trace_ids,
+                  created_at, decided_at, decided_by, applied_at, rollback_of)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(proposal.id.as_str())
+        .bind(proposal.kind.as_str())
+        .bind(&proposal.target)
+        .bind(&proposal.diff)
+        .bind(&proposal.reasoning)
+        .bind(proposal.risk.as_str())
+        .bind(proposal.budget_cost as i64)
+        .bind(proposal.status.as_str())
+        .bind(shadow_metrics)
+        .bind(signal_ids)
+        .bind(trace_ids)
+        .bind(proposal.created_at)
+        .bind(proposal.decided_at)
+        .bind(&proposal.decided_by)
+        .bind(proposal.applied_at)
+        .bind(proposal.rollback_of.as_ref().map(|p| p.as_str()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get(&self, id: &ProposalId) -> Result<EvolutionProposal, RepoError> {
+        let row = sqlx::query(
+            r#"SELECT id, kind, target, diff, reasoning, risk, budget_cost, status,
+                      shadow_metrics, signal_ids, trace_ids,
+                      created_at, decided_at, decided_by, applied_at, rollback_of
+               FROM evolution_proposals WHERE id = ?"#,
+        )
+        .bind(id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let row = row.ok_or_else(|| RepoError::NotFound(id.0.clone()))?;
+        decode_proposal(row)
+    }
+
+    pub async fn list_by_status(
+        &self,
+        status: EvolutionStatus,
+        limit: i64,
+    ) -> Result<Vec<EvolutionProposal>, RepoError> {
+        let rows = sqlx::query(
+            r#"SELECT id, kind, target, diff, reasoning, risk, budget_cost, status,
+                      shadow_metrics, signal_ids, trace_ids,
+                      created_at, decided_at, decided_by, applied_at, rollback_of
+               FROM evolution_proposals
+               WHERE status = ?
+               ORDER BY created_at DESC
+               LIMIT ?"#,
+        )
+        .bind(status.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(decode_proposal).collect()
+    }
+
+    /// Patch proposal status + decided_at + decided_by atomically. Used by
+    /// the admin API on approve/deny.
+    pub async fn set_decision(
+        &self,
+        id: &ProposalId,
+        new_status: EvolutionStatus,
+        decided_at_ms: i64,
+        decided_by: &str,
+    ) -> Result<(), RepoError> {
+        let res = sqlx::query(
+            "UPDATE evolution_proposals
+                SET status = ?, decided_at = ?, decided_by = ?
+              WHERE id = ?",
+        )
+        .bind(new_status.as_str())
+        .bind(decided_at_ms)
+        .bind(decided_by)
+        .bind(id.as_str())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(RepoError::NotFound(id.0.clone()));
+        }
+        Ok(())
+    }
+
+    /// Patch status + applied_at when the EvolutionApplier finishes.
+    pub async fn mark_applied(&self, id: &ProposalId, applied_at_ms: i64) -> Result<(), RepoError> {
+        let res = sqlx::query(
+            "UPDATE evolution_proposals
+                SET status = 'applied', applied_at = ?
+              WHERE id = ?",
+        )
+        .bind(applied_at_ms)
+        .bind(id.as_str())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(RepoError::NotFound(id.0.clone()));
+        }
+        Ok(())
+    }
+}
+
+fn decode_proposal(row: sqlx::sqlite::SqliteRow) -> Result<EvolutionProposal, RepoError> {
+    let kind_raw: String = row.get("kind");
+    let kind = kind_raw
+        .parse::<EvolutionKind>()
+        .map_err(|_| RepoError::MalformedEnum {
+            column: "kind",
+            value: kind_raw,
+        })?;
+    let risk_raw: String = row.get("risk");
+    let risk = risk_raw
+        .parse::<EvolutionRisk>()
+        .map_err(|_| RepoError::MalformedEnum {
+            column: "risk",
+            value: risk_raw,
+        })?;
+    let status_raw: String = row.get("status");
+    let status = status_raw
+        .parse::<EvolutionStatus>()
+        .map_err(|_| RepoError::MalformedEnum {
+            column: "status",
+            value: status_raw,
+        })?;
+
+    let signal_ids: Vec<i64> =
+        serde_json::from_str(&row.get::<String, _>("signal_ids")).map_err(|source| {
+            RepoError::MalformedJson {
+                column: "signal_ids",
+                source,
+            }
+        })?;
+    let trace_ids: Vec<String> =
+        serde_json::from_str(&row.get::<String, _>("trace_ids")).map_err(|source| {
+            RepoError::MalformedJson {
+                column: "trace_ids",
+                source,
+            }
+        })?;
+    let shadow_metrics: Option<ShadowMetrics> = match row.get::<Option<String>, _>("shadow_metrics")
+    {
+        Some(s) => Some(
+            serde_json::from_str(&s).map_err(|source| RepoError::MalformedJson {
+                column: "shadow_metrics",
+                source,
+            })?,
+        ),
+        None => None,
+    };
+
+    Ok(EvolutionProposal {
+        id: ProposalId(row.get("id")),
+        kind,
+        target: row.get("target"),
+        diff: row.get("diff"),
+        reasoning: row.get("reasoning"),
+        risk,
+        budget_cost: row.get::<i64, _>("budget_cost") as u32,
+        status,
+        shadow_metrics,
+        signal_ids,
+        trace_ids,
+        created_at: row.get("created_at"),
+        decided_at: row.get("decided_at"),
+        decided_by: row.get("decided_by"),
+        applied_at: row.get("applied_at"),
+        rollback_of: row.get::<Option<String>, _>("rollback_of").map(ProposalId),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct HistoryRepo {
+    pool: SqlitePool,
+}
+
+impl HistoryRepo {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn insert(&self, h: &EvolutionHistory) -> Result<i64, RepoError> {
+        let metrics = serde_json::to_string(&h.metrics_baseline).map_err(|source| {
+            RepoError::MalformedJson {
+                column: "metrics_baseline",
+                source,
+            }
+        })?;
+        let row = sqlx::query(
+            r#"INSERT INTO evolution_history
+                 (proposal_id, kind, target, before_sha, after_sha,
+                  inverse_diff, metrics_baseline, applied_at,
+                  rolled_back_at, rollback_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               RETURNING id"#,
+        )
+        .bind(h.proposal_id.as_str())
+        .bind(h.kind.as_str())
+        .bind(&h.target)
+        .bind(&h.before_sha)
+        .bind(&h.after_sha)
+        .bind(&h.inverse_diff)
+        .bind(metrics)
+        .bind(h.applied_at)
+        .bind(h.rolled_back_at)
+        .bind(&h.rollback_reason)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("id"))
+    }
+
+    pub async fn mark_rolled_back(
+        &self,
+        proposal_id: &ProposalId,
+        rolled_back_at_ms: i64,
+        reason: &str,
+    ) -> Result<(), RepoError> {
+        let res = sqlx::query(
+            "UPDATE evolution_history
+                SET rolled_back_at = ?, rollback_reason = ?
+              WHERE proposal_id = ?",
+        )
+        .bind(rolled_back_at_ms)
+        .bind(reason)
+        .bind(proposal_id.as_str())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(RepoError::NotFound(proposal_id.0.clone()));
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::EvolutionStore;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    async fn fresh_store() -> (TempDir, EvolutionStore) {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("evolution.sqlite");
+        let store = EvolutionStore::open(&path).await.unwrap();
+        (tmp, store)
+    }
+
+    #[tokio::test]
+    async fn signals_insert_and_list_round_trip() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = SignalsRepo::new(store.pool().clone());
+        let id = repo
+            .insert(&EvolutionSignal {
+                id: None,
+                event_kind: "tool.call.failed".into(),
+                target: Some("web_search".into()),
+                severity: SignalSeverity::Error,
+                payload_json: json!({"reason": "timeout"}),
+                trace_id: Some("t1".into()),
+                session_id: Some("s1".into()),
+                observed_at: 1_000,
+            })
+            .await
+            .unwrap();
+        assert!(id > 0);
+        let rows = repo
+            .list_since(0, Some("tool.call.failed"), 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target.as_deref(), Some("web_search"));
+        assert_eq!(rows[0].payload_json["reason"], "timeout");
+    }
+
+    #[tokio::test]
+    async fn proposals_decision_flow() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let id = ProposalId::new("evol-test-001");
+        repo.insert(&EvolutionProposal {
+            id: id.clone(),
+            kind: EvolutionKind::MemoryOp,
+            target: "merge_chunks:42,43".into(),
+            diff: String::new(),
+            reasoning: "two near-duplicate chunks".into(),
+            risk: EvolutionRisk::Low,
+            budget_cost: 0,
+            status: EvolutionStatus::Pending,
+            shadow_metrics: None,
+            signal_ids: vec![1, 2, 3],
+            trace_ids: vec!["t1".into()],
+            created_at: 1_000,
+            decided_at: None,
+            decided_by: None,
+            applied_at: None,
+            rollback_of: None,
+        })
+        .await
+        .unwrap();
+
+        // Pending list
+        let pending = repo
+            .list_by_status(EvolutionStatus::Pending, 10)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+
+        // Approve
+        repo.set_decision(&id, EvolutionStatus::Approved, 2_000, "operator")
+            .await
+            .unwrap();
+        let after = repo.get(&id).await.unwrap();
+        assert_eq!(after.status, EvolutionStatus::Approved);
+        assert_eq!(after.decided_at, Some(2_000));
+        assert_eq!(after.decided_by.as_deref(), Some("operator"));
+
+        // Apply
+        repo.mark_applied(&id, 3_000).await.unwrap();
+        let after = repo.get(&id).await.unwrap();
+        assert_eq!(after.status, EvolutionStatus::Applied);
+        assert_eq!(after.applied_at, Some(3_000));
+    }
+
+    #[tokio::test]
+    async fn history_insert_and_rollback() {
+        let (_tmp, store) = fresh_store().await;
+        // Need a proposal first to satisfy FK.
+        let proposals = ProposalsRepo::new(store.pool().clone());
+        let pid = ProposalId::new("evol-test-002");
+        proposals
+            .insert(&EvolutionProposal {
+                id: pid.clone(),
+                kind: EvolutionKind::TagRebalance,
+                target: "tag_tree".into(),
+                diff: String::new(),
+                reasoning: String::new(),
+                risk: EvolutionRisk::Low,
+                budget_cost: 0,
+                status: EvolutionStatus::Applied,
+                shadow_metrics: None,
+                signal_ids: vec![],
+                trace_ids: vec![],
+                created_at: 1_000,
+                decided_at: Some(2_000),
+                decided_by: Some("auto".into()),
+                applied_at: Some(3_000),
+                rollback_of: None,
+            })
+            .await
+            .unwrap();
+
+        let history = HistoryRepo::new(store.pool().clone());
+        let hid = history
+            .insert(&EvolutionHistory {
+                id: None,
+                proposal_id: pid.clone(),
+                kind: EvolutionKind::TagRebalance,
+                target: "tag_tree".into(),
+                before_sha: "abc".into(),
+                after_sha: "def".into(),
+                inverse_diff: "noop".into(),
+                metrics_baseline: serde_json::json!({"err_rate": 0.02}),
+                applied_at: 3_000,
+                rolled_back_at: None,
+                rollback_reason: None,
+            })
+            .await
+            .unwrap();
+        assert!(hid > 0);
+
+        history
+            .mark_rolled_back(&pid, 4_000, "metrics regression")
+            .await
+            .unwrap();
+        // No getter yet — verify via raw query
+        let row: (Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT rolled_back_at, rollback_reason FROM evolution_history WHERE proposal_id = ?",
+        )
+        .bind(pid.as_str())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(row.0, Some(4_000));
+        assert_eq!(row.1.as_deref(), Some("metrics regression"));
+    }
+}
