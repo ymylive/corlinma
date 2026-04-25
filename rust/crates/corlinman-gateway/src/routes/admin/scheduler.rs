@@ -122,6 +122,7 @@ fn action_kind(a: &corlinman_core::config::JobAction) -> &'static str {
     match a {
         corlinman_core::config::JobAction::RunAgent { .. } => "run_agent",
         corlinman_core::config::JobAction::RunTool { .. } => "run_tool",
+        corlinman_core::config::JobAction::Subprocess { .. } => "subprocess",
     }
 }
 

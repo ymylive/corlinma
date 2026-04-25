@@ -215,6 +215,53 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
                 observed_at: now_ms(),
             })
         }
+        // Phase 2 wave 2-B closed loop: scheduler-driven engine runs
+        // emit completion events. We persist them as low-severity
+        // signals so the *next* engine run sees its own predecessor's
+        // outcome — useful for spotting consecutive failures or
+        // proposal-generation regressions.
+        HookEvent::EngineRunCompleted {
+            run_id,
+            proposals_generated,
+            duration_ms,
+        } => {
+            let payload = json!({
+                "run_id": run_id,
+                "proposals_generated": proposals_generated,
+                "duration_ms": duration_ms,
+            });
+            Some(EvolutionSignal {
+                id: None,
+                event_kind: "engine.run.completed".into(),
+                target: Some(run_id.clone()),
+                severity: SignalSeverity::Info,
+                payload_json: payload,
+                trace_id: None,
+                session_id: None,
+                observed_at: now_ms(),
+            })
+        }
+        HookEvent::EngineRunFailed {
+            run_id,
+            error_kind,
+            exit_code,
+        } => {
+            let payload = json!({
+                "run_id": run_id,
+                "error_kind": error_kind,
+                "exit_code": exit_code,
+            });
+            Some(EvolutionSignal {
+                id: None,
+                event_kind: "engine.run.failed".into(),
+                target: Some(run_id.clone()),
+                severity: SignalSeverity::Error,
+                payload_json: payload,
+                trace_id: None,
+                session_id: None,
+                observed_at: now_ms(),
+            })
+        }
         // Other variants are not part of the curated set today. New
         // mappings (e.g. `session.ended` once the lifecycle gains a
         // terminal event, or `user.correction` once that hook lands) drop

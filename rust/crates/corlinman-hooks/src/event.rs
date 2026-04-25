@@ -111,6 +111,25 @@ pub enum HookEvent {
         value: f64,
         tags: BTreeMap<String, String>,
     },
+    /// The `corlinman-scheduler` ran a `JobAction::Subprocess` job whose
+    /// child exited 0 within the configured timeout. Phase 2 wave 2-B uses
+    /// this for the `evolution_engine` daily job; the `EvolutionObserver`
+    /// folds it into `evolution_signals` so a successful run shows up as
+    /// input to the *next* run — closing the loop.
+    EngineRunCompleted {
+        run_id: String,
+        proposals_generated: u64,
+        duration_ms: u64,
+    },
+    /// The `corlinman-scheduler` ran a `JobAction::Subprocess` job that
+    /// either exited non-zero or was killed by the runtime's timeout
+    /// guard. `error_kind` is one of `"exit_code"`, `"timeout"`,
+    /// `"spawn_failed"`. `exit_code` is `None` for spawn / timeout cases.
+    EngineRunFailed {
+        run_id: String,
+        error_kind: String,
+        exit_code: Option<i32>,
+    },
 }
 
 impl HookEvent {
@@ -131,6 +150,8 @@ impl HookEvent {
             Self::ApprovalDecided { .. } => "approval_decided",
             Self::RateLimitTriggered { .. } => "rate_limit_triggered",
             Self::Telemetry { .. } => "telemetry",
+            Self::EngineRunCompleted { .. } => "engine_run_completed",
+            Self::EngineRunFailed { .. } => "engine_run_failed",
         }
     }
 
@@ -150,7 +171,9 @@ impl HookEvent {
             | Self::ConfigChanged { .. }
             | Self::ToolCalled { .. }
             | Self::ApprovalDecided { .. }
-            | Self::Telemetry { .. } => None,
+            | Self::Telemetry { .. }
+            | Self::EngineRunCompleted { .. }
+            | Self::EngineRunFailed { .. } => None,
         }
     }
 }
