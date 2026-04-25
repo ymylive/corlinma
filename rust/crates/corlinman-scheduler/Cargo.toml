@@ -11,6 +11,7 @@ description = "Cron / periodic task scheduler; shares AppState with the gateway.
 [dependencies]
 corlinman-core = { path = "../corlinman-core" }
 corlinman-proto = { path = "../corlinman-proto" }
+corlinman-hooks = { path = "../corlinman-hooks" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -22,3 +23,9 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 time = { workspace = true }
+cron = { workspace = true }
+uuid = { workspace = true }
+chrono = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

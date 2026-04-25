@@ -917,8 +917,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "corlinman-core",
+ "corlinman-hooks",
  "corlinman-proto",
+ "cron",
  "futures",
  "serde",
  "serde_json",
@@ -927,6 +930,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

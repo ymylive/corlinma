@@ -85,6 +85,16 @@ fn all_event_samples() -> Vec<HookEvent> {
                 t
             },
         },
+        HookEvent::EngineRunCompleted {
+            run_id: "r1".into(),
+            proposals_generated: 3,
+            duration_ms: 420,
+        },
+        HookEvent::EngineRunFailed {
+            run_id: "r2".into(),
+            error_kind: "timeout".into(),
+            exit_code: None,
+        },
     ]
 }
 

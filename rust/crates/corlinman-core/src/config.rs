@@ -728,6 +728,30 @@ pub enum JobAction {
         #[serde(default)]
         args: serde_json::Value,
     },
+    /// Spawn an external program. Used by Phase 2 wave 2-B to schedule the
+    /// Python `corlinman-evolution-engine run-once` CLI as a daily job.
+    ///
+    /// `command` is resolved via `PATH` unless absolute. `args` defaults to
+    /// empty. `timeout_secs` defaults to 600 (10 min); the runtime hard-kills
+    /// the child once the deadline elapses. `working_dir` is optional;
+    /// defaults to the gateway's CWD when unset. `env` is a flat map merged
+    /// over the inherited environment so configs can pin DB paths without
+    /// exporting them globally.
+    Subprocess {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default = "default_subprocess_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default)]
+        working_dir: Option<std::path::PathBuf>,
+        #[serde(default)]
+        env: std::collections::BTreeMap<String, String>,
+    },
+}
+
+fn default_subprocess_timeout_secs() -> u64 {
+    600
 }
 
 // ---------------------------------------------------------------------------

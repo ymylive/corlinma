@@ -194,19 +194,33 @@ mode = "prompt"
 # allow_session_keys = ["scheduler:daily-brief", "scheduler:git-sync"]
 
 # ---------------------------------------------------------------------------
-# [[scheduler.jobs]] — cron-style background jobs (tokio-cron-scheduler).
-# action = { type = "run_agent", prompt = "..." }
-#        | { type = "run_tool",  plugin = "...", tool = "...", args = { ... } }
+# [[scheduler.jobs]] — cron-style background jobs. The `cron` field uses the
+# 7-field `sec min hour day month weekday year` format (the `cron` crate's
+# grammar — same as `corlinman doctor` validates).
+#
+# action variants:
+#   { type = "run_agent", prompt = "..." }
+#   { type = "run_tool",  plugin = "...", tool = "...", args = { ... } }
+#   { type = "subprocess", command = "...", args = [...], timeout_secs = 600,
+#                         working_dir = "...", env = { KEY = "val" } }
 # ---------------------------------------------------------------------------
 [[scheduler.jobs]]
 name = "daily-brief"
-cron = "0 8 * * *"
+cron = "0 0 8 * * * *"
 timezone = "Asia/Shanghai"
 action = { type = "run_agent", prompt = "生成今日简报" }
 
+# Phase 2 wave 2-B: run the Python EvolutionEngine once a day at 03:00 UTC.
+# Stdout/stderr fold into tracing; exit ≠ 0 emits the `engine.run.failed`
+# hook event so the EvolutionObserver records it as a signal.
+[[scheduler.jobs]]
+name = "evolution_engine"
+cron = "0 0 3 * * * *"
+action = { type = "subprocess", command = "corlinman-evolution-engine", args = ["run-once"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_EVOLUTION_DB = "/data/evolution.sqlite", CORLINMAN_KB_DB = "/data/kb.sqlite" } }
+
 # [[scheduler.jobs]]
 # name = "weekly-reindex"
-# cron = "0 3 * * 0"
+# cron = "0 0 3 * * 0 *"
 # action = { type = "run_tool", plugin = "vector", tool = "vector.reindex", args = { collection = "docs" } }
 
 # ---------------------------------------------------------------------------
