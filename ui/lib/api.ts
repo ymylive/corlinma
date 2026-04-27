@@ -892,3 +892,36 @@ export function denyEvolutionProposal(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Wave 1-C — weekly EvolutionProposal budget
+//
+// Mirrors GET /admin/evolution/budget on the gateway. `per_kind` may be empty
+// when no kind-level caps are configured; `enabled` is false by default until
+// the operator opts the gate in.
+// ---------------------------------------------------------------------------
+
+export interface BudgetSlot {
+  limit: number;
+  used: number;
+  remaining: number;
+}
+
+export interface BudgetPerKindEntry extends BudgetSlot {
+  kind: string;
+}
+
+export interface BudgetSnapshot {
+  enabled: boolean;
+  window_start_ms: number;
+  window_end_ms: number;
+  weekly_total: BudgetSlot;
+  per_kind: BudgetPerKindEntry[];
+}
+
+export async function fetchBudget(): Promise<BudgetSnapshot> {
+  const { MOCK_EVOLUTION_BUDGET } = await import("./mocks/evolution");
+  return apiFetch<BudgetSnapshot>("/admin/evolution/budget", {
+    mock: MOCK_EVOLUTION_BUDGET,
+  });
+}
+

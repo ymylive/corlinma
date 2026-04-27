@@ -719,6 +719,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
+ "corlinman-evolution",
  "dirs",
  "http",
  "once_cell",
@@ -746,6 +747,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "sqlx",

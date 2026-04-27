@@ -78,13 +78,30 @@ default_err_rate_delta_pct    = 50.0    # +50% over baseline error count → rev
 default_p95_latency_delta_pct = 25.0    # +25% over baseline p95 latency → revert
 signal_window_secs            = 1800    # symmetric pre/post-apply sliding window
 min_baseline_signals          = 5       # quiet targets need ≥ 5 baseline signals
+
+[evolution.budget]
+enabled       = false                   # opt-in master switch (W1-C)
+weekly_total  = 15                      # cap per ISO week across ALL kinds
+
+[evolution.budget.per_kind]              # per-kind caps; missing kind → only weekly_total applies
+memory_op       = 5
+skill_update    = 3
+agent_card      = 5
+prompt_template = 1
+tool_policy     = 1
+new_skill       = 2
+tag_rebalance   = 3
+retry_tuning    = 3
 ```
 
 `sandbox_kind = "docker"` is reserved for Phase 4 and rejected on load.
 `[evolution.auto_rollback].enabled = false` ships off so applies don't
 surprise-revert before the monitor is fully wired; `metrics_baseline`
 is still captured at apply time so flipping the switch on later
-doesn't lose the audit data.
+doesn't lose the audit data. `[evolution.budget].enabled = false`
+similarly ships off so the engine doesn't start silently dropping
+proposals — `GET /admin/evolution/budget` is live regardless so the
+operator can preview the gauge before opting in.
 
 ## 3. Filesystem additions
 

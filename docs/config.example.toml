@@ -239,6 +239,27 @@ name = "auto_rollback"
 cron = "0 0 4 * * * *"
 action = { type = "subprocess", command = "corlinman-auto-rollback", args = ["run-once", "--config", "/data/config.toml"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_DATA_DIR = "/data" } }
 
+# Phase 3 wave 1-C: per-week / per-kind cap on EvolutionEngine proposal
+# filing. The Python engine reads this same TOML via `--budget-config`
+# (passed by the scheduler). When `enabled = false` the engine behaves
+# exactly like Phase 2 — no skip, no signal, no UI gating; flip on once
+# you've trued up `weekly_total` to your environment's signal volume.
+# The UI's `/admin/evolution/budget` endpoint serves the live snapshot
+# either way so operators can preview the gauge before opting in.
+[evolution.budget]
+enabled       = false
+weekly_total  = 15
+
+[evolution.budget.per_kind]
+memory_op       = 5
+skill_update    = 3
+agent_card      = 5
+prompt_template = 1
+tool_policy     = 1
+new_skill       = 2
+tag_rebalance   = 3
+retry_tuning    = 3
+
 # [[scheduler.jobs]]
 # name = "weekly-reindex"
 # cron = "0 0 3 * * 0 *"

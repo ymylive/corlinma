@@ -12,7 +12,9 @@ import { cn } from "@/lib/utils";
 import {
   approveEvolutionProposal,
   denyEvolutionProposal,
+  fetchBudget,
   fetchEvolutionPending,
+  type BudgetSnapshot,
   type EvolutionProposal,
 } from "@/lib/api";
 
@@ -202,10 +204,16 @@ export default function EvolutionPage() {
     [kinds, t],
   );
 
-  // Phase 2: the budget endpoint isn't shipped yet — total stays 0 and the
-  // chip surfaces "live in Phase 3" copy.
-  const budgetTotal = 0;
-  const budgetUsed = 0;
+  // Phase 3 W1-C: live from /admin/evolution/budget; falls back to 0/0 on error.
+  const budgetQuery = useQuery<BudgetSnapshot>({
+    queryKey: ["admin-evolution-budget"],
+    queryFn: fetchBudget,
+    refetchInterval: 5_000,
+    staleTime: 4_000,
+    retry: false,
+  });
+  const budgetTotal = budgetQuery.data?.weekly_total.limit ?? 0;
+  const budgetUsed = budgetQuery.data?.weekly_total.used ?? 0;
 
   const refresh = () => {
     void qc.invalidateQueries({ queryKey });

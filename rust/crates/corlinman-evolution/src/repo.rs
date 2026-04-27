@@ -9,11 +9,34 @@
 
 use serde_json::Value as Json;
 use sqlx::{Row, SqlitePool};
+use time::{Duration, OffsetDateTime, Time};
 
 use crate::types::{
     EvolutionHistory, EvolutionKind, EvolutionProposal, EvolutionRisk, EvolutionSignal,
     EvolutionStatus, ProposalId, ShadowMetrics, SignalSeverity,
 };
+
+/// `(start_ms, end_ms)` for the ISO week containing `now_ms`. Start is
+/// Monday 00:00:00 UTC inclusive; end is the following Monday 00:00:00
+/// UTC exclusive. Pure helper so the admin API can stamp the same window
+/// it queries against without re-deriving from a fresh `now`.
+///
+/// Wave 1-C uses this for the proposal-creation budget gate. The week
+/// boundary is pinned to UTC so the engine and the gateway agree on
+/// "this week" regardless of where the process runs.
+pub fn iso_week_window(now_ms: i64) -> (i64, i64) {
+    let nanos = (now_ms as i128).saturating_mul(1_000_000);
+    let now = OffsetDateTime::from_unix_timestamp_nanos(nanos)
+        .expect("now_ms within OffsetDateTime range");
+    // `number_days_from_monday()` → 0..=6 with Monday = 0.
+    let days_since_monday = now.weekday().number_days_from_monday() as i64;
+    let monday_date = now.date() - Duration::days(days_since_monday);
+    let start = monday_date.with_time(Time::MIDNIGHT).assume_utc();
+    let end = start + Duration::weeks(1);
+    let start_ms = (start.unix_timestamp_nanos() / 1_000_000) as i64;
+    let end_ms = (end.unix_timestamp_nanos() / 1_000_000) as i64;
+    (start_ms, end_ms)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RepoError {
@@ -408,6 +431,43 @@ impl ProposalsRepo {
             return Err(RepoError::NotFound(id.0.clone()));
         }
         Ok(())
+    }
+
+    /// Count proposals whose `created_at` falls within the current ISO
+    /// week (Monday 00:00 UTC inclusive → next Monday 00:00 UTC exclusive),
+    /// optionally filtered to one kind. The Python engine + admin API both
+    /// hit this for budget gating — every status counts (rolled-back rows
+    /// included), since the budget caps the *file rate*, not the net
+    /// effect of accepted proposals.
+    pub async fn count_proposals_in_iso_week(
+        &self,
+        now_ms: i64,
+        kind: Option<EvolutionKind>,
+    ) -> Result<u32, RepoError> {
+        let (start_ms, end_ms) = iso_week_window(now_ms);
+        let count: i64 = if let Some(k) = kind {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM evolution_proposals
+                  WHERE created_at >= ? AND created_at < ? AND kind = ?",
+            )
+            .bind(start_ms)
+            .bind(end_ms)
+            .bind(k.as_str())
+            .fetch_one(&self.pool)
+            .await?
+        } else {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM evolution_proposals
+                  WHERE created_at >= ? AND created_at < ?",
+            )
+            .bind(start_ms)
+            .bind(end_ms)
+            .fetch_one(&self.pool)
+            .await?
+        };
+        // SQLite COUNT can't be negative; clamp to u32 to satisfy the
+        // public type without leaking an i64 → u32 cast at the call site.
+        Ok(count.max(0).min(u32::MAX as i64) as u32)
     }
 
     /// Persist shadow run output: `eval_run_id`, `baseline_metrics_json`,
@@ -1095,5 +1155,123 @@ mod tests {
         let missing = ProposalId::new("evol-hist-nope");
         let err = history.latest_for_proposal(&missing).await.unwrap_err();
         assert!(matches!(err, RepoError::NotFound(_)), "got {err:?}");
+    }
+
+    // -------------------------------------------------------------------
+    // Wave 1-C: ISO week budget helpers.
+    // -------------------------------------------------------------------
+
+    /// `iso_week_window` for a Wednesday (2026-04-29T15:00:00Z) must
+    /// snap back to Monday 2026-04-27T00:00:00Z and forward to the
+    /// following Monday 2026-05-04T00:00:00Z. Pinning the boundary
+    /// against a literal calendar date is the only way to catch a
+    /// silent off-by-one in the weekday math.
+    #[test]
+    fn iso_week_window_round_trip() {
+        // 2026-04-29T15:00:00Z — a Wednesday → unix epoch 1_777_474_800s.
+        let now_ms: i64 = 1_777_474_800 * 1_000;
+        let (start_ms, end_ms) = iso_week_window(now_ms);
+
+        // Window must walk back to 2026-04-27T00:00:00Z (Monday) and
+        // forward to 2026-05-04T00:00:00Z (next Monday, exclusive).
+        let expect_start_ms: i64 = 1_777_248_000 * 1_000;
+        let expect_end_ms: i64 = 1_777_852_800 * 1_000;
+        assert_eq!(start_ms, expect_start_ms);
+        assert_eq!(end_ms, expect_end_ms);
+        assert_eq!(end_ms - start_ms, 7 * 24 * 3_600 * 1_000);
+    }
+
+    /// Helper: insert a proposal with a specific `created_at` and kind so
+    /// the week-window tests can pin behaviour without flakey clocks.
+    async fn insert_with_created_at(
+        repo: &ProposalsRepo,
+        id: &str,
+        kind: EvolutionKind,
+        created_at_ms: i64,
+    ) -> ProposalId {
+        let pid = ProposalId::new(id);
+        repo.insert(&EvolutionProposal {
+            id: pid.clone(),
+            kind,
+            target: format!("target-{id}"),
+            diff: String::new(),
+            reasoning: "fixture".into(),
+            risk: EvolutionRisk::Low,
+            budget_cost: 0,
+            status: EvolutionStatus::Pending,
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at: created_at_ms,
+            decided_at: None,
+            decided_by: None,
+            applied_at: None,
+            rollback_of: None,
+        })
+        .await
+        .unwrap();
+        pid
+    }
+
+    #[tokio::test]
+    async fn count_proposals_in_iso_week_filters_kind() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        // Pick a Wednesday inside a known week (same one the
+        // round-trip test pins) so all three "in window" rows live in
+        // the same Mon→Mon span.
+        let now_ms: i64 = 1_777_474_800 * 1_000;
+        let (start_ms, _end_ms) = iso_week_window(now_ms);
+        let in_window = start_ms + 3_600 * 1_000;
+        let ancient = start_ms - 30 * 24 * 3_600 * 1_000;
+
+        insert_with_created_at(&repo, "p-mem-1", EvolutionKind::MemoryOp, in_window).await;
+        insert_with_created_at(&repo, "p-mem-2", EvolutionKind::MemoryOp, in_window + 60_000)
+            .await;
+        insert_with_created_at(&repo, "p-skill", EvolutionKind::SkillUpdate, in_window + 120_000)
+            .await;
+        insert_with_created_at(&repo, "p-mem-old", EvolutionKind::MemoryOp, ancient).await;
+
+        let memory_only = repo
+            .count_proposals_in_iso_week(now_ms, Some(EvolutionKind::MemoryOp))
+            .await
+            .unwrap();
+        assert_eq!(memory_only, 2, "two memory_op rows in this week");
+        let total = repo
+            .count_proposals_in_iso_week(now_ms, None)
+            .await
+            .unwrap();
+        assert_eq!(total, 3, "ancient row never counts; in-window rows do");
+    }
+
+    #[tokio::test]
+    async fn count_proposals_in_iso_week_includes_rolled_back() {
+        // The budget caps the file rate, not the surviving rows. A
+        // proposal that landed and then auto-reverted still cost the
+        // engine one slot — flipping it to `rolled_back` must not
+        // refund that slot.
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let now_ms: i64 = 1_777_474_800 * 1_000;
+        let (start_ms, _end_ms) = iso_week_window(now_ms);
+        let in_window = start_ms + 3_600 * 1_000;
+
+        let pid =
+            insert_with_created_at(&repo, "p-rolled", EvolutionKind::MemoryOp, in_window).await;
+        // Walk the row through applied → rolled_back so the COUNT(*)
+        // path sees a non-pending status.
+        repo.set_decision(&pid, EvolutionStatus::Approved, in_window + 1, "op")
+            .await
+            .unwrap();
+        repo.mark_applied(&pid, in_window + 2).await.unwrap();
+        repo.mark_auto_rolled_back(&pid, in_window + 3, "test")
+            .await
+            .unwrap();
+
+        let count = repo
+            .count_proposals_in_iso_week(now_ms, Some(EvolutionKind::MemoryOp))
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "rolled_back row still counts toward the budget");
     }
 }

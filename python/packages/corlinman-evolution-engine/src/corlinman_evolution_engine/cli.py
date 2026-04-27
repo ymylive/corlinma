@@ -11,11 +11,17 @@ import asyncio
 import json
 import logging
 import sys
+import tomllib
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from corlinman_evolution_engine.engine import EngineConfig, EvolutionEngine, RunSummary
+from corlinman_evolution_engine.engine import (
+    BudgetConfig,
+    EngineConfig,
+    EvolutionEngine,
+    RunSummary,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -48,6 +54,16 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--similarity-threshold", type=float, default=0.95)
     run.add_argument("--max-chunks-scanned", type=int, default=5_000)
     run.add_argument(
+        "--budget-config",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the workspace TOML config containing "
+            "[evolution.budget]. When omitted, budget enforcement is "
+            "disabled (the Phase 2 / 3 W1-A behavior)."
+        ),
+    )
+    run.add_argument(
         "--json",
         action="store_true",
         help="Emit the run summary as JSON on stdout.",
@@ -61,6 +77,36 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_budget_config(path: Path | None) -> BudgetConfig:
+    """Parse ``[evolution.budget]`` out of the workspace TOML.
+
+    Missing file or missing section → default ``BudgetConfig`` (disabled).
+    Same passthrough path the Rust binaries take, just narrowed to one
+    section so the engine doesn't need to model the whole workspace config.
+    """
+    if path is None:
+        return BudgetConfig()
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except FileNotFoundError:
+        return BudgetConfig()
+    section = data.get("evolution", {}).get("budget", {})
+    if not isinstance(section, dict):
+        return BudgetConfig()
+    per_kind_raw = section.get("per_kind", {})
+    per_kind: dict[str, int] = {}
+    if isinstance(per_kind_raw, dict):
+        for k, v in per_kind_raw.items():
+            if isinstance(k, str) and isinstance(v, int):
+                per_kind[k] = v
+    return BudgetConfig(
+        enabled=bool(section.get("enabled", False)),
+        weekly_total=int(section.get("weekly_total", 15)),
+        per_kind=per_kind,
+    )
+
+
 def _config_from_args(args: argparse.Namespace) -> EngineConfig:
     return EngineConfig(
         db_path=args.evolution_db,
@@ -71,6 +117,7 @@ def _config_from_args(args: argparse.Namespace) -> EngineConfig:
         run_budget_seconds=args.run_budget_seconds,
         similarity_threshold=args.similarity_threshold,
         max_chunks_scanned=args.max_chunks_scanned,
+        budget=_load_budget_config(args.budget_config),
     )
 
 
@@ -85,6 +132,7 @@ def _print_summary(summary: RunSummary, *, as_json: bool) -> None:
     print(f"skipped_existing:      {summary.skipped_existing}")
     print(f"truncated_by_cap:      {summary.truncated_by_cap}")
     print(f"skipped_by_budget:     {summary.skipped_by_budget}")
+    print(f"proposals_skipped_budget: {summary.proposals_skipped_budget}")
     print(f"elapsed_seconds:       {summary.elapsed_seconds:.2f}")
     if summary.cluster_summaries:
         print("clusters:")

@@ -51,8 +51,8 @@ use axum::{
 };
 use corlinman_core::metrics::{EVOLUTION_PROPOSALS_DECISION, EVOLUTION_PROPOSALS_LISTED};
 use corlinman_evolution::{
-    EvolutionKind, EvolutionProposal, EvolutionStatus, EvolutionStore, ProposalId, ProposalsRepo,
-    RepoError,
+    iso_week_window, EvolutionKind, EvolutionProposal, EvolutionStatus, EvolutionStore, ProposalId,
+    ProposalsRepo, RepoError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -73,8 +73,13 @@ const MAX_LIMIT: i64 = 200;
 /// Sub-router for `/admin/evolution*`. Mounted by
 /// [`super::router_with_state`] inside the admin_auth middleware.
 pub fn router(state: AdminState) -> Router {
+    // `/admin/evolution/budget` is registered before `/admin/evolution/:id`
+    // so the literal path wins the axum router match (otherwise the
+    // wildcard captures `budget` and tries to look up a proposal of
+    // that id).
     Router::new()
         .route("/admin/evolution", get(list_proposals))
+        .route("/admin/evolution/budget", get(budget_snapshot))
         .route("/admin/evolution/:id", get(get_proposal))
         .route("/admin/evolution/:id/approve", post(approve_proposal))
         .route("/admin/evolution/:id/deny", post(deny_proposal))
@@ -364,6 +369,101 @@ async fn deny_proposal(
         "status": EvolutionStatus::Denied.as_str(),
     }))
     .into_response()
+}
+
+/// One row of the per-kind quota table. `limit` is the configured
+/// `[evolution.budget.per_kind.<kind>]` cap (zero entries are filtered
+/// out upstream); `used` is the live count of proposals filed in the
+/// current ISO week with that kind; `remaining` is `max(limit - used, 0)`
+/// so the UI gauge never renders a negative value when the engine
+/// briefly overshot before the gate noticed.
+#[derive(Debug, Serialize)]
+pub struct BudgetKindRow {
+    pub kind: String,
+    pub limit: u32,
+    pub used: u32,
+    pub remaining: u32,
+}
+
+/// Aggregate weekly_total quota — same triple as `BudgetKindRow` minus
+/// the kind label.
+#[derive(Debug, Serialize)]
+pub struct BudgetTotal {
+    pub limit: u32,
+    pub used: u32,
+    pub remaining: u32,
+}
+
+/// Wire shape for `GET /admin/evolution/budget`. Both the engine (for
+/// pre-flight checks) and the UI gauge consume this; the field names
+/// are pinned in the wave 1-C contract.
+#[derive(Debug, Serialize)]
+pub struct BudgetSnapshot {
+    pub enabled: bool,
+    pub window_start_ms: i64,
+    pub window_end_ms: i64,
+    pub weekly_total: BudgetTotal,
+    /// Sorted alphabetically by `kind` so diffs across snapshots stay
+    /// stable. Kinds present in `[evolution.budget.per_kind]` with a
+    /// limit of 0 are filtered (an explicit zero cap means "block this
+    /// kind entirely" — the engine handles that without a row in the
+    /// snapshot).
+    pub per_kind: Vec<BudgetKindRow>,
+}
+
+fn saturating_remaining(limit: u32, used: u32) -> u32 {
+    limit.saturating_sub(used)
+}
+
+async fn budget_snapshot(State(state): State<AdminState>) -> Response {
+    let Some(store) = state.evolution_store.as_ref() else {
+        return evolution_disabled();
+    };
+    let (repo, _) = resolve_handles(store);
+    let cfg = state.config.load_full();
+    let budget_cfg = &cfg.evolution.budget;
+    let now = now_ms();
+    let (window_start_ms, window_end_ms) = iso_week_window(now);
+
+    let weekly_used = match repo.count_proposals_in_iso_week(now, None).await {
+        Ok(n) => n,
+        Err(err) => return storage_error(err, "budget.count_total"),
+    };
+
+    // Walk per-kind in `BTreeMap` order (already alphabetical by enum
+    // ordering — the Default config order matches snake_case sort —
+    // but re-sort by serialized `kind` string to make the contract
+    // explicit and survive future reorderings of the enum).
+    let mut rows: Vec<BudgetKindRow> = Vec::with_capacity(budget_cfg.per_kind.len());
+    for (kind, limit) in budget_cfg.per_kind.iter() {
+        if *limit == 0 {
+            continue;
+        }
+        let used = match repo.count_proposals_in_iso_week(now, Some(*kind)).await {
+            Ok(n) => n,
+            Err(err) => return storage_error(err, "budget.count_kind"),
+        };
+        rows.push(BudgetKindRow {
+            kind: kind.as_str().to_string(),
+            limit: *limit,
+            used,
+            remaining: saturating_remaining(*limit, used),
+        });
+    }
+    rows.sort_by(|a, b| a.kind.cmp(&b.kind));
+
+    let snapshot = BudgetSnapshot {
+        enabled: budget_cfg.enabled,
+        window_start_ms,
+        window_end_ms,
+        weekly_total: BudgetTotal {
+            limit: budget_cfg.weekly_total,
+            used: weekly_used,
+            remaining: saturating_remaining(budget_cfg.weekly_total, weekly_used),
+        },
+        per_kind: rows,
+    };
+    Json(snapshot).into_response()
 }
 
 async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>) -> Response {

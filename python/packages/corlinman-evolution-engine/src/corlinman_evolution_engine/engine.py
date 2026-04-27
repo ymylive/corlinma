@@ -26,10 +26,12 @@ extracted skill → refinement) maps directly to a future
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from corlinman_evolution_engine.clustering import SignalCluster, cluster_signals
@@ -60,6 +62,24 @@ DEFAULT_HANDLERS: dict[str, KindHandler] = {
 
 
 @dataclass(frozen=True)
+class BudgetConfig:
+    """Per-week / per-kind cap on how many proposals a run may file.
+
+    Mirrors ``[evolution.budget]`` in the workspace TOML; populated by
+    ``cli.py`` from the ``--budget-config`` path. ``enabled=false`` reverts
+    to the Phase 2 / 3 W1-A behavior (no cap beyond ``max_proposals_per_run``).
+
+    A ``per_kind`` entry is the *only* extra gate for that kind on top of
+    ``weekly_total``. A kind missing from ``per_kind`` is bounded only by
+    ``weekly_total``.
+    """
+
+    enabled: bool = False
+    weekly_total: int = 15
+    per_kind: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class EngineConfig:
     """Knobs for one engine run."""
 
@@ -86,6 +106,9 @@ class EngineConfig:
     corresponding handlers land.
     """
 
+    budget: BudgetConfig = field(default_factory=BudgetConfig)
+    """Phase 3 W1-C: per-week / per-kind proposal cap. Default: disabled."""
+
 
 @dataclass
 class RunSummary:
@@ -98,9 +121,13 @@ class RunSummary:
     skipped_existing: int = 0
     truncated_by_cap: bool = False
     skipped_by_budget: bool = False
+    """Phase 2 / 3-W1-A flag: the ``run_budget_seconds`` wall clock expired."""
     elapsed_seconds: float = 0.0
     cluster_summaries: list[str] = field(default_factory=list)
     proposals_by_kind: dict[str, int] = field(default_factory=dict)
+    proposals_skipped_budget: int = 0
+    """Phase 3 W1-C counter: proposals dropped by the per-week / per-kind cap."""
+    budget_skips_by_kind: dict[str, int] = field(default_factory=dict)
 
 
 def _now_ms() -> int:
@@ -254,6 +281,25 @@ class EvolutionEngine:
                         summary.skipped_existing += 1
                         continue
 
+                    skip_reason = await _check_budget(
+                        evolution=evolution,
+                        kind=proposal.kind,
+                        budget=cfg.budget,
+                        now_ms=now_ms,
+                    )
+                    if skip_reason is not None:
+                        summary.proposals_skipped_budget += 1
+                        summary.budget_skips_by_kind[proposal.kind] = (
+                            summary.budget_skips_by_kind.get(proposal.kind, 0) + 1
+                        )
+                        logger.warning(
+                            "evolution: budget skip kind=%s target=%s reason=%s",
+                            proposal.kind,
+                            proposal.target,
+                            skip_reason,
+                        )
+                        continue
+
                     proposal_id = mint_proposal_id(
                         day_prefix, seq_offset + written + 1
                     )
@@ -270,6 +316,13 @@ class EvolutionEngine:
                     summary.proposals_by_kind[handler.kind] = kind_written
 
             summary.proposals_written = written
+
+            if summary.proposals_skipped_budget > 0:
+                await _emit_budget_signal(
+                    evolution=evolution,
+                    summary=summary,
+                    now_ms=now_ms,
+                )
 
         summary.elapsed_seconds = time.monotonic() - started_at
         logger.info(
@@ -309,3 +362,106 @@ async def _persist(
         trace_ids=proposal.trace_ids,
         created_at=created_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 W1-C: budget enforcement
+# ---------------------------------------------------------------------------
+
+
+def _iso_week_start_ms(now_ms: int) -> int:
+    """Monday 00:00:00 UTC of the ISO week containing ``now_ms``.
+
+    Mirrors the Rust ``ProposalsRepo::count_proposals_in_iso_week`` boundary
+    so both languages count the same window. ``datetime.weekday()`` returns
+    0 for Monday.
+    """
+    dt = datetime.fromtimestamp(now_ms / 1000, tz=UTC)
+    monday = dt - timedelta(days=dt.weekday())
+    monday_start = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(monday_start.timestamp() * 1000)
+
+
+async def _count_proposals_since(
+    evolution: EvolutionStore,
+    since_ms: int,
+    *,
+    kind: str | None,
+) -> int:
+    """Count rows in ``evolution_proposals`` with ``created_at >= since_ms``.
+
+    ``kind=None`` counts across all kinds (used for ``weekly_total``);
+    a non-None ``kind`` filters to one (used for ``per_kind`` caps). Same
+    SQL shape as the Rust ``ProposalsRepo::count_proposals_in_iso_week`` so
+    both languages read the same window.
+    """
+    if kind is None:
+        cursor = await evolution.conn.execute(
+            "SELECT COUNT(*) FROM evolution_proposals WHERE created_at >= ?",
+            (since_ms,),
+        )
+    else:
+        cursor = await evolution.conn.execute(
+            "SELECT COUNT(*) FROM evolution_proposals "
+            "WHERE created_at >= ? AND kind = ?",
+            (since_ms, kind),
+        )
+    row = await cursor.fetchone()
+    await cursor.close()
+    return int(row[0]) if row is not None else 0
+
+
+async def _check_budget(
+    *,
+    evolution: EvolutionStore,
+    kind: str,
+    budget: BudgetConfig,
+    now_ms: int,
+) -> str | None:
+    """Return ``None`` for green light, or a human-readable reason to skip.
+
+    Counts are recomputed per call so multiple skips in a single batch see
+    the new totals — once we hit a cap, every subsequent candidate of that
+    kind is skipped without an extra query past the count.
+    """
+    if not budget.enabled:
+        return None
+    week_start = _iso_week_start_ms(now_ms)
+    total_used = await _count_proposals_since(evolution, week_start, kind=None)
+    if total_used >= budget.weekly_total:
+        return f"weekly_total {budget.weekly_total} reached"
+    cap = budget.per_kind.get(kind)
+    if cap is not None:
+        kind_used = await _count_proposals_since(evolution, week_start, kind=kind)
+        if kind_used >= cap:
+            return f"per-kind {kind} cap {cap} reached"
+    return None
+
+
+async def _emit_budget_signal(
+    *,
+    evolution: EvolutionStore,
+    summary: RunSummary,
+    now_ms: int,
+) -> None:
+    """Insert one ``evolution.budget.exceeded`` signal summarising the run.
+
+    Emitted once per run (not per skip) to avoid signal spam. ``target`` is
+    the kind with the most skips this run; ties resolve alphabetically so
+    the signal is deterministic across replays.
+    """
+    skips = summary.budget_skips_by_kind
+    # Sort by (-count, kind) so highest-count wins; alphabetical breaks ties.
+    target_kind = min(skips.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+    payload = {
+        "weekly_total_used": summary.proposals_skipped_budget,
+        "per_kind_skips": dict(skips),
+    }
+    await evolution.conn.execute(
+        """INSERT INTO evolution_signals
+             (event_kind, target, severity, payload_json,
+              trace_id, session_id, observed_at)
+           VALUES ('evolution.budget.exceeded', ?, 'warn', ?, NULL, NULL, ?)""",
+        (target_kind, json.dumps(payload), now_ms),
+    )
+    await evolution.conn.commit()

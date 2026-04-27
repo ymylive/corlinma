@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use corlinman_evolution::EvolutionKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -1157,6 +1158,8 @@ pub struct EvolutionConfig {
     pub shadow: EvolutionShadowConfig,
     #[validate(nested)]
     pub auto_rollback: EvolutionAutoRollbackConfig,
+    #[validate(nested)]
+    pub budget: EvolutionBudgetConfig,
 }
 
 /// Tunables for the gateway's `EvolutionObserver` (Phase 2 wave 1-A). It
@@ -1318,6 +1321,53 @@ impl Default for AutoRollbackThresholds {
             default_p95_latency_delta_pct: 25.0,
             signal_window_secs: 1_800,
             min_baseline_signals: 5,
+        }
+    }
+}
+
+/// Tunables for the proposal-creation budget gate (Phase 3 wave 1-C).
+/// Caps how many proposals the engine may file per ISO week — both in
+/// total and per-kind — so a runaway clusterer can't flood the operator
+/// queue. The Python engine reads these via the JSON drop and aborts the
+/// `propose` step when a cap is reached; the gateway's
+/// `/admin/evolution/budget` endpoint surfaces the same numbers to the
+/// UI gauge.
+///
+/// * `enabled` — master switch. Off by default so existing deployments
+///   don't surprise-block on rollout; an operator opts in once the
+///   engine + UI both ship.
+/// * `weekly_total` — cap across all kinds inside the current ISO week
+///   (Monday 00:00 UTC, inclusive → next Monday 00:00 UTC, exclusive).
+/// * `per_kind` — sub-caps per `EvolutionKind`. A missing entry means
+///   "no per-kind cap; only `weekly_total` applies". `BTreeMap` (not
+///   `HashMap`) so JSON / TOML serialisation keeps deterministic order.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct EvolutionBudgetConfig {
+    pub enabled: bool,
+    #[validate(range(min = 0, max = 100_000))]
+    pub weekly_total: u32,
+    pub per_kind: BTreeMap<EvolutionKind, u32>,
+}
+
+impl Default for EvolutionBudgetConfig {
+    fn default() -> Self {
+        // Mirrors the documented defaults in the wave 1-C contract. Per-kind
+        // entries are populated even with `enabled = false` so the UI gauge
+        // can render the configured shape on first boot.
+        let mut per_kind = BTreeMap::new();
+        per_kind.insert(EvolutionKind::MemoryOp, 5);
+        per_kind.insert(EvolutionKind::SkillUpdate, 3);
+        per_kind.insert(EvolutionKind::AgentCard, 5);
+        per_kind.insert(EvolutionKind::PromptTemplate, 1);
+        per_kind.insert(EvolutionKind::ToolPolicy, 1);
+        per_kind.insert(EvolutionKind::NewSkill, 2);
+        per_kind.insert(EvolutionKind::TagRebalance, 3);
+        per_kind.insert(EvolutionKind::RetryTuning, 3);
+        Self {
+            enabled: false,
+            weekly_total: 15,
+            per_kind,
         }
     }
 }

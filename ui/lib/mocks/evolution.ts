@@ -6,9 +6,22 @@
  * paths reference it directly.
  */
 
-import type { EvolutionProposal } from "@/lib/api";
+import type { BudgetSnapshot, EvolutionProposal } from "@/lib/api";
 
 const NOW = Date.UTC(2026, 3, 25, 14, 0, 0); // matches currentDate
+const ONE_WEEK_MS = 1000 * 60 * 60 * 24 * 7;
+
+export const MOCK_EVOLUTION_BUDGET: BudgetSnapshot = {
+  enabled: true,
+  window_start_ms: NOW - ONE_WEEK_MS,
+  window_end_ms: NOW,
+  weekly_total: { limit: 15, used: 4, remaining: 11 },
+  per_kind: [
+    { kind: "memory_op", limit: 5, used: 2, remaining: 3 },
+    { kind: "skill_update", limit: 3, used: 1, remaining: 2 },
+    { kind: "tag_rebalance", limit: 4, used: 1, remaining: 3 },
+  ],
+};
 
 export const MOCK_EVOLUTION_PENDING: EvolutionProposal[] = [
   {

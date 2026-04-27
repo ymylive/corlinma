@@ -77,7 +77,7 @@ Goal: build the gates so Wave 2 kinds can land safely.
 |---|---|---|---|---|
 | **3-1A** | **ShadowTester** — eval-set runner + metrics collector + proposal annotation | Rust + Python | 4-5d | ✅ Done 2026-04-27 |
 | **3-1B** | **AutoRollback** — 72h grace window, per-kind threshold config, automatic revert + history link | Rust | 3-4d | ✅ Done 2026-04-27 |
-| **3-1C** | **Budget enforcement** — per-week / per-kind caps in config; engine respects; UI surfaces remaining quota | Rust + UI | 2-3d | TBD |
+| **3-1C** | **Budget enforcement** — per-week / per-kind caps in config; engine respects; UI surfaces remaining quota | Rust + UI | 2-3d | ✅ Done 2026-04-27 |
 
 **3-1A breakdown** (see `docs/design/shadow-tester.md`):
 - Step 1 ✅ — schema migration (`eval_run_id`, `baseline_metrics_json` columns); `[evolution.shadow]` config block; `corlinman-shadow-tester` crate scaffold.

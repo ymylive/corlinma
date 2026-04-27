@@ -9,6 +9,10 @@ repository.workspace = true
 description = "Shared types, errors, config schema, placeholder engine, cancel/backoff primitives. No I/O."
 
 [dependencies]
+# Wave 1-C budget cap: `EvolutionBudgetConfig` uses the typed `EvolutionKind`
+# enum as a `BTreeMap` key, so the schema crate has to live downstream of
+# `corlinman-evolution`. evolution itself has no core dep, so no cycle.
+corlinman-evolution = { path = "../corlinman-evolution" }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

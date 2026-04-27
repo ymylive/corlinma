@@ -12,6 +12,9 @@ description = "corlinman EvolutionLoop: signals/proposals/history data model + r
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Wave 1-C: `EvolutionKind` derives `JsonSchema` so `corlinman-core::Config`
+# can embed `BTreeMap<EvolutionKind, u32>` for the budget cap.
+schemars = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

@@ -6,6 +6,7 @@
 //! kept as `serde_json::Value` so we can evolve them without bumping the
 //! schema.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -34,7 +35,12 @@ impl std::fmt::Display for ProposalId {
 // Enums — serialized as snake_case strings to match the SQL TEXT columns.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize)]
+// `Ord`/`PartialOrd` so `BTreeMap<EvolutionKind, _>` (the W1-C budget map
+// in `corlinman-core::config`) sorts deterministically. `JsonSchema` so
+// the same type can appear in `Config`'s schema export.
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EvolutionKind {
     MemoryOp,
