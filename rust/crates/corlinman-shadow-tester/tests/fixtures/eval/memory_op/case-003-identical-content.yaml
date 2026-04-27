@@ -1,0 +1,16 @@
+description: >
+  Exact-duplicate content stored under two ids (e.g. re-indexed after a
+  file rename). Jaccard = 1.0. Proposal merges 1 and 2; simulator keeps
+  the lower id and retires the other.
+kb_seed:
+  - "INSERT INTO files(id, path, diary_name, checksum, mtime, size) VALUES (1, 'fx-003.md', 'fixture', 'h003', 0, 0);"
+  - "INSERT INTO chunks(id, file_id, chunk_index, content, namespace) VALUES (1, 1, 0, 'Phase 3 Wave 1-A introduces the ShadowTester crate between EvolutionEngine and the operator queue.', 'general');"
+  - "INSERT INTO chunks(id, file_id, chunk_index, content, namespace) VALUES (2, 1, 1, 'Phase 3 Wave 1-A introduces the ShadowTester crate between EvolutionEngine and the operator queue.', 'general');"
+proposal:
+  target: "merge_chunks:1,2"
+  reasoning: "Identical-content duplicate detected"
+  risk: high
+expected:
+  outcome: merged
+  rows_merged: 1
+  surviving_chunk_id: 1

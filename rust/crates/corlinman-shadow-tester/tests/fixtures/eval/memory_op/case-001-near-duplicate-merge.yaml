@@ -1,0 +1,16 @@
+description: >
+  Two paraphrase chunks differing by one synonym (Jaccard ~0.97). The
+  proposal targets a merge of chunks 1 and 2; the simulator should keep
+  chunk 1 as canonical and retire chunk 2.
+kb_seed:
+  - "INSERT INTO files(id, path, diary_name, checksum, mtime, size) VALUES (1, 'fx-001.md', 'fixture', 'h001', 0, 0);"
+  - "INSERT INTO chunks(id, file_id, chunk_index, content, namespace) VALUES (1, 1, 0, 'The quick brown fox jumps over the lazy dog at sunrise near the river.', 'general');"
+  - "INSERT INTO chunks(id, file_id, chunk_index, content, namespace) VALUES (2, 1, 1, 'The quick brown fox leaps over the lazy dog at sunrise near the river.', 'general');"
+proposal:
+  target: "merge_chunks:1,2"
+  reasoning: "Near-duplicate paraphrase pair detected by EvolutionEngine"
+  risk: high
+expected:
+  outcome: merged
+  rows_merged: 1
+  surviving_chunk_id: 1

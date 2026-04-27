@@ -11,7 +11,7 @@ use sqlx::{
     SqlitePool,
 };
 
-use crate::schema::SCHEMA_SQL;
+use crate::schema::{MIGRATIONS, SCHEMA_SQL};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
@@ -21,6 +21,8 @@ pub enum OpenError {
     Connect(String, sqlx::Error),
     #[error("apply SCHEMA_SQL: {0}")]
     ApplySchema(sqlx::Error),
+    #[error("apply migration {0}.{1}: {2}")]
+    ApplyMigration(&'static str, &'static str, sqlx::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,20 @@ impl EvolutionStore {
             .await
             .map_err(OpenError::ApplySchema)?;
 
+        // Idempotent migrations: pragma-check the target column before
+        // running each ALTER. Fresh DBs already have the columns from
+        // SCHEMA_SQL above (CREATE TABLE definition is the source of
+        // truth) and skip everything; existing pre-v0.3 DBs get the
+        // ALTERs in order and converge to the same end state.
+        for (table, column, ddl) in MIGRATIONS {
+            if !column_exists(&pool, table, column).await? {
+                sqlx::raw_sql(ddl)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| OpenError::ApplyMigration(table, column, e))?;
+            }
+        }
+
         Ok(Self { pool })
     }
 
@@ -62,6 +78,30 @@ impl EvolutionStore {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+}
+
+/// True iff `table.column` exists in the database. Backed by SQLite's
+/// `pragma_table_info` virtual table — works for any table SQLite knows
+/// about, no privileges required.
+async fn column_exists(
+    pool: &SqlitePool,
+    table: &'static str,
+    column: &'static str,
+) -> Result<bool, OpenError> {
+    // pragma_table_info doesn't support `?`-bound table names, so format
+    // it in. Both `table` and `column` are `'static` and only sourced
+    // from the [`MIGRATIONS`] constant (no user input), so this is safe
+    // and produces a stable query the planner can cache.
+    let sql = format!(
+        "SELECT 1 FROM pragma_table_info('{}') WHERE name = ?",
+        table.replace('\'', "''")
+    );
+    let row = sqlx::query(&sql)
+        .bind(column)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| OpenError::ApplyMigration(table, column, e))?;
+    Ok(row.is_some())
 }
 
 #[cfg(test)]
@@ -97,5 +137,110 @@ mod tests {
         let _first = EvolutionStore::open(&path).await.unwrap();
         // Re-opening must not error (CREATE … IF NOT EXISTS).
         let _second = EvolutionStore::open(&path).await.unwrap();
+    }
+
+    /// Fresh DB path: SCHEMA_SQL alone must produce all v0.3 columns —
+    /// the migration block sees they're already there and is a no-op.
+    #[tokio::test]
+    async fn fresh_db_has_v0_3_columns() {
+        let (_tmp, store) = {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("evolution.sqlite");
+            let store = EvolutionStore::open(&path).await.unwrap();
+            (tmp, store)
+        };
+        for col in ["shadow_metrics", "eval_run_id", "baseline_metrics_json"] {
+            let exists = column_exists(store.pool(), "evolution_proposals", leak(col))
+                .await
+                .unwrap();
+            assert!(exists, "evolution_proposals.{col} should exist on fresh DB");
+        }
+    }
+
+    /// Existing-DB path: simulate a pre-v0.3 schema (no eval_run_id /
+    /// baseline_metrics_json), reopen via `EvolutionStore::open`, and
+    /// confirm both columns get added by the migration block.
+    #[tokio::test]
+    async fn migration_adds_v0_3_columns_to_legacy_db() {
+        use sqlx::sqlite::SqliteConnectOptions;
+        use std::str::FromStr;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("evolution.sqlite");
+        let url = format!("sqlite://{}", path.display());
+
+        // Bootstrap a v0.2-shaped DB by hand: same as today's SCHEMA_SQL
+        // *minus* the two new columns. Different connection so we can
+        // close it cleanly before reopening through `open`.
+        {
+            let opts = SqliteConnectOptions::from_str(&url)
+                .unwrap()
+                .create_if_missing(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap();
+            sqlx::raw_sql(
+                r#"CREATE TABLE evolution_proposals (
+                    id              TEXT PRIMARY KEY,
+                    kind            TEXT NOT NULL,
+                    target          TEXT NOT NULL,
+                    diff            TEXT NOT NULL,
+                    reasoning       TEXT NOT NULL,
+                    risk            TEXT NOT NULL,
+                    budget_cost     INTEGER NOT NULL DEFAULT 1,
+                    status          TEXT NOT NULL,
+                    shadow_metrics  TEXT,
+                    signal_ids      TEXT NOT NULL,
+                    trace_ids       TEXT NOT NULL,
+                    created_at      INTEGER NOT NULL,
+                    decided_at      INTEGER,
+                    decided_by      TEXT,
+                    applied_at      INTEGER,
+                    rollback_of     TEXT
+                );"#,
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+
+        // Pre-condition: legacy columns missing.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        assert!(!column_exists(&pool, "evolution_proposals", "eval_run_id")
+            .await
+            .unwrap());
+        assert!(!column_exists(
+            &pool,
+            "evolution_proposals",
+            "baseline_metrics_json"
+        )
+        .await
+        .unwrap());
+        pool.close().await;
+
+        // Open through the production path → migrations apply.
+        let store = EvolutionStore::open(&path).await.unwrap();
+
+        for col in ["eval_run_id", "baseline_metrics_json"] {
+            assert!(
+                column_exists(store.pool(), "evolution_proposals", leak(col))
+                    .await
+                    .unwrap(),
+                "migration must add evolution_proposals.{col}"
+            );
+        }
+    }
+
+    /// `column_exists` requires `&'static str`. The test names are
+    /// known at compile time; this leak is bounded to the test binary.
+    fn leak(s: &str) -> &'static str {
+        Box::leak(s.to_string().into_boxed_str())
     }
 }

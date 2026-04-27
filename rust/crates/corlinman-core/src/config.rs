@@ -1153,6 +1153,8 @@ impl Default for NodeBridgeConfig {
 pub struct EvolutionConfig {
     #[validate(nested)]
     pub observer: EvolutionObserverConfig,
+    #[validate(nested)]
+    pub shadow: EvolutionShadowConfig,
 }
 
 /// Tunables for the gateway's `EvolutionObserver` (Phase 2 wave 1-A). It
@@ -1183,6 +1185,53 @@ impl Default for EvolutionObserverConfig {
             enabled: true,
             db_path: PathBuf::from("/data/evolution.sqlite"),
             queue_capacity: 10_000,
+        }
+    }
+}
+
+/// Tunables for the ShadowTester (Phase 3 wave 1-A). It picks pending
+/// proposals whose `risk` is `medium` or `high`, runs them through an
+/// in-process eval set, captures `shadow_metrics` + `baseline_metrics_json`
+/// + `eval_run_id`, and transitions the row from `shadow_running` to
+/// `shadow_done` so the operator sees a measured delta before approving.
+///
+/// * `enabled` — master switch. When `false` the ShadowTester job is not
+///   scheduled; medium/high-risk proposals stay in `pending` and are
+///   approvable directly (Phase 2 behavior — useful while the eval set is
+///   still being authored).
+/// * `eval_set_dir` — root directory containing per-kind YAML eval cases
+///   (`<dir>/<kind>/*.yaml`). Missing or empty subdirs short-circuit the
+///   shadow run and emit a warn-level metric so the operator notices.
+/// * `sandbox_kind` — isolation strategy. Phase 3 ships `in_process` only;
+///   `docker` is reserved for Phase 4 prompt/tool kinds and rejected on
+///   load until the runner supports it.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
+#[serde(default, deny_unknown_fields)]
+pub struct EvolutionShadowConfig {
+    pub enabled: bool,
+    pub eval_set_dir: PathBuf,
+    pub sandbox_kind: ShadowSandboxKind,
+}
+
+/// Which sandbox the ShadowTester runs proposals in. `InProcess` is the
+/// only Phase 3 variant; `Docker` is reserved for Phase 4 (prompt /
+/// tool-policy kinds need stronger isolation than in-process gives).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShadowSandboxKind {
+    InProcess,
+    Docker,
+}
+
+impl Default for EvolutionShadowConfig {
+    fn default() -> Self {
+        // `enabled = false` keeps Phase 2 behavior on rollout: an
+        // operator must opt in to shadow gating once they've authored
+        // (or accepted the bundled) eval set under `eval_set_dir`.
+        Self {
+            enabled: false,
+            eval_set_dir: PathBuf::from("/data/eval/evolution"),
+            sandbox_kind: ShadowSandboxKind::InProcess,
         }
     }
 }

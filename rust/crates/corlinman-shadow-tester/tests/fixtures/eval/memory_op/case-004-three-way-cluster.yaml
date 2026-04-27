@@ -1,0 +1,17 @@
+description: >
+  Three near-duplicate chunks forming a cluster (paraphrases of the same
+  observation). Proposal targets merge_chunks:1,2,3; simulator collapses
+  them into chunk 1, retiring 2 and 3.
+kb_seed:
+  - "INSERT INTO files(id, path, diary_name, checksum, mtime, size) VALUES (1, 'fx-004.md', 'fixture', 'h004', 0, 0);"
+  - "INSERT INTO chunks(id, file_id, chunk_index, content, namespace) VALUES (1, 1, 0, 'The hybrid retriever combines BM25 lexical scores with dense vector cosine similarity for higher recall.', 'general');"
+  - "INSERT INTO chunks(id, file_id, chunk_index, content, namespace) VALUES (2, 1, 1, 'The hybrid retriever blends BM25 lexical scores with dense vector cosine similarity for higher recall.', 'general');"
+  - "INSERT INTO chunks(id, file_id, chunk_index, content, namespace) VALUES (3, 1, 2, 'The hybrid retriever combines BM25 lexical scores with dense vector cosine similarity for stronger recall.', 'general');"
+proposal:
+  target: "merge_chunks:1,2,3"
+  reasoning: "Three-way near-duplicate cluster"
+  risk: high
+expected:
+  outcome: merged
+  rows_merged: 2
+  surviving_chunk_id: 1

@@ -293,6 +293,99 @@ impl ProposalsRepo {
         }
         Ok(())
     }
+
+    /// List `Pending` proposals for `kind` whose risk is in `risks`,
+    /// newest first. Used by the ShadowRunner to pick candidates.
+    pub async fn list_pending_for_shadow(
+        &self,
+        kind: EvolutionKind,
+        risks: &[EvolutionRisk],
+        limit: i64,
+    ) -> Result<Vec<EvolutionProposal>, RepoError> {
+        if risks.is_empty() {
+            return Ok(Vec::new());
+        }
+        // sqlx doesn't expand `IN (?)`; build the placeholders inline.
+        // Risk strings come from the enum (`'static`), no user input.
+        let placeholders = vec!["?"; risks.len()].join(",");
+        let sql = format!(
+            r#"SELECT id, kind, target, diff, reasoning, risk, budget_cost, status,
+                      shadow_metrics, signal_ids, trace_ids,
+                      created_at, decided_at, decided_by, applied_at, rollback_of
+               FROM evolution_proposals
+               WHERE status = 'pending' AND kind = ? AND risk IN ({placeholders})
+               ORDER BY created_at DESC
+               LIMIT ?"#
+        );
+        let mut q = sqlx::query(&sql).bind(kind.as_str());
+        for r in risks {
+            q = q.bind(r.as_str());
+        }
+        let rows = q.bind(limit).fetch_all(&self.pool).await?;
+        rows.into_iter().map(decode_proposal).collect()
+    }
+
+    /// Atomically transition a proposal from `Pending` to
+    /// `ShadowRunning`. Errors if the row is not in `Pending` (avoids
+    /// racing two runners).
+    pub async fn claim_for_shadow(&self, id: &ProposalId) -> Result<(), RepoError> {
+        let res = sqlx::query(
+            "UPDATE evolution_proposals
+                SET status = 'shadow_running'
+              WHERE id = ? AND status = 'pending'",
+        )
+        .bind(id.as_str())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            // Could be missing or already claimed; both look the same to
+            // the runner — it skips and moves on.
+            return Err(RepoError::NotFound(id.0.clone()));
+        }
+        Ok(())
+    }
+
+    /// Persist shadow run output: `eval_run_id`, `baseline_metrics_json`,
+    /// `shadow_metrics`, and transition `ShadowRunning → ShadowDone` in
+    /// one UPDATE.
+    pub async fn mark_shadow_done(
+        &self,
+        id: &ProposalId,
+        eval_run_id: &str,
+        baseline_metrics_json: &serde_json::Value,
+        shadow_metrics: &serde_json::Value,
+    ) -> Result<(), RepoError> {
+        let baseline =
+            serde_json::to_string(baseline_metrics_json).map_err(|source| {
+                RepoError::MalformedJson {
+                    column: "baseline_metrics_json",
+                    source,
+                }
+            })?;
+        let shadow =
+            serde_json::to_string(shadow_metrics).map_err(|source| RepoError::MalformedJson {
+                column: "shadow_metrics",
+                source,
+            })?;
+        let res = sqlx::query(
+            "UPDATE evolution_proposals
+                SET status = 'shadow_done',
+                    eval_run_id = ?,
+                    baseline_metrics_json = ?,
+                    shadow_metrics = ?
+              WHERE id = ?",
+        )
+        .bind(eval_run_id)
+        .bind(baseline)
+        .bind(shadow)
+        .bind(id.as_str())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(RepoError::NotFound(id.0.clone()));
+        }
+        Ok(())
+    }
 }
 
 fn decode_proposal(row: sqlx::sqlite::SqliteRow) -> Result<EvolutionProposal, RepoError> {
@@ -523,6 +616,108 @@ mod tests {
         let after = repo.get(&id).await.unwrap();
         assert_eq!(after.status, EvolutionStatus::Applied);
         assert_eq!(after.applied_at, Some(3_000));
+    }
+
+    /// Helper: insert a minimal pending proposal for the shadow tests.
+    async fn insert_pending(
+        repo: &ProposalsRepo,
+        id: &str,
+        kind: EvolutionKind,
+        risk: EvolutionRisk,
+    ) -> ProposalId {
+        let pid = ProposalId::new(id);
+        repo.insert(&EvolutionProposal {
+            id: pid.clone(),
+            kind,
+            target: format!("target-{id}"),
+            diff: String::new(),
+            reasoning: "fixture".into(),
+            risk,
+            budget_cost: 0,
+            status: EvolutionStatus::Pending,
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at: 1_000,
+            decided_at: None,
+            decided_by: None,
+            applied_at: None,
+            rollback_of: None,
+        })
+        .await
+        .unwrap();
+        pid
+    }
+
+    #[tokio::test]
+    async fn list_pending_for_shadow_filters_kind_and_risk() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        // High memory_op (match), low memory_op (skip), high skill_update (skip).
+        insert_pending(&repo, "p-high-mem", EvolutionKind::MemoryOp, EvolutionRisk::High).await;
+        insert_pending(&repo, "p-low-mem", EvolutionKind::MemoryOp, EvolutionRisk::Low).await;
+        insert_pending(
+            &repo,
+            "p-high-skill",
+            EvolutionKind::SkillUpdate,
+            EvolutionRisk::High,
+        )
+        .await;
+
+        let hits = repo
+            .list_pending_for_shadow(
+                EvolutionKind::MemoryOp,
+                &[EvolutionRisk::Medium, EvolutionRisk::High],
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id.as_str(), "p-high-mem");
+    }
+
+    #[tokio::test]
+    async fn claim_for_shadow_transitions_then_fails_on_non_pending() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let pid =
+            insert_pending(&repo, "p-claim", EvolutionKind::MemoryOp, EvolutionRisk::High).await;
+        repo.claim_for_shadow(&pid).await.unwrap();
+        let after = repo.get(&pid).await.unwrap();
+        assert_eq!(after.status, EvolutionStatus::ShadowRunning);
+        // Second claim is the racing runner — must error.
+        let err = repo.claim_for_shadow(&pid).await.unwrap_err();
+        assert!(matches!(err, RepoError::NotFound(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn mark_shadow_done_persists_metrics_and_eval_id() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let pid = insert_pending(&repo, "p-done", EvolutionKind::MemoryOp, EvolutionRisk::High)
+            .await;
+        repo.claim_for_shadow(&pid).await.unwrap();
+
+        let baseline = json!({"chunks_total": 2});
+        let shadow = json!({"chunks_total": 1, "rows_merged": 1});
+        repo.mark_shadow_done(&pid, "eval-2026-04-27-abc123", &baseline, &shadow)
+            .await
+            .unwrap();
+
+        let row: (String, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, eval_run_id, baseline_metrics_json, shadow_metrics
+                 FROM evolution_proposals WHERE id = ?",
+        )
+        .bind(pid.as_str())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(row.0, "shadow_done");
+        assert_eq!(row.1.as_deref(), Some("eval-2026-04-27-abc123"));
+        let baseline_back: serde_json::Value = serde_json::from_str(&row.2.unwrap()).unwrap();
+        assert_eq!(baseline_back, baseline);
+        let shadow_back: serde_json::Value = serde_json::from_str(&row.3.unwrap()).unwrap();
+        assert_eq!(shadow_back, shadow);
     }
 
     #[tokio::test]

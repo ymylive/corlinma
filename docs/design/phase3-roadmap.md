@@ -73,11 +73,17 @@ Three waves, each 1-1.5 weeks, mostly parallel.
 ### Wave 1 — Safety Infrastructure (3 agents, ~1 week)
 Goal: build the gates so Wave 2 kinds can land safely.
 
-| ID | Title | Stack | Wkload |
-|---|---|---|---|
-| **3-1A** | **ShadowTester** — eval-set runner + metrics collector + proposal annotation | Rust + Python | 4-5d |
-| **3-1B** | **AutoRollback** — 72h grace window, per-kind threshold config, automatic revert + history link | Rust | 3-4d |
-| **3-1C** | **Budget enforcement** — per-week / per-kind caps in config; engine respects; UI surfaces remaining quota | Rust + UI | 2-3d |
+| ID | Title | Stack | Wkload | Status |
+|---|---|---|---|---|
+| **3-1A** | **ShadowTester** — eval-set runner + metrics collector + proposal annotation | Rust + Python | 4-5d | ✅ Done 2026-04-27 |
+| **3-1B** | **AutoRollback** — 72h grace window, per-kind threshold config, automatic revert + history link | Rust | 3-4d | TBD |
+| **3-1C** | **Budget enforcement** — per-week / per-kind caps in config; engine respects; UI surfaces remaining quota | Rust + UI | 2-3d | TBD |
+
+**3-1A breakdown** (see `docs/design/shadow-tester.md`):
+- Step 1 ✅ — schema migration (`eval_run_id`, `baseline_metrics_json` columns); `[evolution.shadow]` config block; `corlinman-shadow-tester` crate scaffold.
+- Step 2 ✅ — `EvalCase` / `EvalSet` types + YAML loader + 4 hand-crafted `memory_op` fixtures.
+- Step 3 ✅ — `KindSimulator` trait + `MemoryOpSimulator` impl + `ShadowRunner` orchestrator.
+- Step 4 ✅ — `corlinman-shadow-tester` CLI binary + `[scheduler.jobs.shadow_tester]` subprocess job (03:30 daily, 30 min after engine) + cross-crate e2e suite in `corlinman-integration-tests/tests/shadow_loop.rs`.
 
 **Wave 1 acceptance**: a fake high-risk proposal goes through shadow → ops sees metrics delta → approves → applies → AutoRollback monitor active. End-to-end harness in `tests/`.
 
@@ -272,9 +278,9 @@ If staffing allows: launch W1 + W3 together (week 1-2), then W2 (week 2.5-4), W4
 
 ## 9. Open Questions (decision before W1)
 
-1. **Eval set authorship**: operator-written, prod-trace-distilled, or hybrid? — Lean: hybrid (start with 5-10 hand-crafted per kind, grow via approved flagged sessions)
-2. **Shadow sandbox isolation**: in-process eval vs docker sandbox? — Phase 3 = in-process (faster, simpler); Phase 4 → docker for prompt/tool kinds
-3. **AutoRollback metrics scope**: which metrics count? — Lean: per-kind whitelist in config (skill_update watches success_rate + p95_latency on the affected tool; agent_card watches turn_count + handoff_rate; etc)
+1. ~~**Eval set authorship**: operator-written, prod-trace-distilled, or hybrid?~~ — **Decided 2026-04-27 (W1-A)**: hybrid — hand-crafted seed cases ship in-repo at `rust/crates/corlinman-shadow-tester/tests/fixtures/eval/<kind>/`; operators grow the set via approved flagged sessions. The bundled 4 `memory_op` cases are the seed.
+2. ~~**Shadow sandbox isolation**: in-process eval vs docker sandbox?~~ — **Decided 2026-04-27 (W1-A)**: in-process for Phase 3, Docker reserved for Phase 4. Encoded in `EvolutionShadowConfig::sandbox_kind` (`ShadowSandboxKind::InProcess` | `Docker`); the `Docker` variant parses but is rejected on load until the runner supports it.
+3. **AutoRollback metrics scope**: which metrics count? — Lean: per-kind whitelist in config (skill_update watches success_rate + p95_latency on the affected tool; agent_card watches turn_count + handoff_rate; etc) — TBD, tracked under W1-B.
 4. **User model granularity**: per-user, per-channel-session, per-conversation? — Lean: per-user keyed by `(channel, sender_id)` tuple; cross-channel join is Phase 4
 5. **Persona mutability source-of-truth**: agent-card YAML vs runtime DB? — Lean: YAML is the seed/template; DB is the runtime state; on agent-card update via Evolution proposal, DB resets to YAML defaults
 6. **Closed learning loop privacy**: skill_extraction sees full conversation text; how is sensitive content excluded? — Lean: same redaction pipeline as user_model; opt-in setting `[skills.allow_extraction_from_session]` defaulting false

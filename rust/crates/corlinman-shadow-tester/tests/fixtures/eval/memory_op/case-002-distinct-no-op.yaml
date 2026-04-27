@@ -1,0 +1,17 @@
+description: >
+  Proposal targets `merge_chunks:1,99` but chunk 99 was never indexed.
+  The simulator must detect the missing target id and short-circuit to
+  NoOp without partially merging — a half-applied merge would corrupt the
+  surviving row's lineage. (Similarity-based "these chunks aren't
+  duplicates so don't merge" routing belongs to a later wave that adds
+  upstream similarity gating; W1-A's deterministic simulator only owns
+  the data op, not the dup decision.)
+kb_seed:
+  - "INSERT INTO files(id, path, diary_name, checksum, mtime, size) VALUES (1, 'fx-002.md', 'fixture', 'h002', 0, 0);"
+  - "INSERT INTO chunks(id, file_id, chunk_index, content, namespace) VALUES (1, 1, 0, 'Preheat the oven to 200 degrees Celsius and roast the carrots with olive oil and thyme.', 'general');"
+proposal:
+  target: "merge_chunks:1,99"
+  reasoning: "Engine flagged a candidate but one target id is no longer in the index"
+  risk: high
+expected:
+  outcome: no_op

@@ -3,7 +3,10 @@
 //!
 //! Applied idempotently via `CREATE … IF NOT EXISTS`, so re-running on a
 //! populated DB is a no-op. New columns must land via ALTER TABLE in a
-//! versioned migration (see `docs/migration/`).
+//! versioned migration: list them in [`MIGRATIONS`] (each is a
+//! `(table, column, ddl)` triple) and `EvolutionStore::open` will pragma-check
+//! the column and apply the DDL only when missing. Operator-facing notes for
+//! each schema bump live in `docs/migration/`.
 
 pub const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS evolution_signals (
@@ -24,22 +27,24 @@ CREATE INDEX IF NOT EXISTS idx_evol_signals_observed
     ON evolution_signals(observed_at);
 
 CREATE TABLE IF NOT EXISTS evolution_proposals (
-    id              TEXT PRIMARY KEY,
-    kind            TEXT NOT NULL,
-    target          TEXT NOT NULL,
-    diff            TEXT NOT NULL,
-    reasoning       TEXT NOT NULL,
-    risk            TEXT NOT NULL,
-    budget_cost     INTEGER NOT NULL DEFAULT 1,
-    status          TEXT NOT NULL,
-    shadow_metrics  TEXT,
-    signal_ids      TEXT NOT NULL,
-    trace_ids       TEXT NOT NULL,
-    created_at      INTEGER NOT NULL,
-    decided_at      INTEGER,
-    decided_by      TEXT,
-    applied_at      INTEGER,
-    rollback_of     TEXT REFERENCES evolution_proposals(id)
+    id                    TEXT PRIMARY KEY,
+    kind                  TEXT NOT NULL,
+    target                TEXT NOT NULL,
+    diff                  TEXT NOT NULL,
+    reasoning             TEXT NOT NULL,
+    risk                  TEXT NOT NULL,
+    budget_cost           INTEGER NOT NULL DEFAULT 1,
+    status                TEXT NOT NULL,
+    shadow_metrics        TEXT,
+    eval_run_id           TEXT,
+    baseline_metrics_json TEXT,
+    signal_ids            TEXT NOT NULL,
+    trace_ids             TEXT NOT NULL,
+    created_at            INTEGER NOT NULL,
+    decided_at            INTEGER,
+    decided_by            TEXT,
+    applied_at            INTEGER,
+    rollback_of           TEXT REFERENCES evolution_proposals(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_evol_proposals_status
@@ -68,3 +73,27 @@ CREATE INDEX IF NOT EXISTS idx_evol_history_proposal
 CREATE INDEX IF NOT EXISTS idx_evol_history_applied
     ON evolution_history(applied_at);
 "#;
+
+/// One migration step: add `column` to `table` via `ddl` if it does not
+/// already exist. Order matters — apply in array order. Append-only.
+///
+/// The store applies these *after* `SCHEMA_SQL`, so fresh DBs (which already
+/// got the column via `CREATE TABLE`) hit the pragma check, see the column
+/// is present, and skip the ALTER. Existing v0.2 DBs (which lack the
+/// columns) get the ALTER and reach the same end state.
+pub const MIGRATIONS: &[(&str, &str, &str)] = &[
+    // v0.2 → v0.3 — Phase 3 W1-A ShadowTester adds eval_run_id +
+    // baseline_metrics_json on `evolution_proposals` so the operator can
+    // see the pre-/post- delta when reviewing a shadowed proposal. See
+    // `docs/migration/v2-to-v3.md`.
+    (
+        "evolution_proposals",
+        "eval_run_id",
+        "ALTER TABLE evolution_proposals ADD COLUMN eval_run_id TEXT",
+    ),
+    (
+        "evolution_proposals",
+        "baseline_metrics_json",
+        "ALTER TABLE evolution_proposals ADD COLUMN baseline_metrics_json TEXT",
+    ),
+];

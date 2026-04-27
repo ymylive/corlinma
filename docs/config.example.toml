@@ -218,6 +218,16 @@ name = "evolution_engine"
 cron = "0 0 3 * * * *"
 action = { type = "subprocess", command = "corlinman-evolution-engine", args = ["run-once"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_EVOLUTION_DB = "/data/evolution.sqlite", CORLINMAN_KB_DB = "/data/kb.sqlite" } }
 
+# Phase 3 wave 1-A: run the Rust ShadowTester 30 min after the engine so
+# any proposals the engine just filed get shadow-tested before the
+# operator sees them in the approval queue. The binary itself is a
+# no-op (exit 1 + clear log) when `[evolution.shadow].enabled = false`,
+# so leaving this job wired but the master switch off is a safe default.
+[[scheduler.jobs]]
+name = "shadow_tester"
+cron = "0 30 3 * * * *"
+action = { type = "subprocess", command = "corlinman-shadow-tester", args = ["run-once", "--config", "/data/config.toml"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_DATA_DIR = "/data" } }
+
 # [[scheduler.jobs]]
 # name = "weekly-reindex"
 # cron = "0 0 3 * * 0 *"

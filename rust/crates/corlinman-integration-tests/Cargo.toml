@@ -28,12 +28,18 @@ corlinman-gateway = { path = "../corlinman-gateway" }
 corlinman-gateway-api = { path = "../corlinman-gateway-api" }
 # B5-BE6 final regression also touches the NodeBridge stub server.
 corlinman-nodebridge = { path = "../corlinman-nodebridge" }
+# Phase 3 W1-A Step 4: cross-crate shadow loop test (proposals row →
+# ShadowRunner → MemoryOpSimulator → shadow_done) needs both crates at
+# dev-dep level.
+corlinman-evolution = { path = "../corlinman-evolution" }
+corlinman-shadow-tester = { path = "../corlinman-shadow-tester" }
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time", "sync"] }
 tokio-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
 tempfile = "3"

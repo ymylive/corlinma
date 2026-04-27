@@ -78,3 +78,73 @@ action = { type = "subprocess", command = "uv",
 In production the Docker image bakes `corlinman-evolution-engine` into
 `/opt/venv/bin/`, which is already on `$PATH` for the gateway entrypoint;
 the default config above works as-is.
+
+## Shadow gating (W1-A)
+
+Phase 3 wave 1-A adds a second scheduled subprocess — the Rust
+`corlinman-shadow-tester` binary — that runs 30 minutes after the
+engine. Anything the engine filed as `pending` with `risk = medium |
+high` gets claimed, shadow-tested against an in-process eval set, and
+flipped to `shadow_done` (with `shadow_metrics`,
+`baseline_metrics_json`, and `eval_run_id` populated) before the
+operator approval UI ever surfaces it. Low-risk proposals bypass shadow
+entirely and stay on the original `pending → approved` path.
+
+```toml
+[[scheduler.jobs]]
+name = "shadow_tester"
+cron = "0 30 3 * * * *"   # 03:30 UTC — 30 min after evolution_engine
+action = { type = "subprocess", command = "corlinman-shadow-tester",
+           args = ["run-once", "--config", "/data/config.toml"],
+           timeout_secs = 600, working_dir = "/data",
+           env = { CORLINMAN_DATA_DIR = "/data" } }
+```
+
+The binary reads the same `[evolution.observer].db_path` as the
+gateway's `EvolutionObserver` (single source of truth for
+`evolution.sqlite`) and resolves `kb.sqlite` as `<data_dir>/kb.sqlite`,
+honouring `$CORLINMAN_DATA_DIR` first then falling back to
+`[server].data_dir` — same precedence as the gateway.
+
+**Master switch.** Shadow gating is off by default
+(`[evolution.shadow].enabled = false`). Wiring the cron job alone does
+nothing — the binary checks the flag at startup and exits non-zero with
+a clear log line if it's still false. Flip the switch only once the
+eval set under `[evolution.shadow].eval_set_dir` is authored (or you've
+accepted the bundled `memory_op` cases). To stop shadow runs entirely,
+either flip `enabled` back to false or drop the
+`[scheduler.jobs.shadow_tester]` block; both are reversible without a
+schema migration.
+
+**Sandbox.** Phase 3 ships `sandbox_kind = "in_process"` only. `docker`
+is reserved for Phase 4 (prompt / tool-policy kinds need stronger
+isolation than in-process gives) and is rejected at startup until the
+runner supports it.
+
+## Shadow diagnostics
+
+Verifying a run actually fired:
+
+```sql
+SELECT id, eval_run_id, status, shadow_metrics
+  FROM evolution_proposals
+ WHERE status = 'shadow_done'
+ ORDER BY decided_at DESC
+ LIMIT 10;
+```
+
+A row with a populated `eval_run_id` (format `eval-YYYY-MM-DD-<short>`)
+and a non-null `shadow_metrics` blob means the binary claimed and
+completed it. If a proposal sits in `shadow_running` for hours, the
+runner crashed mid-case — check `/admin/logs?source=scheduler` for the
+subprocess's tracing output.
+
+`eval_run_id = no-eval-set` is the runner's "untested" sentinel: the
+proposal was claimed and finished, but the per-kind subdir under
+`eval_set_dir` was missing or empty. The operator UI renders that as a
+distinct state so you don't confuse "shadow passed" with "shadow had
+nothing to test against".
+
+See [`docs/design/shadow-tester.md`](design/shadow-tester.md) for the
+full design — eval-case schema, simulator trait contract, aggregation
+shape, and the list of kinds queued for future waves.
