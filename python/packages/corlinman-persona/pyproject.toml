@@ -1,0 +1,23 @@
+[project]
+name = "corlinman-persona"
+version = "0.1.0"
+description = "Persona persistence — agent mood / fatigue / recent_topics survive across sessions in agent_state.sqlite."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "corlinman contributors" }]
+
+dependencies = [
+    "aiosqlite>=0.20",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+corlinman-persona = "corlinman_persona.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corlinman_persona"]

@@ -14,6 +14,7 @@ members = [
     "corlinman-embedding",
     "corlinman-evolution-engine",
     "corlinman-grpc",
+    "corlinman-persona",
     "corlinman-providers",
     "corlinman-server",
     "corlinman-tagmemo",
@@ -248,6 +249,7 @@ dependencies = [
     { name = "corlinman-embedding" },
     { name = "corlinman-evolution-engine" },
     { name = "corlinman-grpc" },
+    { name = "corlinman-persona" },
     { name = "corlinman-providers" },
     { name = "corlinman-server" },
     { name = "corlinman-tagmemo" },
@@ -275,6 +277,7 @@ requires-dist = [
     { name = "corlinman-embedding", editable = "python/packages/corlinman-embedding" },
     { name = "corlinman-evolution-engine", editable = "python/packages/corlinman-evolution-engine" },
     { name = "corlinman-grpc", editable = "python/packages/corlinman-grpc" },
+    { name = "corlinman-persona", editable = "python/packages/corlinman-persona" },
     { name = "corlinman-providers", editable = "python/packages/corlinman-providers" },
     { name = "corlinman-server", editable = "python/packages/corlinman-server" },
     { name = "corlinman-tagmemo", editable = "python/packages/corlinman-tagmemo" },
@@ -379,6 +382,21 @@ requires-dist = [
     { name = "protobuf", specifier = ">=5.28" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "corlinman-persona"
+version = "0.1.0"
+source = { editable = "python/packages/corlinman-persona" }
+dependencies = [
+    { name = "aiosqlite" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.20" },
+    { name = "pyyaml", specifier = ">=6.0" },
+]
 
 [[package]]
 name = "corlinman-providers"
