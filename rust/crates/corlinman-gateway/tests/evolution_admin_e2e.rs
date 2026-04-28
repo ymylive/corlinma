@@ -90,6 +90,7 @@ async fn happy_path_list_approve_apply() {
         store.clone(),
         kb.clone(),
         corlinman_core::config::AutoRollbackThresholds::default(),
+        tmp.path().join("skills"),
     ));
     let state = AdminState::new(
         Arc::new(PluginRegistry::default()),

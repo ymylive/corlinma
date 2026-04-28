@@ -144,7 +144,10 @@ async fn approved_then_applied(
         .await
         .unwrap();
 
-    let applier = EvolutionApplier::new(evol, kb, thresholds);
+    // Phase 3-2B added a `skills_dir` param. memory_op doesn't read it,
+    // so a throwaway tempdir is fine for the integration loop.
+    let skills_dir = std::env::temp_dir().join("corlinman-itest-skills");
+    let applier = EvolutionApplier::new(evol, kb, thresholds, skills_dir);
     applier
         .apply(&id)
         .await
@@ -182,8 +185,13 @@ async fn auto_rollback_breach_triggers_revert() {
         grace_window_hours: 72,
         thresholds: thresholds.clone(),
     };
-    let applier = Arc::new(EvolutionApplier::new(evol.clone(), kb.clone(), thresholds))
-        as Arc<dyn Applier>;
+    let skills_dir = std::env::temp_dir().join("corlinman-itest-skills");
+    let applier = Arc::new(EvolutionApplier::new(
+        evol.clone(),
+        kb.clone(),
+        thresholds,
+        skills_dir,
+    )) as Arc<dyn Applier>;
     let monitor = AutoRollbackMonitor::new(
         proposals.clone(),
         history.clone(),
@@ -256,8 +264,13 @@ async fn auto_rollback_no_breach_keeps_state() {
         grace_window_hours: 72,
         thresholds: thresholds.clone(),
     };
-    let applier = Arc::new(EvolutionApplier::new(evol.clone(), kb.clone(), thresholds))
-        as Arc<dyn Applier>;
+    let skills_dir = std::env::temp_dir().join("corlinman-itest-skills");
+    let applier = Arc::new(EvolutionApplier::new(
+        evol.clone(),
+        kb.clone(),
+        thresholds,
+        skills_dir,
+    )) as Arc<dyn Applier>;
     let monitor = AutoRollbackMonitor::new(
         proposals.clone(),
         history.clone(),

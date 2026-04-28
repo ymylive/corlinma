@@ -520,7 +520,7 @@ async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>)
                 Json(json!({
                     "error": "unsupported_kind",
                     "kind": kind_str,
-                    "message": "Phase 2 only applies memory_op proposals",
+                    "message": "no forward handler for this kind yet",
                 })),
             )
                 .into_response()
@@ -543,6 +543,54 @@ async fn apply_proposal(State(state): State<AdminState>, Path(id): Path<String>)
                 Json(json!({
                     "error": "chunk_not_found",
                     "chunk_id": chunk_id,
+                })),
+            )
+                .into_response()
+        }
+        // Phase 3-2B: tag_rebalance / skill_update validation failures.
+        // 422 for state-shape problems the proposer should have caught
+        // (root merge attempt, missing tag/file); 400 for diff shapes
+        // we don't accept yet — same semantic split as the existing
+        // 4xx mappings above.
+        Err(ApplyError::TagNotFound(path)) => {
+            EvolutionApplier::observe_failure(EvolutionKind::TagRebalance);
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "tag_not_found",
+                    "path": path,
+                })),
+            )
+                .into_response()
+        }
+        Err(ApplyError::CannotMergeRoot) => {
+            EvolutionApplier::observe_failure(EvolutionKind::TagRebalance);
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "cannot_merge_root",
+                })),
+            )
+                .into_response()
+        }
+        Err(ApplyError::SkillFileMissing(path)) => {
+            EvolutionApplier::observe_failure(EvolutionKind::SkillUpdate);
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "skill_file_missing",
+                    "path": path,
+                })),
+            )
+                .into_response()
+        }
+        Err(ApplyError::UnsupportedDiffShape(detail)) => {
+            EvolutionApplier::observe_failure(EvolutionKind::SkillUpdate);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "unsupported_diff_shape",
+                    "detail": detail,
                 })),
             )
                 .into_response()
@@ -828,10 +876,12 @@ mod tests {
     ) -> (Arc<corlinman_vector::SqliteStore>, Arc<EvolutionApplier>) {
         let kb_path = tmp.path().join("kb.sqlite");
         let kb = Arc::new(corlinman_vector::SqliteStore::open(&kb_path).await.unwrap());
+        let skills_dir = tmp.path().join("skills");
         let applier = Arc::new(EvolutionApplier::new(
             evol,
             kb.clone(),
             corlinman_core::config::AutoRollbackThresholds::default(),
+            skills_dir,
         ));
         (kb, applier)
     }

@@ -260,3 +260,79 @@ async def test_run_once_unknown_enabled_kind_raises(
     )
     with pytest.raises(ValueError, match="no KindHandler registered"):
         EvolutionEngine(config)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3-2B Step 1: multi-handler dispatch.
+# Seed signals of all three kinds and assert one proposal emerges per kind.
+# ---------------------------------------------------------------------------
+
+
+def _seed_tag_recall_drop(db_path: Path, *, target: str, count: int) -> None:
+    now_ms = int(time.time() * 1_000)
+    for i in range(count):
+        insert_signal(
+            db_path,
+            event_kind="tag.recall.dropped",
+            target=target,
+            severity="warn",
+            payload_json='{"reason": "no_chunk_recall"}',
+            trace_id=f"tag-trace-{i}",
+            session_id="sess-tag",
+            observed_at=now_ms - 60_000 + i,
+        )
+
+
+def _seed_skill_failure(db_path: Path, *, skill: str, count: int) -> None:
+    now_ms = int(time.time() * 1_000)
+    for i in range(count):
+        insert_signal(
+            db_path,
+            event_kind="skill.invocation.failed",
+            target=skill,
+            severity="error",
+            payload_json='{"reason": "connection timeout"}',
+            trace_id=f"skill-trace-{i}",
+            session_id="sess-skill",
+            observed_at=now_ms - 60_000 + i,
+        )
+
+
+async def test_run_once_dispatches_all_three_handlers(
+    evolution_db: Path, kb_db: Path
+) -> None:
+    """All three Phase-3 handlers fire, one proposal per kind."""
+    # memory_op trigger: clustered failure signal + duplicate kb chunks.
+    _seed_failure_cluster(evolution_db, count=3)
+    insert_chunk(kb_db, content="alpha beta gamma delta epsilon zeta eta theta")
+    insert_chunk(kb_db, content="alpha beta gamma delta epsilon zeta eta theta!")
+
+    # tag_rebalance trigger.
+    _seed_tag_recall_drop(evolution_db, target="coding/python", count=3)
+
+    # skill_update trigger.
+    _seed_skill_failure(evolution_db, skill="web_search", count=3)
+
+    config = EngineConfig(
+        db_path=evolution_db,
+        kb_path=kb_db,
+        lookback_days=1,
+        min_cluster_size=3,
+        # Default enabled_kinds covers all three but pin explicitly so the
+        # test stays stable if the default changes.
+        enabled_kinds=("memory_op", "tag_rebalance", "skill_update"),
+    )
+    summary = await EvolutionEngine(config).run_once()
+
+    assert summary.proposals_written == 3
+    assert summary.proposals_by_kind == {
+        "memory_op": 1,
+        "tag_rebalance": 1,
+        "skill_update": 1,
+    }
+
+    proposals = _all_proposals(evolution_db)
+    by_kind = {str(p["kind"]): p for p in proposals}
+    assert by_kind["memory_op"]["target"] == "merge_chunks:1,2"
+    assert by_kind["tag_rebalance"]["target"] == "merge_tag:coding/python"
+    assert by_kind["skill_update"]["target"] == "skills/web_search.md"

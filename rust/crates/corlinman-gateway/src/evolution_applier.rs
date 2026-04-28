@@ -32,10 +32,13 @@
 //!
 //! ## Supported targets
 //!
-//! Phase 2 ships only `memory_op` execution. Other kinds (`tag_rebalance`,
-//! `skill_update`, ...) return [`ApplyError::UnsupportedKind`] so callers
-//! see an explicit 4xx instead of a silent no-op.
+//! Phase 3-2B ships `memory_op`, `tag_rebalance`, and `skill_update`
+//! execution. Remaining kinds (`retry_tuning`, `agent_card`,
+//! `prompt_template`, `tool_policy`, `new_skill`) return
+//! [`ApplyError::UnsupportedKind`] so callers see an explicit 4xx
+//! instead of a silent no-op.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -65,8 +68,10 @@ pub enum ApplyError {
     /// Proposal is not in `approved`. Carries the actual status string.
     #[error("proposal not approved (status={0})")]
     NotApproved(String),
-    /// Phase 2 only ships `memory_op`. Other kinds bail here.
-    #[error("kind {0} cannot be applied yet (Phase 2 = memory_op only)")]
+    /// No forward handler for this kind yet. Phase 3-2B activated
+    /// `memory_op`, `tag_rebalance`, and `skill_update`; new kinds land
+    /// here until their handlers ship.
+    #[error("kind {0} cannot be applied yet")]
     UnsupportedKind(String),
     /// Proposal id wasn't in `evolution_proposals`.
     #[error("proposal not found: {0}")]
@@ -74,6 +79,24 @@ pub enum ApplyError {
     /// Referenced chunk row missing from `kb.sqlite`.
     #[error("chunk not found: id={0}")]
     ChunkNotFound(i64),
+    /// Phase 3-2B: `tag_rebalance` target referenced a `tag_nodes.path`
+    /// that isn't in the kb. Carries the requested path.
+    #[error("tag node not found: {0}")]
+    TagNotFound(String),
+    /// Phase 3-2B: `tag_rebalance` aimed at a root `tag_nodes` row
+    /// (`parent_id IS NULL`). Operators must not flatten the root —
+    /// reject explicitly so a buggy proposer can't wipe the tree.
+    #[error("cannot merge root tag node")]
+    CannotMergeRoot,
+    /// Phase 3-2B: `skill_update` target points at a file that doesn't
+    /// exist on disk. Carries the resolved path.
+    #[error("skill file missing: {0}")]
+    SkillFileMissing(String),
+    /// Phase 3-2B: `skill_update` diff used a hunk header that v0.3
+    /// doesn't know how to apply (only the `__APPEND__` sentinel from
+    /// the Step-1 EvolutionEngine is supported).
+    #[error("unsupported diff shape: {0}")]
+    UnsupportedDiffShape(String),
     /// `kb.sqlite` mutation failed.
     #[error("kb operation failed: {0}")]
     Kb(#[source] anyhow::Error),
@@ -116,6 +139,11 @@ pub struct EvolutionApplier {
     /// the monitor uses for the post-apply snapshot — symmetric windows
     /// prevent sample-mismatch false positives.
     auto_rollback_thresholds: AutoRollbackThresholds,
+    /// Phase 3-2B: root directory under which `skill_update` proposals
+    /// resolve their `skills/<name>.md` targets. Owned (not borrowed)
+    /// because the applier outlives any single config snapshot — same
+    /// reasoning as the kb store handle.
+    skills_dir: PathBuf,
 }
 
 impl EvolutionApplier {
@@ -137,6 +165,7 @@ impl EvolutionApplier {
         evolution_store: Arc<EvolutionStore>,
         kb_store: Arc<SqliteStore>,
         auto_rollback_thresholds: AutoRollbackThresholds,
+        skills_dir: PathBuf,
     ) -> Self {
         let proposals = ProposalsRepo::new(evolution_store.pool().clone());
         let history = HistoryRepo::new(evolution_store.pool().clone());
@@ -146,6 +175,7 @@ impl EvolutionApplier {
             kb_store,
             evolution_store,
             auto_rollback_thresholds,
+            skills_dir,
         }
     }
 
@@ -165,15 +195,28 @@ impl EvolutionApplier {
                 proposal.status.as_str().to_string(),
             ));
         }
-        if proposal.kind != EvolutionKind::MemoryOp {
-            return Err(ApplyError::UnsupportedKind(
-                proposal.kind.as_str().to_string(),
-            ));
-        }
 
-        // 2. Parse + plan + execute the kb mutation.
-        let plan = MemoryOp::parse(&proposal.target)?;
-        let mutation = self.execute(&plan).await?;
+        // 2. Dispatch per-kind. Each handler returns a `MutationOutcome`
+        //    so the audit/baseline path below stays kind-agnostic.
+        //    `memory_op` carries a parsed plan (`merge_chunks` or
+        //    `delete_chunk`) for the counter bump after the audit lands;
+        //    the new kinds bump no counters yet (Phase 3-2B doesn't ship
+        //    per-kind metrics — operator dashboards read history).
+        let mut memory_plan: Option<MemoryOp> = None;
+        let mutation = match proposal.kind {
+            EvolutionKind::MemoryOp => {
+                let plan = MemoryOp::parse(&proposal.target)?;
+                let m = self.execute(&plan).await?;
+                memory_plan = Some(plan);
+                m
+            }
+            EvolutionKind::TagRebalance => self.apply_tag_rebalance(&proposal.target).await?,
+            EvolutionKind::SkillUpdate => {
+                self.apply_skill_update(&proposal.target, &proposal.diff)
+                    .await?
+            }
+            other => return Err(ApplyError::UnsupportedKind(other.as_str().to_string())),
+        };
 
         // 3. Persist history + flip proposal.status atomically inside
         //    evolution.sqlite. kb.sqlite is already mutated (single
@@ -227,9 +270,13 @@ impl EvolutionApplier {
             .map_err(|e| ApplyError::History(anyhow::Error::from(e)))?;
 
         // 4. Bump kb-side counters only after the audit row landed.
-        match plan {
-            MemoryOp::MergeChunks { .. } => EVOLUTION_CHUNKS_MERGED.inc(),
-            MemoryOp::DeleteChunk { .. } => EVOLUTION_CHUNKS_DELETED.inc(),
+        //    `memory_op` has dedicated counters; other kinds rely on
+        //    EVOLUTION_PROPOSALS_APPLIED below for now.
+        if let Some(plan) = memory_plan {
+            match plan {
+                MemoryOp::MergeChunks { .. } => EVOLUTION_CHUNKS_MERGED.inc(),
+                MemoryOp::DeleteChunk { .. } => EVOLUTION_CHUNKS_DELETED.inc(),
+            }
         }
         EVOLUTION_PROPOSALS_APPLIED
             .with_label_values(&[proposal.kind.as_str(), "ok"])
@@ -329,6 +376,213 @@ impl EvolutionApplier {
                 })
             }
         }
+    }
+
+    /// Phase 3-2B: forward apply for `tag_rebalance`. Target shape is
+    /// `merge_tag:<path>`; we look up the matching `tag_nodes` row,
+    /// reparent its `chunk_tags` rows to the parent, then drop the node.
+    /// Captured `inverse_diff` records the deleted node's full row +
+    /// the chunk_ids whose `tag_node_id` we rewrote, so revert can
+    /// reinsert the node and point those rows back at it.
+    async fn apply_tag_rebalance(
+        &self,
+        target: &str,
+    ) -> Result<MutationOutcome, ApplyError> {
+        let path = target
+            .strip_prefix("merge_tag:")
+            .ok_or_else(|| ApplyError::InvalidTarget(target.into()))?;
+        if path.is_empty() {
+            return Err(ApplyError::InvalidTarget(target.into()));
+        }
+
+        let pool = self.kb_store.pool();
+
+        // 1. Fetch the source row by path. `tag_nodes.path` is UNIQUE
+        //    per the v6 schema, so a single row or no row.
+        let row = sqlx::query(
+            "SELECT id, parent_id, name, path, depth, created_at \
+             FROM tag_nodes WHERE path = ?1",
+        )
+        .bind(path)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+        let row = row.ok_or_else(|| ApplyError::TagNotFound(path.into()))?;
+
+        let src_id: i64 = row.get("id");
+        let parent_id: Option<i64> = row.get("parent_id");
+        let src_name: String = row.get("name");
+        let src_path: String = row.get("path");
+        let src_depth: i64 = row.get("depth");
+        let src_created_at: i64 = row.get("created_at");
+        let parent_id =
+            parent_id.ok_or(ApplyError::CannotMergeRoot)?;
+
+        // 2. Compute before_sha from the row about to be deleted +
+        //    its existing chunk_tags pairs. Locality-only — same
+        //    convention the memory_op path follows.
+        let before_sha = sha256_tag_state(
+            &src_path, src_id, parent_id, &src_name, src_depth, src_created_at,
+        );
+
+        // 3. If the kb has the v6 `chunk_tags` table, capture the
+        //    chunk_ids about to be rewritten and rewrite them. Older kb
+        //    files without the table (defensive — same pattern as the
+        //    evolution-side migration helper) fall through to step 4.
+        let mut moved_chunk_ids: Vec<i64> = Vec::new();
+        let has_chunk_tags = column_exists_sync(pool, "chunk_tags", "chunk_id")
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+        if has_chunk_tags {
+            let rows =
+                sqlx::query("SELECT chunk_id FROM chunk_tags WHERE tag_node_id = ?1")
+                    .bind(src_id)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+            for r in &rows {
+                moved_chunk_ids.push(r.get::<i64, _>("chunk_id"));
+            }
+            // INSERT OR IGNORE on UPDATE: the destination row
+            // (chunk_id, parent_id) may already exist. SQLite UPDATE
+            // doesn't have OR IGNORE, but the PRIMARY KEY collision
+            // would error out — guard with a DELETE-of-conflicts
+            // before the UPDATE so the rewrite is idempotent.
+            sqlx::query(
+                "DELETE FROM chunk_tags WHERE tag_node_id = ?1 \
+                 AND chunk_id IN (SELECT chunk_id FROM chunk_tags WHERE tag_node_id = ?2)",
+            )
+            .bind(src_id)
+            .bind(parent_id)
+            .execute(pool)
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+            sqlx::query("UPDATE chunk_tags SET tag_node_id = ?1 WHERE tag_node_id = ?2")
+                .bind(parent_id)
+                .bind(src_id)
+                .execute(pool)
+                .await
+                .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+        }
+
+        // 4. Drop the source row. ON DELETE CASCADE on parent_id keeps
+        //    descendants in lockstep — by design (operator merging a
+        //    subtree means the whole subtree goes).
+        let res = sqlx::query("DELETE FROM tag_nodes WHERE id = ?1")
+            .bind(src_id)
+            .execute(pool)
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+        if res.rows_affected() == 0 {
+            // Race with a concurrent revert — surface the same shape.
+            return Err(ApplyError::TagNotFound(path.into()));
+        }
+
+        let after_sha = sha256_hex(format!("merged:{src_path}->{parent_id}").as_bytes());
+        let inverse_diff = json!({
+            "op": "merge_tag",
+            "src": {
+                "id": src_id,
+                "parent_id": parent_id,
+                "name": src_name,
+                "path": src_path,
+                "depth": src_depth,
+                "created_at": src_created_at,
+            },
+            "moved_chunk_tag_ids": moved_chunk_ids,
+        })
+        .to_string();
+
+        Ok(MutationOutcome {
+            before_sha,
+            after_sha,
+            inverse_diff,
+        })
+    }
+
+    /// Phase 3-2B: forward apply for `skill_update`. Target shape is
+    /// `skills/<name>.md`; v0.3 only supports the `__APPEND__` hunk
+    /// header the Step-1 EvolutionEngine emits. We snapshot the full
+    /// prior file content into `inverse_diff` (skill files are tiny —
+    /// single-digit KB) so revert is byte-for-byte deterministic.
+    async fn apply_skill_update(
+        &self,
+        target: &str,
+        diff: &str,
+    ) -> Result<MutationOutcome, ApplyError> {
+        // 1. Validate target shape. `skills/` prefix is required so a
+        //    bug in the proposer can't trick the applier into writing
+        //    arbitrary paths under skills_dir.
+        if !target.starts_with("skills/") || !target.ends_with(".md") {
+            return Err(ApplyError::InvalidTarget(target.into()));
+        }
+        let basename = &target["skills/".len()..];
+        // Defence in depth: reject `..`, `/`, etc inside the basename
+        // so resolution can't escape skills_dir.
+        if basename.is_empty() || basename.contains('/') || basename.contains("..") {
+            return Err(ApplyError::InvalidTarget(target.into()));
+        }
+        let path = self.skills_dir.join(basename);
+
+        // 2. Read prior content. Missing file is a hard reject — the
+        //    proposer must have observed the file before proposing.
+        let meta = match tokio::fs::metadata(&path).await {
+            Ok(m) => m,
+            Err(_) => {
+                return Err(ApplyError::SkillFileMissing(target.into()));
+            }
+        };
+        if !meta.is_file() {
+            return Err(ApplyError::SkillFileMissing(target.into()));
+        }
+        let prior_content = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+
+        // 3. Parse the diff. Step 1 only emits the __APPEND__ sentinel;
+        //    we reject anything else so a future engine bug doesn't
+        //    silently drop content via a partial unified-diff parse.
+        let appended_lines = parse_append_diff(diff)?;
+        let mut new_content = prior_content.clone();
+        if !new_content.is_empty() && !new_content.ends_with('\n') {
+            new_content.push('\n');
+        }
+        for line in &appended_lines {
+            new_content.push_str(line);
+            new_content.push('\n');
+        }
+
+        // 4. Atomic write: tmp + rename. A crash mid-write leaves the
+        //    .tmp orphan but the live skill file untouched.
+        let mut tmp = path.clone();
+        let mut name = tmp
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".tmp");
+        tmp.set_file_name(name);
+        tokio::fs::write(&tmp, new_content.as_bytes())
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+        tokio::fs::rename(&tmp, &path)
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+
+        let before_sha = sha256_hex(prior_content.as_bytes());
+        let after_sha = sha256_hex(new_content.as_bytes());
+        let inverse_diff = json!({
+            "op": "skill_update",
+            "file": target,
+            "prior_content": prior_content,
+            "applied_at_ms": now_ms(),
+        })
+        .to_string();
+
+        Ok(MutationOutcome {
+            before_sha,
+            after_sha,
+            inverse_diff,
+        })
     }
 
     /// Insert the history row and flip the proposal status inside a
@@ -438,6 +692,8 @@ impl EvolutionApplier {
         // 3. Dispatch per kind. New kinds add a sibling line below.
         match proposal.kind {
             EvolutionKind::MemoryOp => self.revert_memory_op(&history_row).await?,
+            EvolutionKind::TagRebalance => self.revert_tag_rebalance(&history_row).await?,
+            EvolutionKind::SkillUpdate => self.revert_skill_update(&history_row).await?,
             other => return Err(ApplyError::UnsupportedRevertKind(other.as_str().to_string())),
         }
 
@@ -492,6 +748,153 @@ impl EvolutionApplier {
         // bare `content/file_id/...`. Discriminate on `loser_id`.
         let plan = ChunkRestore::parse(&raw).map_err(ApplyError::MalformedInverseDiff)?;
         plan.execute(self.kb_store.pool())
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+        Ok(())
+    }
+
+    /// Phase 3-2B: reverse handler for `tag_rebalance`. Re-insert the
+    /// dropped `tag_nodes` row at its original id (`INSERT OR IGNORE`
+    /// makes a partial double-revert idempotent), then point the
+    /// captured `chunk_tags.chunk_id` rows back at it. Mirrors the
+    /// memory_op contract — INSERT OR IGNORE everywhere a PK could
+    /// collide so a re-run after a partial succeeds.
+    async fn revert_tag_rebalance(
+        &self,
+        history: &EvolutionHistory,
+    ) -> Result<(), ApplyError> {
+        let raw: serde_json::Value = serde_json::from_str(&history.inverse_diff)
+            .map_err(|e| ApplyError::MalformedInverseDiff(format!("parse: {e}")))?;
+        let op = raw
+            .get("op")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'op'".into()))?;
+        if op != "merge_tag" {
+            return Err(ApplyError::MalformedInverseDiff(format!(
+                "unknown op: {op}"
+            )));
+        }
+        let src = raw
+            .get("src")
+            .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'src'".into()))?;
+        let id = pick_i64(src, "id").map_err(ApplyError::MalformedInverseDiff)?;
+        let parent_id =
+            pick_i64(src, "parent_id").map_err(ApplyError::MalformedInverseDiff)?;
+        let name = pick_str(src, "name").map_err(ApplyError::MalformedInverseDiff)?;
+        let path = pick_str(src, "path").map_err(ApplyError::MalformedInverseDiff)?;
+        let depth = pick_i64(src, "depth").map_err(ApplyError::MalformedInverseDiff)?;
+        let created_at =
+            pick_i64(src, "created_at").map_err(ApplyError::MalformedInverseDiff)?;
+
+        let moved_ids: Vec<i64> = raw
+            .get("moved_chunk_tag_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
+            .unwrap_or_default();
+
+        let pool = self.kb_store.pool();
+
+        // Re-insert the node. INSERT OR IGNORE: a partial double-revert
+        // (history rolled_back but proposal still applied → monitor
+        // re-fires) hits the unique `path` index and no-ops cleanly.
+        sqlx::query(
+            "INSERT OR IGNORE INTO tag_nodes(id, parent_id, name, path, depth, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(id)
+        .bind(parent_id)
+        .bind(&name)
+        .bind(&path)
+        .bind(depth)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+
+        // Point the captured chunk_tags rows back. Same defensive
+        // schema check the forward path uses — older kb files without
+        // the table just skip the rewrite.
+        let has_chunk_tags = column_exists_sync(pool, "chunk_tags", "chunk_id")
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+        if has_chunk_tags && !moved_ids.is_empty() {
+            // Same idempotency dance as the forward path: clear any
+            // pre-existing (chunk_id, src_id) rows so the UPDATE can't
+            // hit the composite-PK uniqueness constraint.
+            for chunk_id in &moved_ids {
+                sqlx::query(
+                    "DELETE FROM chunk_tags WHERE chunk_id = ?1 AND tag_node_id = ?2",
+                )
+                .bind(chunk_id)
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+                sqlx::query(
+                    "UPDATE chunk_tags SET tag_node_id = ?1 \
+                     WHERE chunk_id = ?2 AND tag_node_id = ?3",
+                )
+                .bind(id)
+                .bind(chunk_id)
+                .bind(parent_id)
+                .execute(pool)
+                .await
+                .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Phase 3-2B: reverse handler for `skill_update`. Write the
+    /// captured `prior_content` back to disk via the same atomic
+    /// tmp+rename dance the forward path uses. Skill files are small
+    /// enough that a full snapshot is the simplest correct path.
+    async fn revert_skill_update(
+        &self,
+        history: &EvolutionHistory,
+    ) -> Result<(), ApplyError> {
+        let raw: serde_json::Value = serde_json::from_str(&history.inverse_diff)
+            .map_err(|e| ApplyError::MalformedInverseDiff(format!("parse: {e}")))?;
+        let op = raw
+            .get("op")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ApplyError::MalformedInverseDiff("missing 'op'".into()))?;
+        if op != "skill_update" {
+            return Err(ApplyError::MalformedInverseDiff(format!(
+                "unknown op: {op}"
+            )));
+        }
+        let file = pick_str(&raw, "file").map_err(ApplyError::MalformedInverseDiff)?;
+        let prior_content =
+            pick_str(&raw, "prior_content").map_err(ApplyError::MalformedInverseDiff)?;
+
+        // Re-validate the file path the same way the forward path does
+        // — a corrupted inverse_diff shouldn't be a write-anywhere
+        // primitive.
+        if !file.starts_with("skills/") || !file.ends_with(".md") {
+            return Err(ApplyError::MalformedInverseDiff(format!(
+                "bad file path: {file}"
+            )));
+        }
+        let basename = &file["skills/".len()..];
+        if basename.is_empty() || basename.contains('/') || basename.contains("..") {
+            return Err(ApplyError::MalformedInverseDiff(format!(
+                "bad file basename: {file}"
+            )));
+        }
+        let path = self.skills_dir.join(basename);
+
+        let mut tmp = path.clone();
+        let mut name = tmp
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".tmp");
+        tmp.set_file_name(name);
+        tokio::fs::write(&tmp, prior_content.as_bytes())
+            .await
+            .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
+        tokio::fs::rename(&tmp, &path)
             .await
             .map_err(|e| ApplyError::Kb(anyhow::Error::from(e)))?;
         Ok(())
@@ -696,6 +1099,95 @@ fn sha256_concat(winner: &str, loser: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// SHA-256 over a stable string-concatenation of a `tag_nodes` row's
+/// columns. Used as `before_sha` for `tag_rebalance` apply — locality
+/// only, mirrors the memory_op convention.
+fn sha256_tag_state(
+    path: &str,
+    id: i64,
+    parent_id: i64,
+    name: &str,
+    depth: i64,
+    created_at: i64,
+) -> String {
+    let mut h = Sha256::new();
+    h.update(path.as_bytes());
+    h.update([0u8]);
+    h.update(id.to_le_bytes());
+    h.update(parent_id.to_le_bytes());
+    h.update(name.as_bytes());
+    h.update([0u8]);
+    h.update(depth.to_le_bytes());
+    h.update(created_at.to_le_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Phase 3-2B: defensive `pragma_table_info` lookup against `kb.sqlite`.
+/// Mirrors `corlinman-evolution::store::column_exists` — same query
+/// shape, just on a different pool. Lives here (not in the vector
+/// crate) because the applier's the only caller and pulling it across
+/// crates would widen the public API.
+async fn column_exists_sync(
+    pool: &sqlx::SqlitePool,
+    table: &'static str,
+    column: &'static str,
+) -> Result<bool, sqlx::Error> {
+    // pragma_table_info doesn't bind table names, format it in. Both
+    // table + column are 'static so no injection surface.
+    let sql = format!(
+        "SELECT 1 FROM pragma_table_info('{}') WHERE name = ?",
+        table.replace('\'', "''")
+    );
+    let row = sqlx::query(&sql).bind(column).fetch_optional(pool).await?;
+    Ok(row.is_some())
+}
+
+/// Phase 3-2B: parse the `__APPEND__`-shaped diff the Step-1
+/// EvolutionEngine emits for `skill_update`. Returns the appended
+/// lines (without the leading `+`). v0.3 only ships this one shape —
+/// arbitrary unified diffs would need a real patch engine.
+fn parse_append_diff(diff: &str) -> Result<Vec<String>, ApplyError> {
+    let mut lines = diff.lines();
+    // Skip the `--- a/...` and `+++ b/...` headers if present. The
+    // proposer emits them but they're informational — the hunk header
+    // is what we gate on.
+    let mut found_hunk = false;
+    let mut appended: Vec<String> = Vec::new();
+    while let Some(line) = lines.next() {
+        if line.starts_with("--- ") || line.starts_with("+++ ") {
+            continue;
+        }
+        if line.starts_with("@@") {
+            // Sentinel: hunk header must mention __APPEND__. Anything
+            // else is a real unified diff we can't apply yet.
+            if !line.contains("__APPEND__") {
+                return Err(ApplyError::UnsupportedDiffShape(line.to_string()));
+            }
+            found_hunk = true;
+            // Remaining lines are the body.
+            for body in lines.by_ref() {
+                if let Some(stripped) = body.strip_prefix('+') {
+                    appended.push(stripped.to_string());
+                } else if body.is_empty() {
+                    // Blank trailing line — tolerate.
+                    continue;
+                } else {
+                    return Err(ApplyError::UnsupportedDiffShape(body.to_string()));
+                }
+            }
+            break;
+        }
+        // A non-blank, non-header line before any hunk = malformed.
+        if !line.is_empty() {
+            return Err(ApplyError::UnsupportedDiffShape(line.to_string()));
+        }
+    }
+    if !found_hunk {
+        return Err(ApplyError::UnsupportedDiffShape("no hunk header".into()));
+    }
+    Ok(appended)
+}
+
 /// Unix milliseconds. Local helper rather than a public crate-level
 /// helper — only this module + the admin route need it, and they don't
 /// share a now() source with anything else.
@@ -723,10 +1215,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let kb_path = tmp.path().join("kb.sqlite");
         let evol_path = tmp.path().join("evolution.sqlite");
+        let skills_dir = tmp.path().join("skills");
+        // Skills tests want the dir to exist. Memory-op tests don't
+        // touch it, so create_dir_all here keeps both paths happy.
+        std::fs::create_dir_all(&skills_dir).unwrap();
         let kb = Arc::new(SqliteStore::open(&kb_path).await.unwrap());
         let evol = Arc::new(EvolutionStore::open(&evol_path).await.unwrap());
-        let applier =
-            EvolutionApplier::new(evol.clone(), kb.clone(), AutoRollbackThresholds::default());
+        let applier = EvolutionApplier::new(
+            evol.clone(),
+            kb.clone(),
+            AutoRollbackThresholds::default(),
+            skills_dir,
+        );
         (tmp, applier, kb, evol)
     }
 
@@ -925,15 +1425,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_rejects_non_memory_op_kind() {
+    async fn apply_rejects_unsupported_kind() {
         let (_tmp, applier, _kb, evol) = fresh_applier().await;
-        // Insert an approved proposal with kind != memory_op.
-        let pid = ProposalId::new("evol-tag-001");
+        // Phase 3-2B: tag_rebalance + skill_update are now supported,
+        // so this test exercises a kind that still has no handler. Pick
+        // `retry_tuning` — it's the next kind on the roadmap and the
+        // unsupported-kind branch needs at least one regression pin.
+        let pid = ProposalId::new("evol-rt-001");
         let repo = ProposalsRepo::new(evol.pool().clone());
         repo.insert(&EvolutionProposal {
             id: pid.clone(),
-            kind: EvolutionKind::TagRebalance,
-            target: "tag_tree".into(),
+            kind: EvolutionKind::RetryTuning,
+            target: "retry_policy:foo".into(),
             diff: String::new(),
             reasoning: String::new(),
             risk: EvolutionRisk::Low,
@@ -955,7 +1458,7 @@ mod tests {
         .await
         .unwrap();
         match applier.apply(&pid).await {
-            Err(ApplyError::UnsupportedKind(s)) => assert_eq!(s, "tag_rebalance"),
+            Err(ApplyError::UnsupportedKind(s)) => assert_eq!(s, "retry_tuning"),
             other => panic!("expected UnsupportedKind, got {other:?}"),
         }
     }
@@ -1091,20 +1594,22 @@ mod tests {
         }
     }
 
-    /// Reverting a non-memory_op kind must short-circuit with
-    /// `UnsupportedRevertKind`. Hand-seed the rows because the forward
-    /// apply path refuses non-memory_op kinds — the revert path needs
-    /// to be tested independently.
+    /// Reverting a kind that has no inverse handler must short-circuit
+    /// with `UnsupportedRevertKind`. Phase 3-2B activated `tag_rebalance`
+    /// + `skill_update`, so this test moves to `retry_tuning` — the
+    /// next kind without a handler. Hand-seed the rows because the
+    /// forward path refuses unsupported kinds, so the revert path
+    /// needs to be tested independently.
     #[tokio::test]
     async fn revert_unsupported_kind() {
         let (_tmp, applier, _kb, evol) = fresh_applier().await;
-        let pid = ProposalId::new("evol-revert-tag-001");
+        let pid = ProposalId::new("evol-revert-rt-001");
         let proposals = ProposalsRepo::new(evol.pool().clone());
         proposals
             .insert(&EvolutionProposal {
                 id: pid.clone(),
-                kind: EvolutionKind::TagRebalance,
-                target: "tag_tree".into(),
+                kind: EvolutionKind::RetryTuning,
+                target: "retry_policy:foo".into(),
                 diff: String::new(),
                 reasoning: String::new(),
                 risk: EvolutionRisk::Low,
@@ -1135,8 +1640,8 @@ mod tests {
             .insert(&EvolutionHistory {
                 id: None,
                 proposal_id: pid.clone(),
-                kind: EvolutionKind::TagRebalance,
-                target: "tag_tree".into(),
+                kind: EvolutionKind::RetryTuning,
+                target: "retry_policy:foo".into(),
                 before_sha: "x".into(),
                 after_sha: "y".into(),
                 inverse_diff: "{}".into(),
@@ -1149,11 +1654,319 @@ mod tests {
             .unwrap();
 
         match applier.revert(&pid, "won't take").await {
-            Err(ApplyError::UnsupportedRevertKind(s)) => assert_eq!(s, "tag_rebalance"),
+            Err(ApplyError::UnsupportedRevertKind(s)) => assert_eq!(s, "retry_tuning"),
             other => panic!("expected UnsupportedRevertKind, got {other:?}"),
         }
         // Still applied — no audit fields written.
         let after = proposals.get(&pid).await.unwrap();
         assert_eq!(after.status, EvolutionStatus::Applied);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 3-2B: tag_rebalance + skill_update
+    // -----------------------------------------------------------------
+
+    /// Insert a tag node row directly. Returns the tag id. Used to
+    /// hand-build the test tag tree without going through ensure_tag_path
+    /// (we want explicit control over depth + parent_id assertions).
+    async fn seed_tag_node(
+        kb: &SqliteStore,
+        parent_id: Option<i64>,
+        name: &str,
+        path: &str,
+        depth: i32,
+    ) -> i64 {
+        let row = sqlx::query(
+            "INSERT INTO tag_nodes(parent_id, name, path, depth) \
+             VALUES (?1, ?2, ?3, ?4) RETURNING id",
+        )
+        .bind(parent_id)
+        .bind(name)
+        .bind(path)
+        .bind(depth)
+        .fetch_one(kb.pool())
+        .await
+        .unwrap();
+        row.get::<i64, _>("id")
+    }
+
+    /// Insert a chunk_tags pair so tag_rebalance has rows to reparent.
+    async fn link_chunk_tag(kb: &SqliteStore, chunk_id: i64, tag_node_id: i64) {
+        sqlx::query("INSERT INTO chunk_tags(chunk_id, tag_node_id) VALUES (?1, ?2)")
+            .bind(chunk_id)
+            .bind(tag_node_id)
+            .execute(kb.pool())
+            .await
+            .unwrap();
+    }
+
+    /// Insert an Approved proposal of `kind` aimed at `target`. The
+    /// existing `seed_approved` helper is locked to MemoryOp; this
+    /// generic sibling is needed for the new kinds.
+    async fn seed_approved_kind(
+        evol: &EvolutionStore,
+        id: &str,
+        kind: EvolutionKind,
+        target: &str,
+        diff: &str,
+    ) -> ProposalId {
+        let pid = ProposalId::new(id);
+        let repo = ProposalsRepo::new(evol.pool().clone());
+        repo.insert(&EvolutionProposal {
+            id: pid.clone(),
+            kind,
+            target: target.into(),
+            diff: diff.into(),
+            reasoning: "test".into(),
+            risk: EvolutionRisk::Low,
+            budget_cost: 0,
+            status: EvolutionStatus::Approved,
+            shadow_metrics: None,
+            signal_ids: vec![],
+            trace_ids: vec![],
+            created_at: 1_000,
+            decided_at: Some(2_000),
+            decided_by: Some("operator".into()),
+            applied_at: None,
+            rollback_of: None,
+            eval_run_id: None,
+            baseline_metrics_json: None,
+            auto_rollback_at: None,
+            auto_rollback_reason: None,
+        })
+        .await
+        .unwrap();
+        pid
+    }
+
+    #[tokio::test]
+    async fn apply_tag_rebalance_merges_node() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        // Build a 3-node tree: root → coding → python.
+        let root = seed_tag_node(&kb, None, "root", "root", 0).await;
+        let coding = seed_tag_node(&kb, Some(root), "coding", "coding", 1).await;
+        let python = seed_tag_node(&kb, Some(coding), "python", "coding/python", 2).await;
+        // Two chunks tagged with python.
+        let c1 = seed_chunk(&kb, "/c1", "doc one").await;
+        let c2 = seed_chunk(&kb, "/c2", "doc two").await;
+        link_chunk_tag(&kb, c1, python).await;
+        link_chunk_tag(&kb, c2, python).await;
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-tag-merge-001",
+            EvolutionKind::TagRebalance,
+            "merge_tag:coding/python",
+            "",
+        )
+        .await;
+        let history = applier.apply(&pid).await.unwrap();
+        assert_eq!(history.kind, EvolutionKind::TagRebalance);
+
+        // python row gone.
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tag_nodes WHERE id = ?")
+            .bind(python)
+            .fetch_one(kb.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "python node deleted");
+
+        // chunk_tags re-pointed to coding.
+        let parent_links: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT chunk_id, tag_node_id FROM chunk_tags ORDER BY chunk_id ASC",
+        )
+        .fetch_all(kb.pool())
+        .await
+        .unwrap();
+        assert_eq!(parent_links, vec![(c1, coding), (c2, coding)]);
+
+        // inverse_diff captures the deleted node + moved chunk_ids.
+        let inv: serde_json::Value = serde_json::from_str(&history.inverse_diff).unwrap();
+        assert_eq!(inv["op"], "merge_tag");
+        assert_eq!(inv["src"]["id"], python);
+        assert_eq!(inv["src"]["parent_id"], coding);
+        assert_eq!(inv["src"]["path"], "coding/python");
+        assert_eq!(inv["src"]["depth"], 2);
+        let mut moved: Vec<i64> = inv["moved_chunk_tag_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+        moved.sort();
+        assert_eq!(moved, vec![c1, c2]);
+    }
+
+    #[tokio::test]
+    async fn revert_tag_rebalance_restores_node() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        let root = seed_tag_node(&kb, None, "root", "root", 0).await;
+        let coding = seed_tag_node(&kb, Some(root), "coding", "coding", 1).await;
+        let python = seed_tag_node(&kb, Some(coding), "python", "coding/python", 2).await;
+        let c1 = seed_chunk(&kb, "/c1", "doc").await;
+        link_chunk_tag(&kb, c1, python).await;
+
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-tag-revert-001",
+            EvolutionKind::TagRebalance,
+            "merge_tag:coding/python",
+            "",
+        )
+        .await;
+        applier.apply(&pid).await.unwrap();
+        let reverted = applier
+            .revert(&pid, "metrics regression")
+            .await
+            .unwrap();
+        assert!(reverted.rolled_back_at.is_some());
+
+        // python row back at original id.
+        let row: (i64, Option<i64>, String, String, i64) = sqlx::query_as(
+            "SELECT id, parent_id, name, path, depth FROM tag_nodes WHERE id = ?",
+        )
+        .bind(python)
+        .fetch_one(kb.pool())
+        .await
+        .unwrap();
+        assert_eq!(row, (python, Some(coding), "python".into(), "coding/python".into(), 2));
+
+        // chunk_tags re-pointed to python.
+        let link: (i64, i64) = sqlx::query_as(
+            "SELECT chunk_id, tag_node_id FROM chunk_tags WHERE chunk_id = ?",
+        )
+        .bind(c1)
+        .fetch_one(kb.pool())
+        .await
+        .unwrap();
+        assert_eq!(link, (c1, python));
+    }
+
+    #[tokio::test]
+    async fn apply_tag_rebalance_rejects_root() {
+        let (_tmp, applier, kb, evol) = fresh_applier().await;
+        // Root: parent_id IS NULL — explicitly forbidden.
+        let _root = seed_tag_node(&kb, None, "root", "root", 0).await;
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-tag-root-001",
+            EvolutionKind::TagRebalance,
+            "merge_tag:root",
+            "",
+        )
+        .await;
+        match applier.apply(&pid).await {
+            Err(ApplyError::CannotMergeRoot) => {}
+            other => panic!("expected CannotMergeRoot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_skill_update_appends_lines() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        let path = tmp.path().join("skills").join("web_search.md");
+        std::fs::write(&path, "# Web Search\n\nOriginal body.\n").unwrap();
+        let diff = "--- a/skills/web_search.md\n\
+                    +++ b/skills/web_search.md\n\
+                    @@ __APPEND__,0 +__APPEND__,2 @@\n\
+                    +## New section\n\
+                    +Line two\n";
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-skill-001",
+            EvolutionKind::SkillUpdate,
+            "skills/web_search.md",
+            diff,
+        )
+        .await;
+        let history = applier.apply(&pid).await.unwrap();
+        assert_eq!(history.kind, EvolutionKind::SkillUpdate);
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after,
+            "# Web Search\n\nOriginal body.\n## New section\nLine two\n"
+        );
+
+        let inv: serde_json::Value = serde_json::from_str(&history.inverse_diff).unwrap();
+        assert_eq!(inv["op"], "skill_update");
+        assert_eq!(inv["file"], "skills/web_search.md");
+        assert_eq!(inv["prior_content"], "# Web Search\n\nOriginal body.\n");
+    }
+
+    #[tokio::test]
+    async fn revert_skill_update_restores_content() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        let path = tmp.path().join("skills").join("web_search.md");
+        let original = "# Web Search\n\nOriginal body.\n";
+        std::fs::write(&path, original).unwrap();
+        let diff = "--- a/skills/web_search.md\n\
+                    +++ b/skills/web_search.md\n\
+                    @@ __APPEND__,0 +__APPEND__,1 @@\n\
+                    +Appended line\n";
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-skill-revert-001",
+            EvolutionKind::SkillUpdate,
+            "skills/web_search.md",
+            diff,
+        )
+        .await;
+        applier.apply(&pid).await.unwrap();
+        // Sanity: file changed.
+        assert_ne!(std::fs::read_to_string(&path).unwrap(), original);
+
+        applier.revert(&pid, "regression").await.unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, original, "revert restores byte-for-byte");
+    }
+
+    #[tokio::test]
+    async fn apply_skill_update_rejects_unknown_diff_shape() {
+        let (tmp, applier, _kb, evol) = fresh_applier().await;
+        let path = tmp.path().join("skills").join("web_search.md");
+        std::fs::write(&path, "body\n").unwrap();
+        // Real unified-diff hunk header — v0.3 won't apply this.
+        let diff = "--- a/skills/web_search.md\n\
+                    +++ b/skills/web_search.md\n\
+                    @@ -1,3 +1,4 @@\n\
+                    +new line\n";
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-skill-bad-001",
+            EvolutionKind::SkillUpdate,
+            "skills/web_search.md",
+            diff,
+        )
+        .await;
+        match applier.apply(&pid).await {
+            Err(ApplyError::UnsupportedDiffShape(_)) => {}
+            other => panic!("expected UnsupportedDiffShape, got {other:?}"),
+        }
+        // File untouched.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "body\n");
+    }
+
+    #[tokio::test]
+    async fn apply_skill_update_rejects_missing_file() {
+        let (_tmp, applier, _kb, evol) = fresh_applier().await;
+        let diff = "--- a/skills/missing.md\n\
+                    +++ b/skills/missing.md\n\
+                    @@ __APPEND__,0 +__APPEND__,1 @@\n\
+                    +x\n";
+        let pid = seed_approved_kind(
+            &evol,
+            "evol-skill-missing-001",
+            EvolutionKind::SkillUpdate,
+            "skills/does_not_exist.md",
+            diff,
+        )
+        .await;
+        match applier.apply(&pid).await {
+            Err(ApplyError::SkillFileMissing(s)) => {
+                assert_eq!(s, "skills/does_not_exist.md");
+            }
+            other => panic!("expected SkillFileMissing, got {other:?}"),
+        }
     }
 }

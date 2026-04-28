@@ -93,6 +93,7 @@ async fn apply_runs_real_merge_chunks_pipeline() {
         evol.clone(),
         kb.clone(),
         corlinman_core::config::AutoRollbackThresholds::default(),
+        tmp.path().join("skills"),
     ));
     let state = AdminState::new(
         Arc::new(PluginRegistry::default()),
@@ -208,6 +209,7 @@ async fn apply_runs_real_delete_chunk_pipeline() {
         evol.clone(),
         kb.clone(),
         corlinman_core::config::AutoRollbackThresholds::default(),
+        tmp.path().join("skills"),
     ));
     let state = AdminState::new(
         Arc::new(PluginRegistry::default()),

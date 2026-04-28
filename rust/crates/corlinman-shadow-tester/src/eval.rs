@@ -8,6 +8,7 @@
 //! Step 2 of W1-A: types + loader + fixtures only. Step 3 wires these
 //! into the simulator.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use corlinman_evolution::{EvolutionKind, EvolutionRisk};
@@ -29,6 +30,12 @@ pub struct EvalCase {
     pub description: String,
     #[serde(default)]
     pub kb_seed: Vec<String>,
+    /// `<basename> -> file body` map written into a runner-managed
+    /// per-case `<tempdir>/skills/` directory before the simulator runs.
+    /// `BTreeMap` keeps YAML serialization stable. Empty for kinds that
+    /// don't touch `skills/` (memory_op, tag_rebalance).
+    #[serde(default)]
+    pub skill_seed: BTreeMap<String, String>,
     pub proposal: ProposalSpec,
     pub expected: ExpectedOutcome,
 }
@@ -45,6 +52,11 @@ pub struct ProposalSpec {
     pub risk: EvolutionRisk,
     #[serde(default)]
     pub signal_ids: Vec<i64>,
+    /// Unified-diff payload — `skill_update` ships an `__APPEND__`
+    /// hunk here. memory_op / tag_rebalance leave it empty (target +
+    /// kb_seed are sufficient for those).
+    #[serde(default)]
+    pub diff: String,
 }
 
 fn default_risk() -> EvolutionRisk {
@@ -58,7 +70,7 @@ fn default_risk() -> EvolutionRisk {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ExpectedOutcome {
-    /// A merge that consumed `rows_merged` chunks and kept
+    /// memory_op: a merge that consumed `rows_merged` chunks and kept
     /// `surviving_chunk_id` as the canonical row.
     Merged {
         rows_merged: u32,
@@ -66,8 +78,37 @@ pub enum ExpectedOutcome {
         #[serde(default = "default_latency_ms_max")]
         latency_ms_max: u64,
     },
-    /// Simulator detected a bogus / unsafe target and short-circuited.
+    /// memory_op: simulator detected a bogus / unsafe target.
     NoOp {
+        #[serde(default = "default_latency_ms_max")]
+        latency_ms_max: u64,
+    },
+    /// tag_rebalance: `merge_tag` executed — the source tag node is
+    /// gone and `parent_id` now owns its `chunk_tags` rows.
+    TagMerged {
+        src_path: String,
+        parent_id: i64,
+        moved_chunk_count: u32,
+        #[serde(default = "default_latency_ms_max")]
+        latency_ms_max: u64,
+    },
+    /// tag_rebalance: target path didn't resolve to a real `tag_nodes`
+    /// row — no rows changed.
+    TagNoOp {
+        #[serde(default = "default_latency_ms_max")]
+        latency_ms_max: u64,
+    },
+    /// skill_update: file appended; final body must contain
+    /// `content_includes` as a substring.
+    SkillUpdated {
+        file: String,
+        content_includes: String,
+        #[serde(default = "default_latency_ms_max")]
+        latency_ms_max: u64,
+    },
+    /// skill_update: rejected (unsupported diff shape, missing file,
+    /// or invalid target).
+    SkillNoOp {
         #[serde(default = "default_latency_ms_max")]
         latency_ms_max: u64,
     },

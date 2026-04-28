@@ -221,6 +221,13 @@ impl ShadowRunner {
         if let Err(e) = replay_seed(&kb_path, &case.kb_seed).await {
             return failed_output(case, format!("kb seed: {e}"));
         }
+        // skill_update simulator reads `<tempdir>/skills/<basename>`.
+        // Empty map = no-op; safe for memory_op / tag_rebalance.
+        if !case.skill_seed.is_empty() {
+            if let Err(e) = seed_skills(tmp.path(), &case.skill_seed).await {
+                return failed_output(case, format!("skill seed: {e}"));
+            }
+        }
 
         match simulator.simulate(case, &kb_path).await {
             Ok(out) => out,
@@ -300,9 +307,9 @@ async fn replay_seed(kb_path: &Path, seed: &[String]) -> Result<(), String> {
 }
 
 /// Minimal kb schema for the fallback path. Mirrors the columns
-/// memory_op fixtures rely on. We don't pull `corlinman-vector` here —
-/// that crate ships the prod schema, but the shadow runner only needs
-/// enough surface for the in-process simulator.
+/// memory_op + tag_rebalance fixtures rely on. We don't pull
+/// `corlinman-vector` here — that crate ships the prod schema, but the
+/// shadow runner only needs enough surface for the in-process simulator.
 async fn bootstrap_empty_kb(dest: &Path) -> Result<(), String> {
     let url = format!("sqlite://{}", dest.display());
     let opts = SqliteConnectOptions::from_str(&url)
@@ -315,12 +322,50 @@ async fn bootstrap_empty_kb(dest: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     sqlx::raw_sql(
         "CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT, diary_name TEXT, checksum TEXT, mtime INTEGER, size INTEGER);
-         CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_id INTEGER, chunk_index INTEGER, content TEXT, namespace TEXT DEFAULT 'general');",
+         CREATE TABLE chunks (id INTEGER PRIMARY KEY, file_id INTEGER, chunk_index INTEGER, content TEXT, namespace TEXT DEFAULT 'general');
+         CREATE TABLE tag_nodes (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             parent_id INTEGER REFERENCES tag_nodes(id) ON DELETE CASCADE,
+             name TEXT NOT NULL,
+             path TEXT NOT NULL UNIQUE,
+             depth INTEGER NOT NULL,
+             created_at INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE chunk_tags (
+             chunk_id INTEGER NOT NULL,
+             tag_node_id INTEGER NOT NULL,
+             PRIMARY KEY (chunk_id, tag_node_id)
+         );",
     )
     .execute(&pool)
     .await
     .map_err(|e| e.to_string())?;
     pool.close().await;
+    Ok(())
+}
+
+/// Write each `<basename> -> body` entry from `skill_seed` into
+/// `<tempdir>/skills/<basename>`. The skill_update simulator resolves
+/// the same dir via `kb_path.parent().join("skills")`, so the layout
+/// must match. Runner-controlled, never the prod skills/.
+async fn seed_skills(
+    tempdir_root: &Path,
+    seed: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let dir = tempdir_root.join("skills");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("create skills dir: {e}"))?;
+    for (basename, body) in seed {
+        // Defence in depth: reject `..` / `/` so a hostile fixture
+        // can't escape the tempdir even though the runner owns it.
+        if basename.contains('/') || basename.contains("..") || basename.is_empty() {
+            return Err(format!("invalid skill basename {basename:?}"));
+        }
+        tokio::fs::write(dir.join(basename), body.as_bytes())
+            .await
+            .map_err(|e| format!("write skill {basename}: {e}"))?;
+    }
     Ok(())
 }
 

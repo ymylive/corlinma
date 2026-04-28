@@ -27,6 +27,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use corlinman_evolution::EvolutionKind;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
@@ -229,6 +230,14 @@ impl KindSimulator for MemoryOpSimulator {
                 ..
             } => rows_merged == *expected_rows && surviving_id == *expected_surv,
             ExpectedOutcome::NoOp { .. } => rows_merged == 0,
+            // Tag / skill outcomes are checked by their own simulators —
+            // a memory_op fixture that uses one of those variants is a
+            // mis-categorised case and should fail loudly here rather
+            // than silently pass.
+            ExpectedOutcome::TagMerged { .. }
+            | ExpectedOutcome::TagNoOp { .. }
+            | ExpectedOutcome::SkillUpdated { .. }
+            | ExpectedOutcome::SkillNoOp { .. } => false,
         };
 
         Ok(SimulatorOutput {
@@ -376,6 +385,437 @@ async fn capture_shadow(
 }
 
 // ---------------------------------------------------------------------------
+// TagRebalanceSimulator
+// ---------------------------------------------------------------------------
+
+/// Simulator for `tag_rebalance` proposals: re-points `chunk_tags` rows
+/// from a leaf `tag_nodes` row to its parent and drops the leaf, mirroring
+/// the gateway applier's `apply_tag_rebalance` SQL inline (no gateway
+/// dep). NoOp = target path didn't resolve to a node, so nothing moved.
+pub struct TagRebalanceSimulator;
+
+#[async_trait]
+impl KindSimulator for TagRebalanceSimulator {
+    fn kind(&self) -> EvolutionKind {
+        EvolutionKind::TagRebalance
+    }
+
+    async fn simulate(
+        &self,
+        case: &EvalCase,
+        kb_path: &Path,
+    ) -> Result<SimulatorOutput, SimulatorError> {
+        let started = Instant::now();
+
+        // Parse target shape — anything other than `merge_tag:<path>` is
+        // a per-case failure, not a runner crash.
+        let path = match case.proposal.target.strip_prefix("merge_tag:") {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => {
+                return Ok(SimulatorOutput {
+                    case_name: case.name.clone(),
+                    passed: false,
+                    baseline: Map::new(),
+                    shadow: Map::new(),
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    error: Some(format!(
+                        "invalid target {:?}: expected 'merge_tag:<path>'",
+                        case.proposal.target
+                    )),
+                });
+            }
+        };
+
+        let pool = open_pool(kb_path).await?;
+
+        // Baseline: total nodes, target+parent ids, and chunk_tags count
+        // pointing at the target. `target_node_id == None` means the
+        // path doesn't exist — the runner-determined NoOp branch.
+        let tag_nodes_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tag_nodes")
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| SimulatorError::Sqlite {
+                step: "tag_baseline.count",
+                source: e,
+            })?;
+
+        let target_row: Option<(i64, Option<i64>)> = sqlx::query_as(
+            "SELECT id, parent_id FROM tag_nodes WHERE path = ?1",
+        )
+        .bind(&path)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| SimulatorError::Sqlite {
+            step: "tag_baseline.lookup",
+            source: e,
+        })?;
+
+        let (target_id, parent_id_opt) = match target_row {
+            Some((id, parent)) => (Some(id), parent),
+            None => (None, None),
+        };
+
+        let chunks_under_target: i64 = if let Some(tid) = target_id {
+            sqlx::query_scalar("SELECT COUNT(*) FROM chunk_tags WHERE tag_node_id = ?1")
+                .bind(tid)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| SimulatorError::Sqlite {
+                    step: "tag_baseline.chunks",
+                    source: e,
+                })?
+        } else {
+            0
+        };
+
+        let mut baseline = Map::new();
+        baseline.insert("tag_nodes_total".into(), json!(tag_nodes_total));
+        baseline.insert("target_path".into(), json!(path));
+        baseline.insert("target_node_id".into(), json!(target_id));
+        baseline.insert("parent_id".into(), json!(parent_id_opt));
+        baseline.insert("chunk_tags_under_target".into(), json!(chunks_under_target));
+
+        // Apply: only when target exists AND has a parent. Root merges
+        // (parent NULL) and missing nodes both fall through to NoOp.
+        let mut moved_chunk_count: u32 = 0;
+        let mut node_deleted = false;
+        if let (Some(tid), Some(pid)) = (target_id, parent_id_opt) {
+            // Conflict-DELETE before UPDATE — same idempotence guard the
+            // gateway applier uses (chunk_tags PK is (chunk_id,tag_node_id)).
+            sqlx::query(
+                "DELETE FROM chunk_tags WHERE tag_node_id = ?1 \
+                 AND chunk_id IN (SELECT chunk_id FROM chunk_tags WHERE tag_node_id = ?2)",
+            )
+            .bind(tid)
+            .bind(pid)
+            .execute(&pool)
+            .await
+            .map_err(|e| SimulatorError::Sqlite {
+                step: "tag_apply.dedupe",
+                source: e,
+            })?;
+            let upd = sqlx::query("UPDATE chunk_tags SET tag_node_id = ?1 WHERE tag_node_id = ?2")
+                .bind(pid)
+                .bind(tid)
+                .execute(&pool)
+                .await
+                .map_err(|e| SimulatorError::Sqlite {
+                    step: "tag_apply.reparent",
+                    source: e,
+                })?;
+            moved_chunk_count = upd.rows_affected() as u32;
+
+            let del = sqlx::query("DELETE FROM tag_nodes WHERE id = ?1")
+                .bind(tid)
+                .execute(&pool)
+                .await
+                .map_err(|e| SimulatorError::Sqlite {
+                    step: "tag_apply.delete",
+                    source: e,
+                })?;
+            node_deleted = del.rows_affected() > 0;
+        }
+
+        // Shadow: post-state counts so the operator UI can diff.
+        let post_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tag_nodes")
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| SimulatorError::Sqlite {
+                step: "tag_shadow.count",
+                source: e,
+            })?;
+        let chunks_under_parent: i64 = if let Some(pid) = parent_id_opt {
+            sqlx::query_scalar("SELECT COUNT(*) FROM chunk_tags WHERE tag_node_id = ?1")
+                .bind(pid)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| SimulatorError::Sqlite {
+                    step: "tag_shadow.chunks",
+                    source: e,
+                })?
+        } else {
+            0
+        };
+
+        let mut shadow = Map::new();
+        shadow.insert("tag_nodes_total".into(), json!(post_total));
+        shadow.insert("target_node_present".into(), json!(target_id.is_some() && !node_deleted));
+        shadow.insert("moved_chunk_count".into(), json!(moved_chunk_count));
+        shadow.insert("chunks_now_under_parent".into(), json!(chunks_under_parent));
+
+        let (passed, error) = match &case.expected {
+            ExpectedOutcome::TagMerged {
+                src_path,
+                parent_id: expected_parent,
+                moved_chunk_count: expected_moved,
+                ..
+            } => {
+                let ok = node_deleted
+                    && src_path == &path
+                    && parent_id_opt == Some(*expected_parent)
+                    && moved_chunk_count == *expected_moved;
+                (ok, None)
+            }
+            ExpectedOutcome::TagNoOp { .. } => {
+                (target_id.is_none() && moved_chunk_count == 0 && !node_deleted, None)
+            }
+            _ => (
+                false,
+                Some("expected outcome shape mismatch for kind".to_string()),
+            ),
+        };
+
+        Ok(SimulatorOutput {
+            case_name: case.name.clone(),
+            passed,
+            baseline,
+            shadow,
+            latency_ms: started.elapsed().as_millis() as u64,
+            error,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SkillUpdateSimulator
+// ---------------------------------------------------------------------------
+
+/// Simulator for `skill_update` proposals: replays the `__APPEND__`
+/// hunk against the runner-prepared per-case `<tempdir>/skills/` dir.
+/// The simulator never touches the production `skills_dir` — only
+/// `kb_path.parent().join("skills")`, which the runner owns.
+pub struct SkillUpdateSimulator;
+
+#[async_trait]
+impl KindSimulator for SkillUpdateSimulator {
+    fn kind(&self) -> EvolutionKind {
+        EvolutionKind::SkillUpdate
+    }
+
+    async fn simulate(
+        &self,
+        case: &EvalCase,
+        kb_path: &Path,
+    ) -> Result<SimulatorOutput, SimulatorError> {
+        let started = Instant::now();
+
+        // Runner contract: skills tempdir is a sibling of kb.sqlite. We
+        // never resolve outside it, and we never read prod paths.
+        let skills_dir = kb_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("skills");
+
+        // Validate target shape — same rules the gateway applier uses.
+        let target = &case.proposal.target;
+        let basename = match target.strip_prefix("skills/") {
+            Some(b) if b.ends_with(".md") && !b.is_empty() && !b.contains('/') && !b.contains("..") => {
+                b.to_string()
+            }
+            _ => {
+                let out = failed_skill_output(case, started, format!(
+                    "invalid target {target:?}: expected 'skills/<name>.md'"
+                ));
+                return Ok(out);
+            }
+        };
+
+        let path = skills_dir.join(&basename);
+
+        // Baseline read; missing file → SkillNoOp branch.
+        let prior_meta = tokio::fs::metadata(&path).await;
+        let prior_content = match prior_meta {
+            Ok(m) if m.is_file() => match tokio::fs::read_to_string(&path).await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    return Ok(failed_skill_output(case, started, format!("read prior: {e}")));
+                }
+            },
+            _ => None,
+        };
+
+        let baseline_size = prior_content.as_ref().map(|s| s.len() as u64).unwrap_or(0);
+        let prior_sha = prior_content
+            .as_deref()
+            .map(sha256_short)
+            .unwrap_or_else(|| "absent".to_string());
+
+        let mut baseline = Map::new();
+        baseline.insert("file".into(), json!(target));
+        baseline.insert("file_present".into(), json!(prior_content.is_some()));
+        baseline.insert("file_size".into(), json!(baseline_size));
+        baseline.insert("byte_count".into(), json!(baseline_size));
+        baseline.insert("prior_content_sha".into(), json!(prior_sha));
+
+        // Missing file: SkillNoOp without diff parse — matches the
+        // applier's SkillFileMissing reject.
+        let Some(prior) = prior_content else {
+            let mut shadow = Map::new();
+            shadow.insert("file".into(), json!(target));
+            shadow.insert("applied".into(), json!(false));
+            shadow.insert("file_size".into(), json!(0u64));
+            shadow.insert("byte_count".into(), json!(0u64));
+            shadow.insert("appended_bytes".into(), json!(0u64));
+            let passed = matches!(case.expected, ExpectedOutcome::SkillNoOp { .. });
+            return Ok(SimulatorOutput {
+                case_name: case.name.clone(),
+                passed,
+                baseline,
+                shadow,
+                latency_ms: started.elapsed().as_millis() as u64,
+                error: if passed {
+                    None
+                } else {
+                    Some("skill file missing — expected SkillNoOp".to_string())
+                },
+            });
+        };
+
+        // Parse the diff. v0.3 only ships `__APPEND__`; anything else
+        // collapses to a SkillNoOp.
+        let appended_lines = match parse_append_diff(&case.proposal.diff) {
+            Ok(v) => v,
+            Err(reason) => {
+                let mut shadow = Map::new();
+                shadow.insert("file".into(), json!(target));
+                shadow.insert("applied".into(), json!(false));
+                shadow.insert("file_size".into(), json!(baseline_size));
+                shadow.insert("byte_count".into(), json!(baseline_size));
+                shadow.insert("appended_bytes".into(), json!(0u64));
+                shadow.insert("reject_reason".into(), json!(reason));
+                let passed = matches!(case.expected, ExpectedOutcome::SkillNoOp { .. });
+                return Ok(SimulatorOutput {
+                    case_name: case.name.clone(),
+                    passed,
+                    baseline,
+                    shadow,
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    error: if passed {
+                        None
+                    } else {
+                        Some(format!("diff rejected: {reason}"))
+                    },
+                });
+            }
+        };
+
+        let mut new_content = prior.clone();
+        if !new_content.is_empty() && !new_content.ends_with('\n') {
+            new_content.push('\n');
+        }
+        for line in &appended_lines {
+            new_content.push_str(line);
+            new_content.push('\n');
+        }
+        if let Err(e) = tokio::fs::write(&path, new_content.as_bytes()).await {
+            return Ok(failed_skill_output(case, started, format!("write: {e}")));
+        }
+
+        let new_size = new_content.len() as u64;
+        let appended_bytes = new_size.saturating_sub(baseline_size);
+
+        let mut shadow = Map::new();
+        shadow.insert("file".into(), json!(target));
+        shadow.insert("applied".into(), json!(true));
+        shadow.insert("file_size".into(), json!(new_size));
+        shadow.insert("byte_count".into(), json!(new_size));
+        shadow.insert("appended_bytes".into(), json!(appended_bytes));
+
+        let (passed, error) = match &case.expected {
+            ExpectedOutcome::SkillUpdated {
+                file,
+                content_includes,
+                ..
+            } => {
+                let basename_match = file
+                    .strip_prefix("skills/")
+                    .map(|f| f == basename)
+                    .unwrap_or(false);
+                let ok = basename_match && new_content.contains(content_includes.as_str());
+                (ok, None)
+            }
+            ExpectedOutcome::SkillNoOp { .. } => (new_size == baseline_size, None),
+            _ => (
+                false,
+                Some("expected outcome shape mismatch for kind".to_string()),
+            ),
+        };
+
+        Ok(SimulatorOutput {
+            case_name: case.name.clone(),
+            passed,
+            baseline,
+            shadow,
+            latency_ms: started.elapsed().as_millis() as u64,
+            error,
+        })
+    }
+}
+
+/// First 16 hex chars of SHA-256 over the bytes — short enough to fit
+/// the per-case JSON without bloating the row.
+fn sha256_short(s: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    let digest = h.finalize();
+    let mut out = String::with_capacity(16);
+    for b in digest.iter().take(8) {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Build a parse-failure / IO-failure SkillUpdate output up-front.
+fn failed_skill_output(case: &EvalCase, started: Instant, error: String) -> SimulatorOutput {
+    SimulatorOutput {
+        case_name: case.name.clone(),
+        passed: false,
+        baseline: Map::new(),
+        shadow: Map::new(),
+        latency_ms: started.elapsed().as_millis() as u64,
+        error: Some(error),
+    }
+}
+
+/// Parse the `__APPEND__`-shaped diff the Step-1 EvolutionEngine emits.
+/// Mirrors the gateway applier's `parse_append_diff` byte-for-byte —
+/// kept inline because the shadow-tester crate has no gateway dep.
+fn parse_append_diff(diff: &str) -> Result<Vec<String>, String> {
+    let mut lines = diff.lines();
+    let mut found_hunk = false;
+    let mut appended: Vec<String> = Vec::new();
+    while let Some(line) = lines.next() {
+        if line.starts_with("--- ") || line.starts_with("+++ ") {
+            continue;
+        }
+        if line.starts_with("@@") {
+            if !line.contains("__APPEND__") {
+                return Err(format!("unsupported hunk header: {line}"));
+            }
+            found_hunk = true;
+            for body in lines.by_ref() {
+                if let Some(stripped) = body.strip_prefix('+') {
+                    appended.push(stripped.to_string());
+                } else if body.is_empty() {
+                    continue;
+                } else {
+                    return Err(format!("non-append body line: {body}"));
+                }
+            }
+            break;
+        }
+        if !line.is_empty() {
+            return Err(format!("non-header line before hunk: {line}"));
+        }
+    }
+    if !found_hunk {
+        return Err("no hunk header".to_string());
+    }
+    Ok(appended)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -456,11 +896,13 @@ mod tests {
             kind: Some(EvolutionKind::MemoryOp),
             description: "test".into(),
             kb_seed: vec![],
+            skill_seed: Default::default(),
             proposal: ProposalSpec {
                 target: target.to_string(),
                 reasoning: "test".into(),
                 risk: EvolutionRisk::High,
                 signal_ids: vec![],
+                diff: String::new(),
             },
             expected,
         }

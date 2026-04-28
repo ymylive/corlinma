@@ -407,16 +407,17 @@ pub async fn build_runtime_full_with_evolution(
             // signal window. Snapshot via `load()` — a hot-reload
             // mid-apply is racy in a way the snapshot wouldn't fix
             // anyway, and the next apply picks up the new value.
-            let thresholds = config_handle
-                .load()
-                .evolution
-                .auto_rollback
-                .thresholds
-                .clone();
+            let snapshot = config_handle.load();
+            let thresholds = snapshot.evolution.auto_rollback.thresholds.clone();
+            // Phase 3-2B: skill_update proposals resolve `skills/...`
+            // targets under `<data_dir>/<[skills].dir>`. Snapshot at
+            // boot — same reasoning as `thresholds` above.
+            let skills_dir = resolve_data_dir().join(&snapshot.skills.dir);
             let applier = Arc::new(crate::evolution_applier::EvolutionApplier::new(
                 store.clone(),
                 kb,
                 thresholds,
+                skills_dir,
             ));
             admin_state = admin_state.with_evolution_applier(applier);
         } else {

@@ -131,8 +131,16 @@ async fn run_once(args: RunOnceArgs) -> anyhow::Result<()> {
 
     // EvolutionApplier owns the kb-mutation + audit-flip path; the
     // adapter `impl Applier for EvolutionApplier` (in gateway) maps
-    // `ApplyError` → `RevertError`.
-    let applier = EvolutionApplier::new(evol.clone(), kb.clone(), ar_cfg.thresholds.clone());
+    // `ApplyError` → `RevertError`. Phase 3-2B: skill_update needs a
+    // skills_dir; the CLI runs the same revert path as the gateway so
+    // we resolve it from the same config field for consistency.
+    let skills_dir = config.server.data_dir.join(&config.skills.dir);
+    let applier = EvolutionApplier::new(
+        evol.clone(),
+        kb.clone(),
+        ar_cfg.thresholds.clone(),
+        skills_dir,
+    );
     let applier: Arc<dyn Applier> = Arc::new(applier);
 
     let mut monitor = AutoRollbackMonitor::new(

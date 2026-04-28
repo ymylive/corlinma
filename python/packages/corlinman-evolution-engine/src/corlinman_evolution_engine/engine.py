@@ -43,7 +43,15 @@ from corlinman_evolution_engine.proposals import (
     format_day_prefix,
     mint_proposal_id,
 )
+from corlinman_evolution_engine.skill_update import (
+    KIND_SKILL_UPDATE,
+    SkillUpdateHandler,
+)
 from corlinman_evolution_engine.store import EvolutionStore
+from corlinman_evolution_engine.tag_rebalance import (
+    KIND_TAG_REBALANCE,
+    TagRebalanceHandler,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +66,8 @@ logger = logging.getLogger(__name__)
 #: in ``EngineConfig.enabled_kinds`` and the Rust ``EvolutionKind`` enum.
 DEFAULT_HANDLERS: dict[str, KindHandler] = {
     KIND_MEMORY_OP: MemoryOpHandler(),
+    KIND_TAG_REBALANCE: TagRebalanceHandler(),
+    KIND_SKILL_UPDATE: SkillUpdateHandler(),
 }
 
 
@@ -98,12 +108,16 @@ class EngineConfig:
     you've measured.
     """
 
-    enabled_kinds: tuple[str, ...] = (KIND_MEMORY_OP,)
+    enabled_kinds: tuple[str, ...] = (
+        KIND_MEMORY_OP,
+        KIND_TAG_REBALANCE,
+        KIND_SKILL_UPDATE,
+    )
     """Which ``KindHandler`` registrations to run, in order.
 
-    Phase 2 default: ``("memory_op",)``. Phase 3 will extend with e.g.
-    ``("memory_op", "skill_update", "tag_rebalance")`` once the
-    corresponding handlers land.
+    Phase 3-2B Step 1 default: all three Phase-3 handlers enabled. The
+    safety net (W1-A shadow / W1-B rollback) gates application of these
+    kinds; the engine itself just emits the proposals.
     """
 
     budget: BudgetConfig = field(default_factory=BudgetConfig)
