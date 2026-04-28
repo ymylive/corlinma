@@ -239,6 +239,16 @@ name = "auto_rollback"
 cron = "0 0 4 * * * *"
 action = { type = "subprocess", command = "corlinman-auto-rollback", args = ["run-once", "--config", "/data/config.toml"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_DATA_DIR = "/data" } }
 
+# Phase 3 wave 3-C: hourly persona decay sweep — recovers fatigue,
+# ages out the oldest `recent_topics` once a day, flips a "tired" mood
+# back to "neutral" once an agent's fatigue drops under the threshold.
+# The CLI is purely additive (deterministic, idempotent on a fresh DB)
+# so leaving the cron wired in pre-population is safe.
+[[scheduler.jobs]]
+name = "persona_decay"
+cron = "0 0 * * * * *"
+action = { type = "subprocess", command = "corlinman-persona", args = ["decay-once", "--db", "/data/agent_state.sqlite"], timeout_secs = 60, working_dir = "/data" }
+
 # Phase 3 wave 1-C: per-week / per-kind cap on EvolutionEngine proposal
 # filing. The Python engine reads this same TOML via `--budget-config`
 # (passed by the scheduler). When `enabled = false` the engine behaves
@@ -259,6 +269,17 @@ tool_policy     = 1
 new_skill       = 2
 tag_rebalance   = 3
 retry_tuning    = 3
+
+# Phase 3 wave 3-C: persona decay tunables. The hourly `persona_decay`
+# scheduler job above passes the DB path on the CLI; the decay knobs
+# (recovery rate, mood flip threshold, daily topic decay) can be wired
+# in via additional CLI flags if you need to override the defaults.
+# Defaults match the documented Phase 3 roadmap §6 [persona] block.
+[persona]
+enabled                     = true
+mood_decay_per_hour         = 0.05
+fatigue_recovery_per_hour   = 0.1
+recent_topics_decay_per_day = 1
 
 # [[scheduler.jobs]]
 # name = "weekly-reindex"
