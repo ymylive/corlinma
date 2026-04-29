@@ -20,7 +20,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use axum::{routing::any, Router};
 use corlinman_core::config::Config;
-use corlinman_evolution::EvolutionStore;
+use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
 use corlinman_plugins::registry::PluginRegistry;
 use corlinman_vector::SqliteStore;
 use tokio::sync::broadcast;
@@ -42,6 +42,7 @@ pub mod config;
 pub mod embedding;
 pub mod evolution;
 pub mod logs;
+pub mod memory;
 pub mod models;
 pub mod napcat;
 pub mod plugins;
@@ -117,6 +118,14 @@ pub struct AdminState {
     /// single banner. Holding it on `AdminState` (rather than rebuilding
     /// per-request) keeps the kb-pool clones to one per gateway boot.
     pub evolution_applier: Option<Arc<EvolutionApplier>>,
+    /// Phase 3.1: history+proposals repos used by `/admin/memory/decay/
+    /// reset` to record the manual decay-reset as a synthetic
+    /// `memory_op` row in `evolution_history` (with a paired proposal
+    /// row to satisfy the FK). `None` when `evolution_store` is missing
+    /// — the route then 503s alongside the rest of the evolution
+    /// surface.
+    pub history_repo: Option<HistoryRepo>,
+    pub proposals_repo: Option<ProposalsRepo>,
 }
 
 impl AdminState {
@@ -134,6 +143,8 @@ impl AdminState {
             config_watcher: None,
             evolution_store: None,
             evolution_applier: None,
+            history_repo: None,
+            proposals_repo: None,
         }
     }
 
@@ -212,6 +223,21 @@ impl AdminState {
         self
     }
 
+    /// Phase 3.1 fluent: attach `HistoryRepo` + `ProposalsRepo` so
+    /// `/admin/memory/decay/reset` can record its forward-correction in
+    /// `evolution_history`. Both share the same `evolution.sqlite` pool
+    /// the observer writes signals into, so passing them together keeps
+    /// the connection budget unchanged.
+    pub fn with_history_repo(
+        mut self,
+        history_repo: HistoryRepo,
+        proposals_repo: ProposalsRepo,
+    ) -> Self {
+        self.history_repo = Some(history_repo);
+        self.proposals_repo = Some(proposals_repo);
+        self
+    }
+
     /// Re-serialise the current config snapshot to the Python-side JSON
     /// drop. No-op + warn when the path isn't configured — admin writes
     /// still succeed (the TOML write already landed), they just can't
@@ -259,6 +285,7 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(channels::router(state.clone()))
         .merge(scheduler::router(state.clone()))
         .merge(evolution::router(state.clone()))
+        .merge(memory::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             require_admin,

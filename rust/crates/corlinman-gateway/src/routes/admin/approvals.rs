@@ -290,6 +290,8 @@ mod tests {
             config_watcher: None,
             evolution_store: None,
             evolution_applier: None,
+            history_repo: None,
+            proposals_repo: None,
         };
         router(state)
     }

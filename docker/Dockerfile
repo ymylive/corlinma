@@ -64,7 +64,9 @@ COPY proto ./proto
 
 RUN cargo build --release \
       -p corlinman-gateway \
-      -p corlinman-cli
+      -p corlinman-cli \
+      -p corlinman-shadow-tester \
+      -p corlinman-auto-rollback-cli
 
 # ---------------------------------------------------------------------------
 # Stage 3: py-builder — uv sync + generate Python gRPC stubs
@@ -129,8 +131,12 @@ RUN apt-get update \
  && chown -R corlinman:corlinman /data /app
 
 # Rust binaries
-COPY --from=rust-builder /build/target/release/corlinman-gateway /usr/local/bin/corlinman-gateway
-COPY --from=rust-builder /build/target/release/corlinman         /usr/local/bin/corlinman
+COPY --from=rust-builder /build/target/release/corlinman-gateway        /usr/local/bin/corlinman-gateway
+COPY --from=rust-builder /build/target/release/corlinman                /usr/local/bin/corlinman
+# Phase 3 W1 CLIs invoked by the in-gateway scheduler. Without these the
+# shadow_tester / auto_rollback cron jobs would log spawn_failed every fire.
+COPY --from=rust-builder /build/target/release/corlinman-shadow-tester  /usr/local/bin/corlinman-shadow-tester
+COPY --from=rust-builder /build/target/release/corlinman-auto-rollback  /usr/local/bin/corlinman-auto-rollback
 
 # Python venv (uv-managed). Workspace packages install as editable
 # regardless of `--no-editable` (uv treats `workspace = true` members as
@@ -147,6 +153,19 @@ ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     CORLINMAN_UI_DIR=/app/ui-static \
     CORLINMAN_DATA_DIR=/data
+
+# Build-time sanity check: every CLI the in-gateway scheduler shells out
+# to must be present, otherwise jobs spawn_fail every fire. Fails the
+# build loudly (exit 1) instead of letting the container boot into a
+# silently-broken state.
+RUN ls /usr/local/bin/corlinman-gateway \
+       /usr/local/bin/corlinman \
+       /usr/local/bin/corlinman-shadow-tester \
+       /usr/local/bin/corlinman-auto-rollback >&2 \
+ && ls /opt/venv/bin/corlinman-evolution-engine \
+       /opt/venv/bin/corlinman-persona \
+       /opt/venv/bin/corlinman-user-model >&2 \
+ || (echo "MISSING CLI" >&2 && exit 1)
 
 EXPOSE 6005
 WORKDIR /data

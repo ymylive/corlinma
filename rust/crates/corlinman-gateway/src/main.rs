@@ -83,6 +83,16 @@ async fn main() {
     let (evolution_observer_handle, evolution_store) =
         maybe_spawn_evolution_observer(&hook_bus).await;
 
+    // Phase 3.1: spawn the cron scheduler. Without this call the
+    // `[[scheduler.jobs]]` entries in config (evolution_engine /
+    // shadow_tester / auto_rollback / persona_decay / memory_consolidation /
+    // user_model_distill) never fire — the runtime image carries the
+    // CLIs, the config carries the jobs, this wires the loop. Disabled
+    // when no config file is present (dev / tests) or zero parseable
+    // jobs were declared. Drain happens via `root` cancellation +
+    // `join_all` in the shutdown path below.
+    let scheduler_handle = maybe_spawn_scheduler(&hook_bus, root.child_token());
+
     // P0-1: spawn the log-retention sweeper if a file sink is active.
     // Delete rotated files older than `retention_days` from the log
     // directory every `SWEEP_INTERVAL`. Failure is warn-only.
@@ -269,6 +279,12 @@ async fn main() {
         // dropping the runtime would otherwise abort it mid-write.
         let _ = h.await;
     }
+    if let Some(handle) = scheduler_handle {
+        // Each per-job loop honours the root cancel token; await draining
+        // them so any subprocess that was mid-run gets killed via
+        // `kill_on_drop` before the process exits.
+        handle.join_all().await;
+    }
 
     // S7.T1: flush + shutdown the OTLP exporter if it was installed. No-op
     // when telemetry was never initialised.
@@ -436,6 +452,41 @@ async fn maybe_spawn_evolution_observer(
     );
     let handle = evolution_observer::spawn(Arc::new(hook_bus.clone()), repo, &cfg);
     (Some(handle), Some(store))
+}
+
+/// Phase 3.1: spawn the cron scheduler bound to the shared `HookBus` so
+/// `engine.run.*` events from subprocess jobs flow into the
+/// `EvolutionObserver`. Returns `None` when no config file resolves (dev /
+/// tests) or every declared job's cron fails to parse — the gateway boots
+/// without scheduled jobs in that case, but otherwise unchanged.
+fn maybe_spawn_scheduler(
+    hook_bus: &corlinman_hooks::HookBus,
+    cancel: CancellationToken,
+) -> Option<corlinman_scheduler::SchedulerHandle> {
+    let cfg = match load_config() {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => {
+            tracing::debug!("scheduler: no config file; not spawning");
+            return None;
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "scheduler: config load failed; not spawning");
+            return None;
+        }
+    };
+    let job_count = cfg.scheduler.jobs.len();
+    if job_count == 0 {
+        tracing::info!("scheduler: zero jobs configured; not spawning");
+        return None;
+    }
+    let bus = Arc::new(hook_bus.clone());
+    let handle = corlinman_scheduler::spawn(&cfg.scheduler, bus, cancel);
+    tracing::info!(
+        configured_jobs = job_count,
+        running_jobs = handle.handles.len(),
+        "scheduler: spawned",
+    );
+    Some(handle)
 }
 
 /// Resolve `$CORLINMAN_CONFIG` (or [`Config::default_path`]) and — when the

@@ -259,6 +259,14 @@ name = "memory_consolidation"
 cron = "0 0 5 * * * *"
 action = { type = "subprocess", command = "corlinman-evolution-engine", args = ["consolidate-once", "--config", "/data/config.toml"], timeout_secs = 600, working_dir = "/data", env = { CORLINMAN_DATA_DIR = "/data" } }
 
+# Phase 3 W3-B: daily user trait distillation. Reads sessions.sqlite, writes
+# user_model.sqlite. Scheduled 30 min after the engine so user-model traits
+# can become signals/inputs to the next engine run.
+[[scheduler.jobs]]
+name = "user_model_distill"
+cron = "0 30 5 * * * *"
+action = { type = "subprocess", command = "corlinman-user-model", args = ["distill-recent", "--since-hours", "24"], timeout_secs = 600, working_dir = "/data" }
+
 # Phase 3 wave 1-C: per-week / per-kind cap on EvolutionEngine proposal
 # filing. The Python engine reads this same TOML via `--budget-config`
 # (passed by the scheduler). When `enabled = false` the engine behaves
