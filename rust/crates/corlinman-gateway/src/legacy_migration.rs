@@ -39,13 +39,7 @@ use corlinman_tenant::tenant_db_path;
 
 /// The five per-tenant SQLite filenames Phase 4 migrates from the
 /// legacy flat layout into `<data_dir>/tenants/<tenant>/`.
-const LEGACY_DB_NAMES: &[&str] = &[
-    "evolution",
-    "kb",
-    "sessions",
-    "user_model",
-    "agent_state",
-];
+const LEGACY_DB_NAMES: &[&str] = &["evolution", "kb", "sessions", "user_model", "agent_state"];
 
 /// Walk the legacy data files and rename each into the new
 /// `<data_dir>/tenants/default/` layout. Idempotent: see module
@@ -225,7 +219,10 @@ mod tests {
                 .join("tenants")
                 .join("default")
                 .join(format!("{name}.sqlite"));
-            assert_eq!(fs::read(&migrated).unwrap(), format!("v1-{name}").as_bytes());
+            assert_eq!(
+                fs::read(&migrated).unwrap(),
+                format!("v1-{name}").as_bytes()
+            );
         }
     }
 

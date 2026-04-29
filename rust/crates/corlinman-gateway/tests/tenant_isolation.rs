@@ -77,11 +77,7 @@ fn make_app(tenants_enabled: bool, allowed: &[&str]) -> axum::Router {
     router_with_state(state)
 }
 
-async fn get(
-    app: axum::Router,
-    uri: &str,
-    auth: Option<&str>,
-) -> (StatusCode, serde_json::Value) {
+async fn get(app: axum::Router, uri: &str, auth: Option<&str>) -> (StatusCode, serde_json::Value) {
     let mut builder = Request::builder().uri(uri);
     if let Some(a) = auth {
         builder = builder.header(header::AUTHORIZATION, a);
@@ -104,7 +100,12 @@ async fn get(
 #[tokio::test]
 async fn enabled_allows_known_tenant_query() {
     let app = make_app(true, &["acme", "bravo"]);
-    let (status, _) = get(app, "/admin/plugins?tenant=acme", Some(&basic("admin", "secret"))).await;
+    let (status, _) = get(
+        app,
+        "/admin/plugins?tenant=acme",
+        Some(&basic("admin", "secret")),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,

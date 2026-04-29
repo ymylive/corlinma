@@ -237,7 +237,12 @@ mod tests {
         };
         let app = app(state);
         let resp = app
-            .oneshot(Request::builder().uri("/probe").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/probe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -332,7 +337,12 @@ mod tests {
         }
         let app = Router::new().route("/probe", get(handler));
         let resp = app
-            .oneshot(Request::builder().uri("/probe").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/probe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -349,9 +359,6 @@ mod tests {
         assert_eq!(extract_tenant_query(""), None);
         // Tolerates over-encoded `-` even though slugs don't strictly
         // need it.
-        assert_eq!(
-            extract_tenant_query("tenant=ac%2Dme"),
-            Some("ac-me".into())
-        );
+        assert_eq!(extract_tenant_query("tenant=ac%2Dme"), Some("ac-me".into()));
     }
 }
