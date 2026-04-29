@@ -26,6 +26,7 @@ corlinman-vector = { path = "../corlinman-vector" }
 corlinman-hooks = { path = "../corlinman-hooks" }
 corlinman-evolution = { path = "../corlinman-evolution" }
 corlinman-auto-rollback = { path = "../corlinman-auto-rollback" }
+corlinman-scheduler = { path = "../corlinman-scheduler" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

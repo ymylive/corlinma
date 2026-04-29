@@ -13,7 +13,7 @@ use axum::Router;
 use corlinman_agent_client::client::{connect_channel, resolve_endpoint, AgentClient};
 use corlinman_core::config::Config;
 use corlinman_core::{SessionStore, SqliteSessionStore};
-use corlinman_evolution::EvolutionStore;
+use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
 use corlinman_plugins::{roots_from_env_var, Origin, PluginRegistry, SearchRoot};
 use corlinman_vector::SqliteStore;
 use tokio::net::TcpListener;
@@ -426,6 +426,13 @@ pub async fn build_runtime_full_with_evolution(
                  /admin/evolution/:id/apply will return 503",
             );
         }
+        // Phase 3.1: hand the same pool to the manual-decay-reset
+        // admin route via `HistoryRepo` + `ProposalsRepo`. Both are
+        // pool-clone wrappers, so this doesn't widen the connection
+        // budget.
+        let history_repo = HistoryRepo::new(store.pool().clone());
+        let proposals_repo = ProposalsRepo::new(store.pool().clone());
+        admin_state = admin_state.with_history_repo(history_repo, proposals_repo);
         admin_state = admin_state.with_evolution_store(store);
     }
     // B5-BE1: Canvas Host protocol stubs. Sub-router carries its own auth

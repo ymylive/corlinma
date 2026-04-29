@@ -1233,6 +1233,34 @@ impl SqliteStore {
         Ok(res.rows_affected() as u32)
     }
 
+    /// Phase 3.1: admin escape hatch for the decay sweeper. Force a
+    /// chunk's `decay_score` back to 1.0 and stamp `last_recalled_at =
+    /// now_ms` so the next decay tick measures age from "just now".
+    ///
+    /// `consolidated_at` is **preserved** — this is a forward correction
+    /// (operator says "stop letting this fade"), not a rollback of any
+    /// earlier consolidation. A consolidated chunk's score is already
+    /// frozen at 1.0 so the call becomes a no-op stamp on
+    /// `last_recalled_at`; we still run the UPDATE so the audit trail
+    /// at the admin layer always sees rows_affected = 1 on a hit.
+    ///
+    /// Returns the rowcount (0 if `chunk_id` doesn't exist, 1 otherwise).
+    pub async fn reset_chunk_decay(&self, chunk_id: i64) -> Result<u32> {
+        let now_ms = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+        let res = sqlx::query(
+            "UPDATE chunks SET \
+                decay_score = 1.0, \
+                last_recalled_at = ? \
+             WHERE id = ?",
+        )
+        .bind(now_ms)
+        .bind(chunk_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("reset_chunk_decay({chunk_id})"))?;
+        Ok(res.rows_affected() as u32)
+    }
+
     /// Return the chunks whose `decay_score >= threshold` AND whose
     /// `namespace != 'consolidated'`. Sorted decay_score-desc so the
     /// strongest candidates land first when the consolidation job caps
