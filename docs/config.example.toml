@@ -303,6 +303,29 @@ mood_decay_per_hour         = 0.05
 fatigue_recovery_per_hour   = 0.1
 recent_topics_decay_per_day = 1
 
+# ---------------------------------------------------------------------------
+# [tenants] — Phase 4 W1 4-1A multi-tenant boundary.
+#
+# `enabled = false` (the default) keeps the gateway in legacy
+# single-tenant mode: every request runs as the reserved `default`
+# tenant and the tenant-scoping middleware is mounted as a no-op. The
+# Phase 3.1 + Phase 4 schema migrations have already added a `tenant_id`
+# column to every per-tenant SQLite, so flipping this switch later does
+# not require a schema bump — only a one-shot file-layout migration
+# (see `migrate_legacy_paths`).
+#
+# Set `enabled = true` to actually enforce tenant scoping. Per-tenant
+# data files then live under `<data_dir>/tenants/<tenant_id>/`. List
+# every tenant slug your operator allows in `allowed`; the gateway's
+# tenant-scoping middleware rejects sessions whose claim or `?tenant=`
+# query is outside the union of `allowed` and the rows in
+# `<data_dir>/tenants.sqlite`.
+[tenants]
+enabled              = false
+default              = "default"
+allowed              = []
+migrate_legacy_paths = true
+
 # [[scheduler.jobs]]
 # name = "weekly-reindex"
 # cron = "0 0 3 * * 0 *"

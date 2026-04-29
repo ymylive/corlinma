@@ -292,6 +292,8 @@ mod tests {
             evolution_applier: None,
             history_repo: None,
             proposals_repo: None,
+            tenant_pool: None,
+            allowed_tenants: std::collections::BTreeSet::new(),
         };
         router(state)
     }

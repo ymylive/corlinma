@@ -14,6 +14,7 @@
 //! existing [`crate::routes::router`] stays valid. Callers that can supply
 //! real state should use [`router_with_state`] instead.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ use axum::{routing::any, Router};
 use corlinman_core::config::Config;
 use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
 use corlinman_plugins::registry::PluginRegistry;
+use corlinman_tenant::{TenantId, TenantPool};
 use corlinman_vector::SqliteStore;
 use tokio::sync::broadcast;
 
@@ -126,6 +128,21 @@ pub struct AdminState {
     /// surface.
     pub history_repo: Option<HistoryRepo>,
     pub proposals_repo: Option<ProposalsRepo>,
+    /// Phase 4 W1 4-1A: shared multi-tenant SQLite pool wrapper keyed
+    /// by `(TenantId, db_name)`. `None` on legacy single-tenant boots
+    /// where `[tenants].enabled = false` — the per-tenant routes then
+    /// resolve every request to `TenantId::legacy_default()` and read
+    /// from the legacy unscoped DB paths. `Some` only when the gateway
+    /// constructed a multi-tenant pool at boot; the tenant-scoping
+    /// middleware then routes admin requests through this pool.
+    pub tenant_pool: Option<Arc<TenantPool>>,
+    /// Phase 4 W1 4-1A: union of `[tenants].allowed` slugs from config
+    /// and active rows in `tenants.sqlite`. The tenant-scoping
+    /// middleware rejects any session claim or `?tenant=` query whose
+    /// slug is not in this set with HTTP 403. Empty when
+    /// `[tenants].enabled = false` — middleware short-circuits in that
+    /// case before this set is consulted, so the empty default is safe.
+    pub allowed_tenants: BTreeSet<TenantId>,
 }
 
 impl AdminState {
@@ -145,6 +162,8 @@ impl AdminState {
             evolution_applier: None,
             history_repo: None,
             proposals_repo: None,
+            tenant_pool: None,
+            allowed_tenants: BTreeSet::new(),
         }
     }
 
@@ -235,6 +254,25 @@ impl AdminState {
     ) -> Self {
         self.history_repo = Some(history_repo);
         self.proposals_repo = Some(proposals_repo);
+        self
+    }
+
+    /// Phase 4 W1 4-1A fluent: attach the multi-tenant SQLite pool. Only
+    /// set this when `[tenants].enabled = true` — leaving it `None`
+    /// keeps the gateway in legacy single-tenant mode where every
+    /// request resolves to `TenantId::legacy_default()`.
+    pub fn with_tenant_pool(mut self, pool: Arc<TenantPool>) -> Self {
+        self.tenant_pool = Some(pool);
+        self
+    }
+
+    /// Phase 4 W1 4-1A fluent: install the operator-allowed tenant set
+    /// the tenant-scoping middleware uses to authorise session claims
+    /// and `?tenant=` queries. Replaces (not extends) the existing set;
+    /// callers compose the union of `[tenants].allowed` + `tenants.sqlite`
+    /// rows themselves at boot.
+    pub fn with_allowed_tenants(mut self, allowed: BTreeSet<TenantId>) -> Self {
+        self.allowed_tenants = allowed;
         self
     }
 

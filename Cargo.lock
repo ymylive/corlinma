@@ -779,6 +779,7 @@ dependencies = [
  "corlinman-plugins",
  "corlinman-proto",
  "corlinman-scheduler",
+ "corlinman-tenant",
  "corlinman-vector",
  "dashmap",
  "dirs",
