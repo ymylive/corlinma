@@ -349,6 +349,7 @@ const CASES: AuditCase[] = [
     skip: "jsdom-iframe-scan",
   },
   { name: "login", loader: () => import("@/app/login/page") },
+  { name: "tenants", loader: () => import("@/app/(admin)/tenants/page") },
   { name: "not-found", loader: () => import("@/app/not-found") },
 ];
 
