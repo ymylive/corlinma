@@ -1,6 +1,6 @@
 # Phase 4 Roadmap — Multi-Tenant · Recursive Self-Improvement · Embodied Reach
 
-**Status**: Draft · **Target window**: 12-16 weeks · **Owner**: TBD · **Last revised**: 2026-04-24
+**Status**: Draft · **Target window**: 12-16 weeks · **Owner**: TBD · **Last revised**: 2026-04-29 (drafted 2026-04-24; synced post-Phase 3.1)
 
 > Phase 3 closed the cognitive primitives loop: agent observes itself,
 > proposes changes through EvolutionLoop, and now has memory decay /
@@ -118,7 +118,82 @@
 
 ---
 
-## 3. Wave Structure
+## 3. Phase 3.1 Status (sync as of 2026-04-29)
+
+Phase 4 was drafted on 2026-04-24. Five days later three Phase 3.1
+patches landed (PR #148 / #149 / #150) that pre-paid part of Wave 1's
+bill. This section captures what Wave 1 inherits versus what still
+needs new code.
+
+### Already landed — trims Wave 1 scope
+
+- **`tenant_id` schema seed** (Tier 3 / S-2): `user_traits` and
+  `agent_persona_state` carry `tenant_id NOT NULL DEFAULT 'default'` +
+  composite indexes; `ALTER` is idempotent via `PRAGMA table_info`,
+  pre-3.1 DBs converge on first boot; Python CLIs (`persona`,
+  `user_model`) accept `--tenant-id`. *Remaining for 4-1A:* Rust
+  `TenantId` newtype, `AdminState` / hook / config wiring, the other
+  four SQLite files (`evolution`, `kb`, `sessions`, `agent_state`),
+  per-tenant directory layout, gateway middleware tenant-scoping.
+- **Sandbox path canonicalize** (Tier 3 / S-5): `MemoryOpSimulator`
+  and `SkillUpdateSimulator` canonicalize `kb_path` on entry, assert
+  it lives under tempdir, re-canonicalize parent before `fs::write`
+  — TOCTOU symlink defense with regression test. *Remaining for
+  4-1C:* the docker backend itself (image build, `network=none`,
+  cgroup limits, drop-all caps, non-root). In-process sandbox is now
+  safe enough for the deterministic pre-flight; docker is still
+  required before `prompt_template` / `new_skill` because those can
+  call out to a live LLM.
+- **PII redactor expansion** (Tier 3 / S-1): intl-phone, national-ID
+  (X), Luhn-bank-card, IPv4, QQ regexes; LLM-distilled output runs
+  the redactor a second time; `evidence` column dropped before
+  persistence. Phase 4's episode store (4-4A) and cross-channel
+  trait merge (4-2B) reuse this redactor — **no separate redaction
+  work item needed**.
+- **`inverse_diff` trust contract** (Tier 3 / S-3): revert paths
+  whitelist `prior_namespace`, length-cap path / name / target,
+  charset-validate, reject control / null bytes; tampered rows
+  surface as `ApplyError::Tampered` and the monitor records a
+  corruption-skip. Meta proposals (4-2A) reuse this on apply.
+- **Apply intent log** (Tier 3 / S-10): `intent → kb mutation →
+  committed` for every forward apply; half-committed rows
+  (`committed_at` and `failed_at` both NULL) surface at gateway
+  startup via `tracing::warn` + `apply.half_committed` hook event.
+  The audit primitive Phase 4 meta proposals were going to need is
+  therefore already in place.
+- **Scheduler wired into prod** (Tier 1): cron jobs were dead code
+  before; gateway `main` now spawns `corlinman_scheduler` after the
+  observer is up, and the prod image ships `shadow-tester` +
+  `auto-rollback` CLIs. Phase 4's daily episode / goal jobs (4-4A,
+  4-4B) attach to this same scheduler instead of standing up a new
+  one.
+- **W3-A correctness floor** (Tier 2): decay zero-point (COALESCE
+  `last_recalled_at` / `created_at`), status-aware dedup,
+  `inverse_diff.prior_consolidated_at`, cold-start cooling period
+  (`cooling_period_hours`, default 24h). Episode distillation
+  (4-4A) sits on top of W3-A — this prerequisite is now actually
+  stable instead of nominally shipped.
+
+### Implicit decisions (now baked-in)
+
+- §7 Q1 (tenant id format): 3.1 chose `TEXT` column with `'default'`
+  as the legacy value — **slug-shape is the de-facto standard**.
+  Phase 4 inherits rather than re-litigates.
+
+### Wave 1 focus, post-3.1
+
+- Rust-side multi-tenancy abstraction (`TenantId` newtype + scoping
+  helpers + middleware), admin UI tenant switcher, schema convergence
+  on the remaining four SQLite files, per-tenant directory layout
+- ShadowTester docker backend (image / network / cgroup) and the
+  switches that turn on `prompt_template` / `tool_policy` /
+  `new_skill`
+- 4-1D itself (the W2-C unblocker) — unchanged, still gated on 4-1C
+  finishing
+
+---
+
+## 4. Wave Structure
 
 Four waves, each ~3-4 weeks. W1 + W2 partially parallel; W3 needs W2
 done (sandbox hardening unlocks risky kinds); W4 mostly independent.
@@ -129,9 +204,9 @@ Goal: corlinman ships as a platform, not a pet. Unblock Phase 3 W2-C.
 
 | ID | Title | Stack | Wkload |
 |---|---|---|---|
-| **4-1A** | **Tenant boundary** — `TenantId` newtype carried through `AdminState` / hooks / config / SQLite path; per-tenant `evolution.sqlite` / `kb.sqlite` / `agent_state.sqlite` / `user_model.sqlite`; admin auth carries tenant claim | Rust + Python | 7-10d |
+| **4-1A** | **Tenant boundary** — `TenantId` newtype carried through `AdminState` / hooks / config / SQLite path; per-tenant `evolution.sqlite` / `kb.sqlite` / `agent_state.sqlite` / `user_model.sqlite`; admin auth carries tenant claim. *(Schema seed for `user_traits` + `agent_persona_state` and Python CLI `--tenant-id` flags already landed in Phase 3.1 Tier 3 / S-2; see §3.)* | Rust + Python | 5-7d |
 | **4-1B** | **Tenant admin UI** — `/tenants` page (operator only); per-tenant `/evolution`, `/memory`, `/user-model`, `/agent-state` views scope by `?tenant=` query | UI | 4-5d |
-| **4-1C** | **Docker shadow sandbox** — ShadowTester gains a `[evolution.shadow.sandbox] kind = "docker"` mode; runs evals in a frozen `corlinman-sandbox:vN` image; prompt/tool kinds require this sandbox | Rust + DevOps | 5-7d |
+| **4-1C** | **Docker shadow sandbox** — ShadowTester gains a `[evolution.shadow.sandbox] kind = "docker"` mode; runs evals in a frozen `corlinman-sandbox:vN` image; prompt/tool kinds require this sandbox. *(In-process simulators got TOCTOU canonicalize in Phase 3.1 Tier 3 / S-5; this work item is now the docker backend only — image build, `network=none`, cgroup, drop-all caps, non-root.)* | Rust + DevOps | 4-5d |
 | **4-1D** | **W2-C unblocker — agent_card + prompt_template + tool_policy** — Engine handlers + Applier extensions + UI surface; gated on docker sandbox passing eval set | Python + Rust + UI | 6-8d |
 
 **Wave 1 acceptance**: a fresh corlinman boots clean as a 3-tenant
@@ -205,7 +280,7 @@ queryable via natural language.
 
 ---
 
-## 4. Architecture Deltas (concrete)
+## 5. Architecture Deltas (concrete)
 
 ### New crates / packages
 - `corlinman-tenant` (Rust) — `TenantId` newtype, scoping helpers, multi-DB pool wrapper
@@ -275,7 +350,7 @@ schedule = "0 7 * * * *"   # 07:00 UTC: grade + refresh after episode distill
 
 ---
 
-## 5. Risk Matrix
+## 6. Risk Matrix
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
@@ -290,7 +365,7 @@ schedule = "0 7 * * * *"   # 07:00 UTC: grade + refresh after episode distill
 
 ---
 
-## 6. Open Questions (decision before W1)
+## 7. Open Questions (decision before W1)
 
 1. **Tenant id format.** UUID? Slug like `acme-corp`? Lean: **slug** — operators read these in URLs and configs; uniqueness checked at create-time.
 2. **Cross-tenant skill sharing default.** Off by default per skill, or off by default per tenant? Lean: **off by default per tenant**; operator opt-in toggles each skill independently.
@@ -303,7 +378,7 @@ schedule = "0 7 * * * *"   # 07:00 UTC: grade + refresh after episode distill
 
 ---
 
-## 7. Success Criteria for Phase 4 Exit
+## 8. Success Criteria for Phase 4 Exit
 
 After 12-16 weeks:
 
@@ -320,7 +395,7 @@ If any miss → stabilize, do not bump to Phase 5.
 
 ---
 
-## 8. Anti-Goals (Phase 4 will NOT)
+## 9. Anti-Goals (Phase 4 will NOT)
 
 - Touch model weights / fine-tuning. Inference-only evolution stays.
 - Auto-generate code in `rust/` or `python/` source.
@@ -339,7 +414,7 @@ If any miss → stabilize, do not bump to Phase 5.
 
 ---
 
-## 9. Phase 5 Preview (out of scope)
+## 10. Phase 5 Preview (out of scope)
 
 After Phase 4, if the platform proves itself in operator hands:
 
