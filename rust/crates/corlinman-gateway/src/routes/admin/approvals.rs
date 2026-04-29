@@ -294,6 +294,7 @@ mod tests {
             proposals_repo: None,
             tenant_pool: None,
             allowed_tenants: std::collections::BTreeSet::new(),
+            admin_db: None,
         };
         router(state)
     }

@@ -15,7 +15,7 @@ use corlinman_core::config::Config;
 use corlinman_core::{SessionStore, SqliteSessionStore};
 use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
 use corlinman_plugins::{roots_from_env_var, Origin, PluginRegistry, SearchRoot};
-use corlinman_tenant::{TenantId, TenantPool};
+use corlinman_tenant::{AdminDb, TenantId, TenantPool};
 use corlinman_vector::SqliteStore;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -412,7 +412,8 @@ pub async fn build_runtime_full_with_evolution(
         config_handle.clone(),
         cfg_path.clone(),
         Some(py_config_path),
-    );
+    )
+    .await;
     if let Some(w) = watcher.as_ref() {
         admin_state = admin_state.with_config_watcher(w.clone());
     }
@@ -479,7 +480,7 @@ pub async fn build_runtime_full_with_evolution(
 /// Variant of [`build_admin_state`] that reuses a pre-loaded config handle
 /// so boot code can share the same live-reload swap with `/health`.
 #[allow(clippy::too_many_arguments)]
-fn build_admin_state_with_config(
+async fn build_admin_state_with_config(
     plugins: Arc<PluginRegistry>,
     log_tx: Option<broadcast::Sender<LogRecord>>,
     rag_store: Option<Arc<SqliteStore>>,
@@ -558,6 +559,30 @@ fn build_admin_state_with_config(
         );
 
         admin = admin.with_tenant_pool(pool).with_allowed_tenants(allowed);
+
+        // Phase 4 W1 4-1B: also open the root-level `tenants.sqlite`
+        // admin DB so `/admin/tenants*` has a real backing store. A
+        // failure here doesn't abort boot — the gateway keeps serving
+        // and the routes return 503 `tenants_disabled` +
+        // `reason=admin_db_missing` so operators see a clear "DB
+        // unreachable" envelope instead of a silent 500.
+        let admin_db_path = data_dir.join("tenants.sqlite");
+        match AdminDb::open(&admin_db_path).await {
+            Ok(db) => {
+                tracing::info!(
+                    path = %admin_db_path.display(),
+                    "admin tenants.sqlite opened",
+                );
+                admin = admin.with_admin_db(Arc::new(db));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %admin_db_path.display(),
+                    error = %err,
+                    "could not open admin tenants.sqlite; /admin/tenants* will return 503",
+                );
+            }
+        }
     }
 
     admin

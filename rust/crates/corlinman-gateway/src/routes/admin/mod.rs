@@ -23,7 +23,7 @@ use axum::{routing::any, Router};
 use corlinman_core::config::Config;
 use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
 use corlinman_plugins::registry::PluginRegistry;
-use corlinman_tenant::{TenantId, TenantPool};
+use corlinman_tenant::{AdminDb, TenantId, TenantPool};
 use corlinman_vector::SqliteStore;
 use tokio::sync::broadcast;
 
@@ -52,6 +52,7 @@ pub mod plugins;
 pub mod providers;
 pub mod rag;
 pub mod scheduler;
+pub mod tenants;
 
 /// Shared read-only state passed to every admin handler.
 ///
@@ -144,6 +145,15 @@ pub struct AdminState {
     /// `[tenants].enabled = false` — middleware short-circuits in that
     /// case before this set is consulted, so the empty default is safe.
     pub allowed_tenants: BTreeSet<TenantId>,
+    /// Phase 4 W1 4-1B: handle to the root-level `tenants.sqlite` admin
+    /// DB used by `/admin/tenants*` to list / create tenants. `None`
+    /// when either `[tenants].enabled = false` (legacy single-tenant
+    /// mode) or the boot-time `AdminDb::open` failed (read-only data
+    /// dir, etc). The `/admin/tenants*` routes return 403
+    /// `tenants_disabled` for the first case and 503
+    /// `tenants_disabled` + `reason=admin_db_missing` for the second,
+    /// matching the UI mock contract in `ui/lib/api/tenants.ts`.
+    pub admin_db: Option<Arc<AdminDb>>,
 }
 
 impl AdminState {
@@ -165,6 +175,7 @@ impl AdminState {
             proposals_repo: None,
             tenant_pool: None,
             allowed_tenants: BTreeSet::new(),
+            admin_db: None,
         }
     }
 
@@ -277,6 +288,16 @@ impl AdminState {
         self
     }
 
+    /// Phase 4 W1 4-1B fluent: attach the `tenants.sqlite` admin DB so
+    /// `/admin/tenants*` routes have a real backing store. Boot code
+    /// only calls this after a successful `AdminDb::open` — leaving it
+    /// `None` is the operator-facing 503 path (config says multi-tenant
+    /// is on but we couldn't open the file).
+    pub fn with_admin_db(mut self, db: Arc<AdminDb>) -> Self {
+        self.admin_db = Some(db);
+        self
+    }
+
     /// Re-serialise the current config snapshot to the Python-side JSON
     /// drop. No-op + warn when the path isn't configured — admin writes
     /// still succeed (the TOML write already landed), they just can't
@@ -346,6 +367,7 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(scheduler::router(state.clone()))
         .merge(evolution::router(state.clone()))
         .merge(memory::router(state.clone()))
+        .merge(tenants::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             tenant_state,
             tenant_scope,
