@@ -21,6 +21,7 @@ sqlx = { workspace = true }
 async-trait = { workspace = true }
 time = { workspace = true }
 ulid = "1"
+rand = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

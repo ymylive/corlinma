@@ -31,8 +31,10 @@ pub mod error;
 pub mod resolver;
 pub mod store;
 pub mod types;
+pub mod verification;
 
 pub use error::IdentityError;
 pub use resolver::IdentityStore;
 pub use store::{identity_db_path, SqliteIdentityStore, SCHEMA_SQL};
 pub use types::{BindingKind, ChannelAlias, UserId, VerificationPhrase};
+pub use verification::DEFAULT_TTL_MIN;
