@@ -78,8 +78,8 @@ impl SignalsRepo {
         })?;
         let row = sqlx::query(
             r#"INSERT INTO evolution_signals
-                 (event_kind, target, severity, payload_json, trace_id, session_id, observed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                 (event_kind, target, severity, payload_json, trace_id, session_id, observed_at, tenant_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                RETURNING id"#,
         )
         .bind(&signal.event_kind)
@@ -89,6 +89,7 @@ impl SignalsRepo {
         .bind(&signal.trace_id)
         .bind(&signal.session_id)
         .bind(signal.observed_at)
+        .bind(&signal.tenant_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<i64, _>("id"))
@@ -105,7 +106,7 @@ impl SignalsRepo {
         let rows = if let Some(kind) = event_kind {
             sqlx::query(
                 r#"SELECT id, event_kind, target, severity, payload_json,
-                          trace_id, session_id, observed_at
+                          trace_id, session_id, observed_at, tenant_id
                    FROM evolution_signals
                    WHERE observed_at >= ? AND event_kind = ?
                    ORDER BY observed_at ASC
@@ -119,7 +120,7 @@ impl SignalsRepo {
         } else {
             sqlx::query(
                 r#"SELECT id, event_kind, target, severity, payload_json,
-                          trace_id, session_id, observed_at
+                          trace_id, session_id, observed_at, tenant_id
                    FROM evolution_signals
                    WHERE observed_at >= ?
                    ORDER BY observed_at ASC
@@ -156,6 +157,7 @@ impl SignalsRepo {
                     trace_id: r.get("trace_id"),
                     session_id: r.get("session_id"),
                     observed_at: r.get("observed_at"),
+                    tenant_id: r.get("tenant_id"),
                 })
             })
             .collect()
@@ -861,10 +863,16 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    /// Phase 4 W1.5 (next-tasks A7): tests pin the pool to a single
+    /// connection so back-to-back fetch_one + fetch_optional don't
+    /// race on sqlx 0.7's WAL cross-connection visibility quirk.
+    /// Production keeps the default 8 via `EvolutionStore::open`.
     async fn fresh_store() -> (TempDir, EvolutionStore) {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("evolution.sqlite");
-        let store = EvolutionStore::open(&path).await.unwrap();
+        let store = EvolutionStore::open_with_pool_size(&path, 1)
+            .await
+            .unwrap();
         (tmp, store)
     }
 
@@ -882,6 +890,7 @@ mod tests {
                 trace_id: Some("t1".into()),
                 session_id: Some("s1".into()),
                 observed_at: 1_000,
+                tenant_id: "default".into(),
             })
             .await
             .unwrap();
@@ -1278,7 +1287,7 @@ mod tests {
         let (_tmp, store) = fresh_store().await;
         let repo = ProposalsRepo::new(store.pool().clone());
         let now: i64 = 100 * 3_600 * 1_000; // pick a base in the integer middle.
-        let in_window = now - 1 * 3_600 * 1_000;
+        let in_window = now - 3_600 * 1_000;
         let too_old = now - 100 * 3_600 * 1_000;
         let in_future = now + 5 * 60 * 1_000;
         insert_applied_at(&repo, "evol-grace-in", in_window).await;
@@ -1298,7 +1307,7 @@ mod tests {
         let (_tmp, store) = fresh_store().await;
         let repo = ProposalsRepo::new(store.pool().clone());
         let now: i64 = 100 * 3_600 * 1_000;
-        let applied_at = now - 1 * 3_600 * 1_000;
+        let applied_at = now - 3_600 * 1_000;
         let pid_rolled = insert_applied_at(&repo, "evol-grace-rolled", applied_at).await;
         let _pid_live = insert_applied_at(&repo, "evol-grace-live", applied_at).await;
         // Flip one row to rolled_back; it must drop out of the window list.

@@ -6,6 +6,7 @@ import { Breadcrumbs } from "./breadcrumbs";
 import { HealthDot } from "./health-dot";
 import { LanguageToggle } from "./language-toggle";
 import { SearchTrigger } from "./search-trigger";
+import { TenantSwitcher } from "./tenant-switcher";
 import { useMobileDrawer } from "./mobile-drawer-context";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { cn } from "@/lib/utils";
@@ -44,6 +45,7 @@ export function TopNav() {
       <div className="flex items-center gap-1.5 md:gap-2">
         <SearchTrigger />
         <div className="hidden h-5 w-px bg-tp-glass-edge md:block" />
+        <TenantSwitcher className="hidden md:inline-flex" />
         <HealthDot className="hidden md:inline-flex" />
         <LanguageToggle />
         <ThemeToggle />

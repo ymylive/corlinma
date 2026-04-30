@@ -15,6 +15,7 @@ use corlinman_core::config::Config;
 use corlinman_core::{SessionStore, SqliteSessionStore};
 use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
 use corlinman_plugins::{roots_from_env_var, Origin, PluginRegistry, SearchRoot};
+use corlinman_tenant::{AdminDb, TenantId, TenantPool};
 use corlinman_vector::SqliteStore;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -265,9 +266,6 @@ pub async fn build_runtime_full_with_evolution(
         "plugin registry loaded",
     );
 
-    // Open the session history store, keyed off `$CORLINMAN_DATA_DIR`.
-    let session_store = open_session_store().await;
-
     // Resolve config *once* so both the admin state and the /health probe
     // share the same `Arc<ArcSwap<Config>>` — live reloads propagate to
     // both surfaces at once. B5-BE3: when the caller passed in a
@@ -278,6 +276,30 @@ pub async fn build_runtime_full_with_evolution(
         Some(w) => w.arc_swap(),
         None => Arc::new(ArcSwap::from_pointee(cfg)),
     };
+
+    // Phase 4 W1 4-1A Item 5: rename legacy `<data_dir>/<name>.sqlite`
+    // files into `<data_dir>/tenants/default/<name>.sqlite` BEFORE any
+    // store is opened. Otherwise `open_session_store` and friends
+    // would happily open the legacy paths and the migration would
+    // race / be impossible mid-run. Idempotent and gated; see
+    // `crate::legacy_migration` for the rules.
+    {
+        let snap = config_handle.load();
+        if snap.tenants.enabled && snap.tenants.migrate_legacy_paths {
+            if let Err(err) =
+                crate::legacy_migration::migrate_legacy_data_files(&resolve_data_dir())
+            {
+                tracing::error!(
+                    error = %err,
+                    "phase 4 legacy data file migration failed; \
+                     gateway will continue but per-tenant routes may 503",
+                );
+            }
+        }
+    }
+
+    // Open the session history store, keyed off `$CORLINMAN_DATA_DIR`.
+    let session_store = open_session_store().await;
 
     // S7.T5: bundle the health probe state.
     let endpoint = resolve_endpoint();
@@ -390,7 +412,8 @@ pub async fn build_runtime_full_with_evolution(
         config_handle.clone(),
         cfg_path.clone(),
         Some(py_config_path),
-    );
+    )
+    .await;
     if let Some(w) = watcher.as_ref() {
         admin_state = admin_state.with_config_watcher(w.clone());
     }
@@ -457,7 +480,7 @@ pub async fn build_runtime_full_with_evolution(
 /// Variant of [`build_admin_state`] that reuses a pre-loaded config handle
 /// so boot code can share the same live-reload swap with `/health`.
 #[allow(clippy::too_many_arguments)]
-fn build_admin_state_with_config(
+async fn build_admin_state_with_config(
     plugins: Arc<PluginRegistry>,
     log_tx: Option<broadcast::Sender<LogRecord>>,
     rag_store: Option<Arc<SqliteStore>>,
@@ -492,6 +515,76 @@ fn build_admin_state_with_config(
     if let Some(path) = py_config_path {
         admin = admin.with_py_config_path(path);
     }
+
+    // Phase 4 W1 4-1A: when `[tenants].enabled = true`, construct the
+    // multi-tenant SQLite pool and the operator-allowed tenant set.
+    // Both are consumed by the tenant-scoping middleware (Item 3) which
+    // routes admin requests through the per-tenant SQLite layout under
+    // `<data_dir>/tenants/<tenant_id>/`. When `enabled = false` (legacy
+    // single-tenant default) we leave both fields untouched: the
+    // `AdminState::default` shape is `tenant_pool = None,
+    // allowed_tenants = empty`, which the middleware reads as "no
+    // scoping, fall back to legacy unscoped DB paths".
+    let cfg_snap = admin.config.load();
+    if cfg_snap.tenants.enabled {
+        let data_dir = resolve_data_dir();
+        let pool = Arc::new(TenantPool::new(data_dir.clone()));
+
+        // Build the allowed-tenants set from `[tenants].allowed` plus
+        // the implicit reserved `default` slug. Invalid slugs are
+        // tracing::warn'd and dropped; the remaining set is what
+        // operators can hit. Future Item 4 will fold in tenants.sqlite
+        // rows here; for now config is the only source.
+        let mut allowed = std::collections::BTreeSet::new();
+        allowed.insert(TenantId::legacy_default());
+        for slug in &cfg_snap.tenants.allowed {
+            match TenantId::new(slug) {
+                Ok(t) => {
+                    allowed.insert(t);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        slug = %slug,
+                        error = %e,
+                        "[tenants].allowed entry rejected; skipping",
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            data_dir = %data_dir.display(),
+            allowed_count = allowed.len(),
+            "multi-tenant mode enabled; tenant pool and allowlist installed",
+        );
+
+        admin = admin.with_tenant_pool(pool).with_allowed_tenants(allowed);
+
+        // Phase 4 W1 4-1B: also open the root-level `tenants.sqlite`
+        // admin DB so `/admin/tenants*` has a real backing store. A
+        // failure here doesn't abort boot — the gateway keeps serving
+        // and the routes return 503 `tenants_disabled` +
+        // `reason=admin_db_missing` so operators see a clear "DB
+        // unreachable" envelope instead of a silent 500.
+        let admin_db_path = data_dir.join("tenants.sqlite");
+        match AdminDb::open(&admin_db_path).await {
+            Ok(db) => {
+                tracing::info!(
+                    path = %admin_db_path.display(),
+                    "admin tenants.sqlite opened",
+                );
+                admin = admin.with_admin_db(Arc::new(db));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %admin_db_path.display(),
+                    error = %err,
+                    "could not open admin tenants.sqlite; /admin/tenants* will return 503",
+                );
+            }
+        }
+    }
+
     admin
 }
 

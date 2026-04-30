@@ -21,6 +21,7 @@ const SEGMENT_KEY: Record<string, string> = {
   embedding: "breadcrumbs.embedding",
   config: "breadcrumbs.config",
   logs: "breadcrumbs.logs",
+  tenants: "breadcrumbs.tenants",
 };
 
 /** Auto-derived breadcrumb from `usePathname`. */

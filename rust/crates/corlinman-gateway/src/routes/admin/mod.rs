@@ -14,6 +14,7 @@
 //! existing [`crate::routes::router`] stays valid. Callers that can supply
 //! real state should use [`router_with_state`] instead.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ use axum::{routing::any, Router};
 use corlinman_core::config::Config;
 use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
 use corlinman_plugins::registry::PluginRegistry;
+use corlinman_tenant::{AdminDb, TenantId, TenantPool};
 use corlinman_vector::SqliteStore;
 use tokio::sync::broadcast;
 
@@ -31,6 +33,7 @@ use crate::log_broadcast::LogRecord;
 use crate::middleware::admin_auth::{require_admin, AdminAuthState};
 use crate::middleware::admin_session::AdminSessionStore;
 use crate::middleware::approval::ApprovalGate;
+use crate::middleware::tenant_scope::{tenant_scope, TenantScopeState};
 
 use super::not_implemented;
 
@@ -49,6 +52,7 @@ pub mod plugins;
 pub mod providers;
 pub mod rag;
 pub mod scheduler;
+pub mod tenants;
 
 /// Shared read-only state passed to every admin handler.
 ///
@@ -126,6 +130,30 @@ pub struct AdminState {
     /// surface.
     pub history_repo: Option<HistoryRepo>,
     pub proposals_repo: Option<ProposalsRepo>,
+    /// Phase 4 W1 4-1A: shared multi-tenant SQLite pool wrapper keyed
+    /// by `(TenantId, db_name)`. `None` on legacy single-tenant boots
+    /// where `[tenants].enabled = false` — the per-tenant routes then
+    /// resolve every request to `TenantId::legacy_default()` and read
+    /// from the legacy unscoped DB paths. `Some` only when the gateway
+    /// constructed a multi-tenant pool at boot; the tenant-scoping
+    /// middleware then routes admin requests through this pool.
+    pub tenant_pool: Option<Arc<TenantPool>>,
+    /// Phase 4 W1 4-1A: union of `[tenants].allowed` slugs from config
+    /// and active rows in `tenants.sqlite`. The tenant-scoping
+    /// middleware rejects any session claim or `?tenant=` query whose
+    /// slug is not in this set with HTTP 403. Empty when
+    /// `[tenants].enabled = false` — middleware short-circuits in that
+    /// case before this set is consulted, so the empty default is safe.
+    pub allowed_tenants: BTreeSet<TenantId>,
+    /// Phase 4 W1 4-1B: handle to the root-level `tenants.sqlite` admin
+    /// DB used by `/admin/tenants*` to list / create tenants. `None`
+    /// when either `[tenants].enabled = false` (legacy single-tenant
+    /// mode) or the boot-time `AdminDb::open` failed (read-only data
+    /// dir, etc). The `/admin/tenants*` routes return 403
+    /// `tenants_disabled` for the first case and 503
+    /// `tenants_disabled` + `reason=admin_db_missing` for the second,
+    /// matching the UI mock contract in `ui/lib/api/tenants.ts`.
+    pub admin_db: Option<Arc<AdminDb>>,
 }
 
 impl AdminState {
@@ -145,6 +173,9 @@ impl AdminState {
             evolution_applier: None,
             history_repo: None,
             proposals_repo: None,
+            tenant_pool: None,
+            allowed_tenants: BTreeSet::new(),
+            admin_db: None,
         }
     }
 
@@ -238,6 +269,35 @@ impl AdminState {
         self
     }
 
+    /// Phase 4 W1 4-1A fluent: attach the multi-tenant SQLite pool. Only
+    /// set this when `[tenants].enabled = true` — leaving it `None`
+    /// keeps the gateway in legacy single-tenant mode where every
+    /// request resolves to `TenantId::legacy_default()`.
+    pub fn with_tenant_pool(mut self, pool: Arc<TenantPool>) -> Self {
+        self.tenant_pool = Some(pool);
+        self
+    }
+
+    /// Phase 4 W1 4-1A fluent: install the operator-allowed tenant set
+    /// the tenant-scoping middleware uses to authorise session claims
+    /// and `?tenant=` queries. Replaces (not extends) the existing set;
+    /// callers compose the union of `[tenants].allowed` + `tenants.sqlite`
+    /// rows themselves at boot.
+    pub fn with_allowed_tenants(mut self, allowed: BTreeSet<TenantId>) -> Self {
+        self.allowed_tenants = allowed;
+        self
+    }
+
+    /// Phase 4 W1 4-1B fluent: attach the `tenants.sqlite` admin DB so
+    /// `/admin/tenants*` routes have a real backing store. Boot code
+    /// only calls this after a successful `AdminDb::open` — leaving it
+    /// `None` is the operator-facing 503 path (config says multi-tenant
+    /// is on but we couldn't open the file).
+    pub fn with_admin_db(mut self, db: Arc<AdminDb>) -> Self {
+        self.admin_db = Some(db);
+        self
+    }
+
     /// Re-serialise the current config snapshot to the Python-side JSON
     /// drop. No-op + warn when the path isn't configured — admin writes
     /// still succeed (the TOML write already landed), they just can't
@@ -266,11 +326,32 @@ pub fn router() -> Router {
 /// Production admin router: real handlers + auth guard (cookie first,
 /// Basic-auth fallback). Login/logout/me routes are merged *outside* the
 /// guard so unauthenticated callers can obtain a session.
+///
+/// Phase 4 W1 4-1A Item 3: a tenant-scoping layer sits *inside*
+/// `require_admin` (so anonymous callers see 401 before any tenant
+/// check) and *outside* the per-route handlers (so handlers always
+/// observe a resolved `TenantId` in axum extensions). The layer is a
+/// no-op when `[tenants].enabled = false`, in which case every
+/// request resolves to `TenantId::legacy_default()` — preserving the
+/// pre-Phase-4 behaviour.
 pub fn router_with_state(state: AdminState) -> Router {
     let mut auth_state = AdminAuthState::new(state.config.clone());
     if let Some(store) = state.session_store.as_ref() {
         auth_state = auth_state.with_session_store(store.clone());
     }
+
+    let cfg_snap = state.config.load();
+    let tenant_state = TenantScopeState {
+        enabled: cfg_snap.tenants.enabled,
+        allowed: Arc::new(state.allowed_tenants.clone()),
+        fallback: TenantId::new(&cfg_snap.tenants.default).unwrap_or_else(|_| {
+            tracing::warn!(
+                slug = %cfg_snap.tenants.default,
+                "[tenants].default rejected by TenantId::new; falling back to reserved 'default'",
+            );
+            TenantId::legacy_default()
+        }),
+    };
 
     let guarded = Router::new()
         .merge(plugins::router(state.clone()))
@@ -286,6 +367,11 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(scheduler::router(state.clone()))
         .merge(evolution::router(state.clone()))
         .merge(memory::router(state.clone()))
+        .merge(tenants::router(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(
+            tenant_state,
+            tenant_scope,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             require_admin,

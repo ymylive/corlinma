@@ -27,6 +27,7 @@ corlinman-hooks = { path = "../corlinman-hooks" }
 corlinman-evolution = { path = "../corlinman-evolution" }
 corlinman-auto-rollback = { path = "../corlinman-auto-rollback" }
 corlinman-scheduler = { path = "../corlinman-scheduler" }
+corlinman-tenant = { path = "../corlinman-tenant" }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

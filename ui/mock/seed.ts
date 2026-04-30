@@ -363,3 +363,48 @@ export const MOCK_HISTORY_APPROVALS: MockApproval[] = [
     decision: "denied",
   },
 ];
+
+// --- Tenants (Phase 4 W1 4-1B) -------------------------------------------
+// Mirrors the eventual `/admin/tenants` payload. The Rust backend (corlinman-
+// tenant) stores tenants in tenants.sqlite with this shape; the UI renders
+// the rows via the operator-only `/tenants` page + topnav switcher.
+
+export interface MockTenant {
+  tenant_id: string;
+  display_name: string;
+  /** ISO-8601 — matches the `created_at` column in tenants.sqlite. */
+  created_at: string;
+}
+
+/**
+ * Two seeded tenants by default. The slug constraint matches the Rust
+ * regex `^[a-z][a-z0-9-]{0,62}$`. `default` is the legacy single-tenant
+ * fallback baked into the gateway when [tenants].enabled = true and the
+ * sqlite is fresh; `acme` + `bravo` exercise the multi-row path.
+ */
+export const MOCK_TENANTS: MockTenant[] = [
+  {
+    tenant_id: "default",
+    display_name: "Default tenant",
+    created_at: "2026-04-01T00:00:00Z",
+  },
+  {
+    tenant_id: "acme",
+    display_name: "ACME Industries",
+    created_at: "2026-04-12T09:14:23Z",
+  },
+  {
+    tenant_id: "bravo",
+    display_name: "Bravo Studio",
+    created_at: "2026-04-18T15:42:00Z",
+  },
+];
+
+/**
+ * Toggle multi-tenant mode in the mock. When `false`, the GET /admin/tenants
+ * handler returns 403 `tenants_disabled` so the UI can render the
+ * "multi-tenant mode is off" banner. Flip via the env var
+ * `MOCK_TENANTS_ENABLED=0` when starting the mock server.
+ */
+export const MOCK_TENANTS_ENABLED =
+  process.env.MOCK_TENANTS_ENABLED !== "0";

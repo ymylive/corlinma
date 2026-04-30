@@ -11,6 +11,8 @@
  *   GET  /admin/plugins        → MockPlugin[]
  *   GET  /admin/agents         → MockAgent[]
  *   GET  /admin/logs/stream    → SSE stream of MockLogEvent
+ *   GET  /admin/tenants        → { tenants, allowed }   (Phase 4 W1 4-1B)
+ *   POST /admin/tenants        → 201 { tenant_id }       (Phase 4 W1 4-1B)
  *   GET  /healthz              → { ok: true }
  *
  * TODO(M6): retire in favour of the real corlinman-gateway admin
@@ -24,9 +26,18 @@ import {
   LOG_TEMPLATES,
   MOCK_HISTORY_APPROVALS,
   MOCK_PENDING_APPROVALS,
+  MOCK_TENANTS,
+  MOCK_TENANTS_ENABLED,
   genTraceId,
   type MockApproval,
+  type MockTenant,
 } from "./seed";
+
+// Slug regex must mirror the Rust validator in corlinman-tenant
+// (`^[a-z][a-z0-9-]{0,62}$`). Diverging from the Rust side defeats the
+// point of mocking — the UI's only client-side validation is "non-empty";
+// everything else flows through the server's 400 response.
+const SLUG_RE = /^[a-z][a-z0-9-]{0,62}$/;
 
 const PORT = Number(process.env.MOCK_PORT ?? 7777);
 const HOST = process.env.MOCK_HOST ?? "127.0.0.1";
@@ -47,6 +58,10 @@ const pendingState: MockApproval[] = MOCK_PENDING_APPROVALS.map((r) => ({
 const historyState: MockApproval[] = MOCK_HISTORY_APPROVALS.map((r) => ({
   ...r,
 }));
+
+// In-memory tenant registry. POST /admin/tenants pushes here so the page
+// can refresh after a successful create and see the new row.
+const tenantState: MockTenant[] = MOCK_TENANTS.map((r) => ({ ...r }));
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -191,6 +206,17 @@ const server = createServer(async (req, res) => {
       case "/admin/approvals/stream":
         openApprovalsSse(req, res);
         return;
+      case "/admin/tenants": {
+        if (!MOCK_TENANTS_ENABLED) {
+          json(res, 403, { error: "tenants_disabled" });
+          return;
+        }
+        json(res, 200, {
+          tenants: tenantState,
+          allowed: tenantState.map((t) => t.tenant_id),
+        });
+        return;
+      }
       default:
         notFound(res, path);
         return;
@@ -198,6 +224,60 @@ const server = createServer(async (req, res) => {
   }
 
   if (method === "POST") {
+    if (path === "/admin/tenants") {
+      if (!MOCK_TENANTS_ENABLED) {
+        json(res, 403, { error: "tenants_disabled" });
+        return;
+      }
+      let body: {
+        slug?: unknown;
+        display_name?: unknown;
+        admin_username?: unknown;
+        admin_password?: unknown;
+      };
+      try {
+        body = (await readJsonBody(req)) as typeof body;
+      } catch {
+        json(res, 400, { error: "invalid_json" });
+        return;
+      }
+      const slug = typeof body.slug === "string" ? body.slug : "";
+      const displayName =
+        typeof body.display_name === "string" && body.display_name.length > 0
+          ? body.display_name
+          : slug;
+      const adminUsername =
+        typeof body.admin_username === "string" ? body.admin_username : "";
+      const adminPassword =
+        typeof body.admin_password === "string" ? body.admin_password : "";
+      if (!SLUG_RE.test(slug)) {
+        json(res, 400, {
+          error: "invalid_tenant_slug",
+          reason: "slug must match ^[a-z][a-z0-9-]{0,62}$",
+        });
+        return;
+      }
+      if (!adminUsername || !adminPassword) {
+        json(res, 400, {
+          error: "invalid_tenant_slug",
+          reason: "admin_username and admin_password are required",
+        });
+        return;
+      }
+      if (tenantState.find((t) => t.tenant_id === slug)) {
+        json(res, 409, { error: "tenant_exists" });
+        return;
+      }
+      const created: MockTenant = {
+        tenant_id: slug,
+        display_name: displayName,
+        created_at: new Date().toISOString(),
+      };
+      tenantState.push(created);
+      json(res, 201, { tenant_id: created.tenant_id });
+      return;
+    }
+
     const decideMatch = path.match(/^\/admin\/approvals\/([^/]+)\/decide$/);
     if (decideMatch) {
       const id = decideMatch[1]!;

@@ -107,6 +107,11 @@ pub struct Config {
     /// shape so `docs/config.example.toml` round-trips through serde.
     #[serde(default)]
     pub persona: PersonaConfig,
+    /// Phase 4 W1 4-1A: multi-tenant boundary. Defaults to
+    /// `enabled = false` so existing single-tenant deployments parse
+    /// any pre-Phase-4 config unchanged and behave exactly as before.
+    #[serde(default)]
+    pub tenants: TenantsConfig,
     pub meta: Meta,
 }
 
@@ -1229,11 +1234,22 @@ pub struct EvolutionShadowConfig {
     pub enabled: bool,
     pub eval_set_dir: PathBuf,
     pub sandbox_kind: ShadowSandboxKind,
+    /// Phase 4 W1 4-1C: tunables for the docker-backed sandbox. Only
+    /// consulted when `sandbox_kind = "docker"`. The defaults pin the
+    /// reserved image tag and conservative resource caps; operators
+    /// who run the sandbox in production should pin to a SHA-tagged
+    /// image rather than `:v1` once the build pipeline publishes
+    /// reproducible digests.
+    #[serde(default)]
+    pub sandbox: SandboxBackendConfig,
 }
 
 /// Which sandbox the ShadowTester runs proposals in. `InProcess` is the
-/// only Phase 3 variant; `Docker` is reserved for Phase 4 (prompt /
-/// tool-policy kinds need stronger isolation than in-process gives).
+/// Phase 3 default. `Docker` is the Phase 4 W1 4-1C addition; required
+/// for the high-risk EvolutionKinds (`prompt_template`, `tool_policy`,
+/// `new_skill`) whose evals can call out to a live LLM and therefore
+/// need network / cgroup / drop-all-caps isolation that an in-process
+/// simulator can't provide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShadowSandboxKind {
@@ -1250,6 +1266,40 @@ impl Default for EvolutionShadowConfig {
             enabled: false,
             eval_set_dir: PathBuf::from("/data/eval/evolution"),
             sandbox_kind: ShadowSandboxKind::InProcess,
+            sandbox: SandboxBackendConfig::default(),
+        }
+    }
+}
+
+/// Phase 4 W1 4-1C: tunables for the docker-backed sandbox.
+///
+/// `image` is the tag the docker backend spawns. v1 ships
+/// `ghcr.io/ymylive/corlinman-sandbox:v1` as the placeholder;
+/// operators who want a SHA-pinned reference can override it (the
+/// `corlinman-sandbox` binary is the only thing in the image, so
+/// rebuilds are deterministic).
+///
+/// `mem_mb` and `timeout_secs` map directly to `docker run`'s
+/// `--memory` and the per-call wall clock. `network` is reserved
+/// for the future `--network=host` opt-out — v1 always uses
+/// `--network=none` regardless of this value, so the field is
+/// declarative documentation only.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxBackendConfig {
+    pub image: String,
+    pub network: String,
+    pub mem_mb: u64,
+    pub timeout_secs: u64,
+}
+
+impl Default for SandboxBackendConfig {
+    fn default() -> Self {
+        Self {
+            image: "ghcr.io/ymylive/corlinman-sandbox:v1".to_string(),
+            network: "none".to_string(),
+            mem_mb: 512,
+            timeout_secs: 60,
         }
     }
 }
@@ -1529,6 +1579,65 @@ impl Default for PersonaConfig {
             mood_decay_per_hour: 0.05,
             fatigue_recovery_per_hour: 0.1,
             recent_topics_decay_per_day: 1,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [tenants] — Phase 4 W1 4-1A
+// ---------------------------------------------------------------------------
+//
+// Multi-tenant boundary. The Phase 3.1 Tier 3 / S-2 schema migration
+// already added `tenant_id NOT NULL DEFAULT 'default'` to user_traits +
+// agent_persona_state; Phase 4 Item 1 extended the same column to every
+// other stateful SQLite. This struct is the runtime switch that
+// turns the schema-level scoping into actual middleware-level isolation.
+//
+// Backwards compatibility is the load-bearing goal here: pre-Phase-4
+// configs have no `[tenants]` section, so `Default` must keep them
+// running as a single-tenant deployment with `default` as the implicit
+// tenant for every request.
+//
+// Slug shape is validated by `corlinman-tenant::TenantId::new` at the
+// boundary where slugs cross from config into the runtime; storing as
+// String here avoids pulling corlinman-tenant into the corlinman-core
+// dep graph.
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TenantsConfig {
+    /// Master switch. False = legacy single-tenant deployment; every
+    /// operation runs as the reserved `default` tenant and the
+    /// gateway's tenant-scoping middleware is mounted as a no-op.
+    /// True = multi-tenant: middleware enforces scoping on admin
+    /// routes and per-tenant SQLite layout under
+    /// `<data_dir>/tenants/<tenant_id>/`.
+    pub enabled: bool,
+    /// Reserved fallback tenant id. The Phase 3.1 schema migration
+    /// already defaults legacy rows to this slug; do not change
+    /// without a paired data migration.
+    pub default: String,
+    /// Operator-allowed tenant slugs. The middleware rejects any
+    /// session claim or `?tenant=` query whose slug is not in this
+    /// list (or in `tenants.sqlite`). `default` is implicitly always
+    /// allowed when `enabled = false`.
+    pub allowed: Vec<String>,
+    /// One-shot boot migration: when `true` *and* `enabled = true`,
+    /// gateway main rename-migrates any legacy
+    /// `<data_dir>/{evolution,kb,sessions,user_model,agent_state}.sqlite`
+    /// files into `<data_dir>/tenants/default/` on startup. Once the
+    /// new layout exists the probe is a no-op. Set to `false` to keep
+    /// migration manual.
+    pub migrate_legacy_paths: bool,
+}
+
+impl Default for TenantsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default: "default".to_string(),
+            allowed: Vec::new(),
+            migrate_legacy_paths: true,
         }
     }
 }
@@ -2376,6 +2485,55 @@ enabled = false
         let cfg: Config = toml::from_str(frag).unwrap();
         assert_eq!(cfg.hooks.capacity, 4096);
         assert!(!cfg.hooks.enabled);
+    }
+
+    /// Phase 4 W1 4-1A: `[tenants]` defaults preserve legacy
+    /// single-tenant behaviour — a config that omits the section parses
+    /// to `enabled = false`, `default = "default"`, no allowed slugs,
+    /// and the migration probe armed.
+    #[test]
+    fn tenants_defaults_preserve_legacy_single_tenant() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.tenants.enabled);
+        assert_eq!(cfg.tenants.default, "default");
+        assert!(cfg.tenants.allowed.is_empty());
+        assert!(cfg.tenants.migrate_legacy_paths);
+    }
+
+    /// Phase 4 W1 4-1A: explicit `[tenants]` block round-trips through
+    /// serde with the documented field set; deny_unknown_fields catches
+    /// typos.
+    #[test]
+    fn tenants_fragment_parses() {
+        let frag = r#"
+[tenants]
+enabled              = true
+default              = "default"
+allowed              = ["acme", "bravo"]
+migrate_legacy_paths = false
+"#;
+        let cfg: Config = toml::from_str(frag).unwrap();
+        assert!(cfg.tenants.enabled);
+        assert_eq!(cfg.tenants.default, "default");
+        assert_eq!(
+            cfg.tenants.allowed,
+            vec!["acme".to_string(), "bravo".to_string()]
+        );
+        assert!(!cfg.tenants.migrate_legacy_paths);
+    }
+
+    #[test]
+    fn tenants_unknown_field_rejected() {
+        let frag = r#"
+[tenants]
+enabled = true
+weight  = 42
+"#;
+        let err = toml::from_str::<Config>(frag).unwrap_err();
+        assert!(
+            err.to_string().contains("weight"),
+            "deny_unknown_fields should flag the typo: {err}"
+        );
     }
 
     #[test]
