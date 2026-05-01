@@ -58,7 +58,7 @@ import {
 } from "lucide-react";
 
 import { logout } from "@/lib/auth";
-import { GATEWAY_BASE_URL, MOCK_API_URL } from "@/lib/api";
+import { GATEWAY_BASE_URL } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useMotion } from "@/components/ui/motion-safe";
 import { useRecentRoutes } from "@/lib/hooks/use-recent-routes";
@@ -425,10 +425,9 @@ function TestChatDrawer({ onClose }: { onClose: () => void }) {
     setError(null);
     setAnswer("");
     try {
-      const base = MOCK_API_URL || GATEWAY_BASE_URL;
-      const res = await fetch(`${base}/v1/chat/completions`, {
+      const res = await fetch(`${GATEWAY_BASE_URL}/v1/chat/completions`, {
         method: "POST",
-        credentials: MOCK_API_URL ? "omit" : "include",
+        credentials: "include",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           model: "default",

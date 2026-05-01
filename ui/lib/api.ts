@@ -1,33 +1,18 @@
 /**
  * corlinman admin API client.
  *
- * Two fetch paths, picked per call:
- *   1. `NEXT_PUBLIC_MOCK_API_URL` set → hit the standalone mock server
- *      (see ui/mock/server.ts; default http://127.0.0.1:7777).
- *   2. Otherwise → real gateway at `NEXT_PUBLIC_GATEWAY_URL`. Default is an
- *      empty string so request paths resolve relative to the current origin
- *      (nginx proxies `/admin/*`, `/health`, `/v1/*`, `/metrics`, and
- *      `/plugin-callback` to the gateway in production). `credentials:
- *      "include"` forwards the session cookie the gateway sets.
+ * Always hits the real gateway at `NEXT_PUBLIC_GATEWAY_URL`. Default
+ * is an empty string so request paths resolve relative to the current
+ * origin (nginx proxies `/admin/*`, `/health`, `/v1/*`, `/metrics`,
+ * and `/plugin-callback` to the gateway in production). `credentials:
+ * "include"` forwards the session cookie the gateway sets.
  *
- * For local dev without a reverse proxy, set `NEXT_PUBLIC_GATEWAY_URL=
- * http://localhost:6005` as an opt-in escape hatch.
- *
- * M6 note: admin endpoints are HTTP Basic right now — either hit them from a
- * browser after a Basic-auth prompt or set the `Authorization` header on the
- * fetch from a server-side helper. Cookie/session auth lands in M7.
- *
- * The inline `opts.mock` escape hatch is kept for local dev without a
- * gateway running: set `NEXT_PUBLIC_MOCK_MODE=1` to enable it.
+ * For local dev without a reverse proxy, set
+ * `NEXT_PUBLIC_GATEWAY_URL=http://localhost:6005` as an opt-in escape
+ * hatch.
  */
 
 export const GATEWAY_BASE_URL = process.env.NEXT_PUBLIC_GATEWAY_URL ?? "";
-
-/** Empty string means "no mock server"; any non-empty value routes all calls there. */
-export const MOCK_API_URL = process.env.NEXT_PUBLIC_MOCK_API_URL ?? "";
-
-/** Opt-in inline mock for offline dev. Off by default now that the gateway is wired. */
-export const MOCK_MODE = process.env.NEXT_PUBLIC_MOCK_MODE === "1";
 
 export interface ApiError extends Error {
   status?: number;
@@ -47,13 +32,6 @@ export class CorlinmanApiError extends Error implements ApiError {
 
 export interface RequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
-  /** Inline mock payload returned when MOCK_MODE is true and no mock server URL is set. */
-  mock?: unknown;
-}
-
-function resolveBaseUrl(): string {
-  if (MOCK_API_URL) return MOCK_API_URL;
-  return GATEWAY_BASE_URL;
 }
 
 /** Thin fetch wrapper; throws CorlinmanApiError on non-2xx. */
@@ -61,21 +39,10 @@ export async function apiFetch<T>(
   path: string,
   opts: RequestOptions = {},
 ): Promise<T> {
-  const useInlineMock = MOCK_MODE && !MOCK_API_URL && opts.mock !== undefined;
-  if (useInlineMock) {
-    // Simulate a short network roundtrip so loading states render in dev.
-    await new Promise((r) => setTimeout(r, 120));
-    return opts.mock as T;
-  }
+  const { body, headers, ...rest } = opts;
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { body, mock: _mock, headers, ...rest } = opts;
-  const base = resolveBaseUrl();
-  // Mock server does not require credentials; real gateway does.
-  const credentials: RequestCredentials = MOCK_API_URL ? "omit" : "include";
-
-  const res = await fetch(`${base}${path}`, {
-    credentials,
+  const res = await fetch(`${GATEWAY_BASE_URL}${path}`, {
+    credentials: "include",
     headers: {
       "content-type": "application/json",
       ...(headers ?? {}),
@@ -97,9 +64,8 @@ export async function apiFetch<T>(
   return (await res.json()) as T;
 }
 
-// --- typed admin surfaces (stubs) -------------------------------------------
-// Each one returns mock data today; M6 replaces `mock:` with real payloads
-// served by corlinman-gateway::routes::admin.
+// --- typed admin surfaces ---------------------------------------------------
+// All hit live `corlinman-gateway::routes::admin` endpoints.
 
 export type PluginStatus = "loaded" | "disabled" | "error";
 
@@ -117,21 +83,7 @@ export interface PluginSummary {
 }
 
 export async function listPlugins(): Promise<PluginSummary[]> {
-  return apiFetch<PluginSummary[]>("/admin/plugins", {
-    mock: [
-      {
-        name: "DailyNote",
-        version: "2.0.0",
-        status: "loaded",
-        manifest_path: "Plugin/DailyNote/plugin-manifest.json",
-        origin: "Workspace",
-        plugin_type: "synchronous",
-        capabilities: ["create", "update"],
-        description: "日记系统 (创建与更新)",
-        last_touched_at: "2026-04-19T14:22:10Z",
-      },
-    ] satisfies PluginSummary[],
-  });
+  return apiFetch<PluginSummary[]>("/admin/plugins");
 }
 
 export interface AgentSummary {
@@ -142,16 +94,7 @@ export interface AgentSummary {
 }
 
 export async function listAgents(): Promise<AgentSummary[]> {
-  return apiFetch<AgentSummary[]>("/admin/agents", {
-    mock: [
-      {
-        name: "Aemeath",
-        file_path: "Agent/Aemeath.txt",
-        bytes: 18234,
-        last_modified: "2026-04-20T09:32:11Z",
-      },
-    ] satisfies AgentSummary[],
-  });
+  return apiFetch<AgentSummary[]>("/admin/agents");
 }
 
 export interface ApprovalItem {
@@ -164,18 +107,7 @@ export interface ApprovalItem {
 }
 
 export async function listPendingApprovals(): Promise<ApprovalItem[]> {
-  return apiFetch<ApprovalItem[]>("/admin/approvals", {
-    mock: [
-      {
-        id: "apv_01HXYZ",
-        plugin: "FileOperator",
-        tool: "write",
-        sessionKey: "qq:group:123456",
-        requestedAt: "2026-04-20T06:11:02Z",
-        argsPreview: '{ "path": "./notes.md", "content": "..." }',
-      },
-    ],
-  });
+  return apiFetch<ApprovalItem[]>("/admin/approvals");
 }
 
 // --- Approvals (S2 T3 wired, S5 T4 expanded with batch helper) -------------
@@ -824,9 +756,7 @@ export async function benchmarkEmbedding(
 // Wave 1-D — EvolutionLoop proposal queue
 //
 // Mirrors the gateway routes in
-// rust/crates/corlinman-gateway/src/routes/admin/evolution.rs (landing in
-// Wave 1-C). Until those endpoints ship, set NEXT_PUBLIC_MOCK_MODE=1 to
-// route reads through `lib/mocks/evolution.ts`.
+// rust/crates/corlinman-gateway/src/routes/admin/evolution.rs.
 // ---------------------------------------------------------------------------
 
 export type EvolutionRisk = "low" | "medium" | "high";
@@ -907,27 +837,20 @@ export interface HistoryEntry {
   reasoning: string;
 }
 
-export async function fetchEvolutionPending(): Promise<EvolutionProposal[]> {
-  const { MOCK_EVOLUTION_PENDING } = await import("./mocks/evolution");
+export function fetchEvolutionPending(): Promise<EvolutionProposal[]> {
   return apiFetch<EvolutionProposal[]>(
     "/admin/evolution?status=pending&limit=50",
-    { mock: MOCK_EVOLUTION_PENDING },
   );
 }
 
-export async function fetchEvolutionApproved(): Promise<EvolutionProposal[]> {
-  const { MOCK_EVOLUTION_APPROVED } = await import("./mocks/evolution");
+export function fetchEvolutionApproved(): Promise<EvolutionProposal[]> {
   return apiFetch<EvolutionProposal[]>(
     "/admin/evolution?status=approved&limit=50",
-    { mock: MOCK_EVOLUTION_APPROVED },
   );
 }
 
-export async function fetchEvolutionHistory(): Promise<HistoryEntry[]> {
-  const { MOCK_EVOLUTION_HISTORY } = await import("./mocks/evolution");
-  return apiFetch<HistoryEntry[]>("/admin/evolution/history?limit=50", {
-    mock: MOCK_EVOLUTION_HISTORY,
-  });
+export function fetchEvolutionHistory(): Promise<HistoryEntry[]> {
+  return apiFetch<HistoryEntry[]>("/admin/evolution/history?limit=50");
 }
 
 /** POST /admin/evolution/:id/apply — flips approved→applied and runs the
@@ -944,10 +867,7 @@ export function applyEvolutionProposal(
 ): Promise<EvolutionApplyResult> {
   return apiFetch<EvolutionApplyResult>(
     `/admin/evolution/${encodeURIComponent(id)}/apply`,
-    {
-      method: "POST",
-      mock: { id, status: "applied", history_id: 1 },
-    },
+    { method: "POST" },
   );
 }
 
@@ -967,7 +887,6 @@ export function approveEvolutionProposal(
     {
       method: "POST",
       body: { decided_by },
-      mock: { id, status: "approved", decided_by, decided_at: Date.now() },
     },
   );
 }
@@ -982,7 +901,6 @@ export function denyEvolutionProposal(
     {
       method: "POST",
       body: { decided_by, reason },
-      mock: { id, status: "denied", decided_by, decided_at: Date.now() },
     },
   );
 }
@@ -1013,10 +931,7 @@ export interface BudgetSnapshot {
   per_kind: BudgetPerKindEntry[];
 }
 
-export async function fetchBudget(): Promise<BudgetSnapshot> {
-  const { MOCK_EVOLUTION_BUDGET } = await import("./mocks/evolution");
-  return apiFetch<BudgetSnapshot>("/admin/evolution/budget", {
-    mock: MOCK_EVOLUTION_BUDGET,
-  });
+export function fetchBudget(): Promise<BudgetSnapshot> {
+  return apiFetch<BudgetSnapshot>("/admin/evolution/budget");
 }
 

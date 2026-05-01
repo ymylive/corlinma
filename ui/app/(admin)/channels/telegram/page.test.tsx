@@ -270,38 +270,8 @@ describe("TelegramChannelPage", () => {
     });
   });
 
-  it("falls back to the mock when the admin endpoint 404s", async () => {
-    // Route the page through the *real* fetch helpers so we exercise the
-    // 404 → mock path. We do this by calling `vi.importActual` for the real
-    // api/telegram module and overriding the mocked exports for this test.
-    const real =
-      await vi.importActual<typeof import("@/lib/api/telegram")>(
-        "@/lib/api/telegram",
-      );
-    mockedStatus.mockImplementation(real.fetchTelegramStatus);
-    mockedMessages.mockImplementation(real.fetchTelegramMessages);
-
-    const err = new CorlinmanApiError("not found", 404);
-    mockedApiFetch.mockRejectedValue(err);
-    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
-
-    renderWithClient(<TelegramChannelPage />);
-
-    // Mock status renders the same stats/config shape.
-    expect(
-      await screen.findByRole("heading", { name: /telegram channel/i }),
-    ).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.getByText(/messages today/i)).toBeInTheDocument();
-    });
-    // At least one adapted mock message makes it into the list.
-    expect(await screen.findByTestId("tg-message-m-1")).toBeInTheDocument();
-
-    expect(
-      infoSpy.mock.calls.some((c) =>
-        String(c[0]).includes("[telegram] admin endpoint not available"),
-      ),
-    ).toBe(true);
-    infoSpy.mockRestore();
-  });
+  // The "falls back to the mock when the admin endpoint 404s" case was
+  // dropped along with the page-level mock fixtures. The page now shows
+  // an empty/disconnected state instead of fake messages on 404 — see
+  // `ui/lib/mocks/telegram.ts` (returns `runtime: "disconnected"`).
 });

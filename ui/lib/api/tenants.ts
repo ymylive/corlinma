@@ -1,9 +1,8 @@
 /**
  * Tenants admin API client (Phase 4 W1 4-1B).
  *
- * Wraps the operator-only `/admin/tenants` surface. The Rust gateway side
- * lands separately (corlinman-gateway::routes::admin::tenants); until then
- * the UI is mock-only via `ui/mock/server.ts`.
+ * Wraps the operator-only `/admin/tenants` surface. Backed by
+ * `corlinman-gateway::routes::admin::tenants`.
  *
  * Contract (mirrors the design doc — phase4-roadmap.md §4 row 4-1B):
  *

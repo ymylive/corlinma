@@ -28,23 +28,16 @@ export interface AdminSession {
 }
 
 /** POST `/admin/login`. Throws `CorlinmanApiError` on 401 / 503. */
-export async function login(req: LoginRequest): Promise<LoginResponse> {
+export function login(req: LoginRequest): Promise<LoginResponse> {
   return apiFetch<LoginResponse>("/admin/login", {
     method: "POST",
     body: req,
-    mock: {
-      token: "mock-session-token",
-      expires_in: 86400,
-    },
   });
 }
 
 /** POST `/admin/logout`. Idempotent: succeeds even without a cookie. */
-export async function logout(): Promise<void> {
-  return apiFetch<void>("/admin/logout", {
-    method: "POST",
-    mock: undefined,
-  });
+export function logout(): Promise<void> {
+  return apiFetch<void>("/admin/logout", { method: "POST" });
 }
 
 /**
@@ -53,13 +46,7 @@ export async function logout(): Promise<void> {
  */
 export async function getSession(): Promise<AdminSession | null> {
   try {
-    return await apiFetch<AdminSession>("/admin/me", {
-      mock: {
-        user: "admin",
-        created_at: new Date().toISOString(),
-        expires_at: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
-      },
-    });
+    return await apiFetch<AdminSession>("/admin/me");
   } catch (err) {
     if (err instanceof CorlinmanApiError && err.status === 401) {
       return null;

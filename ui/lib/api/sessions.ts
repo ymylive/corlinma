@@ -1,10 +1,8 @@
 /**
  * Sessions admin API client (Phase 4 W2 4-2D — Trajectory replay).
  *
- * Mirrors the Rust HTTP routes being built in parallel by Agent A under
- * `rust/crates/corlinman-gateway/src/routes/admin/sessions.rs`. Until that
- * commit lands the dev workflow points `NEXT_PUBLIC_MOCK_API_URL` at
- * `mock/server.ts`, which serves the same byte-for-byte payload contract.
+ * Mirrors the Rust HTTP routes at
+ * `rust/crates/corlinman-gateway/src/routes/admin/sessions.rs`:
  *
  *   GET  /admin/sessions
  *     → 200 { sessions: SessionSummary[] }
@@ -18,10 +16,9 @@
  *
  * `last_message_at` is **unix milliseconds** (the SQLite column is i64) — the
  * UI formats it via `new Date(ms).toLocaleString()`. Transcript message `ts`
- * is RFC-3339 / ISO-8601 (matches the `tenants.created_at` convention from
- * Phase 4 W1 4-1B once that surface ships).
+ * is RFC-3339 / ISO-8601 (matches the `tenants.created_at` convention).
  *
- * The `rerun` mode is stubbed by Agent A in v1: the response carries
+ * The `rerun` mode is stubbed in v1: the response carries
  * `summary.rerun_diff = "not_implemented_yet"` and the same transcript shape.
  * The page renders a placeholder explaining the deferral when it sees that
  * sentinel; the dialog UI keeps `rerun` disabled with a "coming in Wave 2.5"

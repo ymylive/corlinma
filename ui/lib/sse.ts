@@ -10,7 +10,7 @@
  * fresh open via setTimeout. All listeners get re-attached on the new ES.
  */
 
-import { GATEWAY_BASE_URL, MOCK_API_URL, MOCK_MODE } from "./api";
+import { GATEWAY_BASE_URL } from "./api";
 
 export type SseHandler<T = unknown> = (event: {
   event: string;
@@ -23,8 +23,6 @@ export interface OpenEventStreamOptions<T> {
   onError?: (err: Event) => void;
   /** Named events to subscribe to. Defaults to ["message"]. */
   events?: string[];
-  /** Mock emitter used when MOCK_MODE is true. Returns teardown. */
-  mock?: (push: SseHandler<T>) => () => void;
 }
 
 /** Exponential reconnect schedule (ms). Mirrors corlinman-core::backoff but
@@ -40,13 +38,7 @@ export function openEventStream<T = unknown>(
   path: string,
   opts: OpenEventStreamOptions<T>,
 ): () => void {
-  // Inline mock emitter wins only when no real mock server is configured.
-  if (MOCK_MODE && !MOCK_API_URL && opts.mock) {
-    return opts.mock(opts.onMessage);
-  }
-
-  const base = MOCK_API_URL || GATEWAY_BASE_URL;
-  const url = `${base}${path}`;
+  const url = `${GATEWAY_BASE_URL}${path}`;
   const names = opts.events ?? ["message"];
 
   let es: EventSource | null = null;
@@ -56,7 +48,7 @@ export function openEventStream<T = unknown>(
 
   const connect = (): void => {
     if (disposed) return;
-    es = new EventSource(url, { withCredentials: !MOCK_API_URL });
+    es = new EventSource(url, { withCredentials: true });
 
     for (const name of names) {
       es.addEventListener(name, (raw: Event) => {
