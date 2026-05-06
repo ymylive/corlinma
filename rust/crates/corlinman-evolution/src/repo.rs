@@ -1565,6 +1565,128 @@ mod tests {
         assert_eq!(outstanding[0].proposal_id, "evol-int-o");
     }
 
+    // -------------------------------------------------------------------
+    // Phase 4 W2 B1 iter 1 — meta proposal kind variants.
+    //
+    // These pin the wire contract for the four new EvolutionKind
+    // variants (`engine_config` / `engine_prompt` / `observer_filter` /
+    // `cluster_threshold`). Iter 4 will wire the applier; for now we
+    // just need: serde shape, repo round-trip, and exhaustive meta-vs-
+    // non-meta classification.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn kind_serializes_to_snake_case() {
+        let cases: &[(EvolutionKind, &str)] = &[
+            (EvolutionKind::EngineConfig, "engine_config"),
+            (EvolutionKind::EnginePrompt, "engine_prompt"),
+            (EvolutionKind::ObserverFilter, "observer_filter"),
+            (EvolutionKind::ClusterThreshold, "cluster_threshold"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.as_str(), *expected, "as_str mismatch for {kind:?}");
+            let serialized = serde_json::to_string(kind).unwrap();
+            assert_eq!(
+                serialized,
+                format!("\"{expected}\""),
+                "serde mismatch for {kind:?}",
+            );
+            let parsed: EvolutionKind = expected.parse().unwrap();
+            assert_eq!(parsed, *kind, "FromStr mismatch for {expected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn kind_round_trips_through_repo() {
+        let (_tmp, store) = fresh_store().await;
+        let repo = ProposalsRepo::new(store.pool().clone());
+        let kinds = [
+            EvolutionKind::EngineConfig,
+            EvolutionKind::EnginePrompt,
+            EvolutionKind::ObserverFilter,
+            EvolutionKind::ClusterThreshold,
+        ];
+        for kind in kinds {
+            let pid = ProposalId::new(format!("evol-meta-{}", kind.as_str()));
+            repo.insert(&EvolutionProposal {
+                id: pid.clone(),
+                kind,
+                target: format!("meta-target-{}", kind.as_str()),
+                diff: format!("{{\"placeholder\":\"{}\"}}", kind.as_str()),
+                reasoning: "iter 1 round-trip fixture".into(),
+                risk: EvolutionRisk::High,
+                budget_cost: 1,
+                status: EvolutionStatus::Pending,
+                shadow_metrics: None,
+                signal_ids: vec![],
+                trace_ids: vec![],
+                created_at: 1_000,
+                decided_at: None,
+                decided_by: None,
+                applied_at: None,
+                rollback_of: None,
+                eval_run_id: None,
+                baseline_metrics_json: None,
+                auto_rollback_at: None,
+                auto_rollback_reason: None,
+            })
+            .await
+            .unwrap();
+
+            let got = repo.get(&pid).await.unwrap();
+            assert_eq!(got.kind, kind, "kind round-trip lost {kind:?}");
+            assert_eq!(got.id, pid);
+            assert!(got.kind.is_meta(), "{kind:?} must classify as meta");
+        }
+    }
+
+    #[test]
+    fn is_meta_partition() {
+        let all = [
+            (EvolutionKind::MemoryOp, false),
+            (EvolutionKind::TagRebalance, false),
+            (EvolutionKind::RetryTuning, false),
+            (EvolutionKind::AgentCard, false),
+            (EvolutionKind::SkillUpdate, false),
+            (EvolutionKind::PromptTemplate, false),
+            (EvolutionKind::ToolPolicy, false),
+            (EvolutionKind::NewSkill, false),
+            (EvolutionKind::EngineConfig, true),
+            (EvolutionKind::EnginePrompt, true),
+            (EvolutionKind::ObserverFilter, true),
+            (EvolutionKind::ClusterThreshold, true),
+        ];
+        for (kind, expected_meta) in all {
+            assert_eq!(
+                kind.is_meta(),
+                expected_meta,
+                "is_meta classification wrong for {kind:?}",
+            );
+        }
+
+        // Compile-time exhaustiveness witness — adding a new variant
+        // forces the author to classify it here, which is the recursion
+        // guard's safety story (iter 3+).
+        fn _exhaustive_witness(k: EvolutionKind) -> bool {
+            match k {
+                EvolutionKind::MemoryOp
+                | EvolutionKind::TagRebalance
+                | EvolutionKind::RetryTuning
+                | EvolutionKind::AgentCard
+                | EvolutionKind::SkillUpdate
+                | EvolutionKind::PromptTemplate
+                | EvolutionKind::ToolPolicy
+                | EvolutionKind::NewSkill => false,
+                EvolutionKind::EngineConfig
+                | EvolutionKind::EnginePrompt
+                | EvolutionKind::ObserverFilter
+                | EvolutionKind::ClusterThreshold => true,
+            }
+        }
+        assert!(!_exhaustive_witness(EvolutionKind::MemoryOp));
+        assert!(_exhaustive_witness(EvolutionKind::EngineConfig));
+    }
+
     #[tokio::test]
     async fn intent_log_double_commit_is_idempotent() {
         // Once an intent is stamped, a re-stamp must not flip it back —

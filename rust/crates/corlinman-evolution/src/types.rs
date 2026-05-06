@@ -51,6 +51,24 @@ pub enum EvolutionKind {
     PromptTemplate,
     ToolPolicy,
     NewSkill,
+    // ─── Phase 4 W2 B1 — meta proposal kinds (engine modifies engine) ──
+    //
+    // Per `docs/design/phase4-roadmap.md` §3 Wave 2 row 4-2A. These four
+    // kinds represent the EvolutionEngine targeting its own configuration
+    // surface. They route to a separate `meta_pending` queue with stricter
+    // approval rules; recursion guard (iter 3+) prevents a meta-proposal
+    // from itself spawning meta-proposals; operator-only capability gate
+    // (iter 5+) keeps these out of regular reviewer hands.
+    //
+    // The payload that describes *what* gets modified rides in the
+    // existing `EvolutionProposal.target` + `EvolutionProposal.diff`
+    // fields — same pattern `memory_op` uses (target = `"merge_chunks:42,43"`,
+    // empty diff). The sibling `meta::*` structs below define the
+    // canonical JSON shapes the engine + applier (iter 4) will agree on.
+    EngineConfig,
+    EnginePrompt,
+    ObserverFilter,
+    ClusterThreshold,
 }
 
 impl EvolutionKind {
@@ -64,6 +82,35 @@ impl EvolutionKind {
             Self::PromptTemplate => "prompt_template",
             Self::ToolPolicy => "tool_policy",
             Self::NewSkill => "new_skill",
+            Self::EngineConfig => "engine_config",
+            Self::EnginePrompt => "engine_prompt",
+            Self::ObserverFilter => "observer_filter",
+            Self::ClusterThreshold => "cluster_threshold",
+        }
+    }
+
+    /// `true` for the four Phase 4 W2 B1 meta kinds where the
+    /// EvolutionEngine targets its own configuration / prompts /
+    /// observer / clustering thresholds. Used by the recursion guard
+    /// (iter 3+) and the operator-only capability gate (iter 5+) to
+    /// branch on routing without re-listing the variants.
+    ///
+    /// Exhaustive match — adding a new variant forces the author to
+    /// classify it here, which is the whole point.
+    pub fn is_meta(&self) -> bool {
+        match self {
+            Self::MemoryOp
+            | Self::TagRebalance
+            | Self::RetryTuning
+            | Self::AgentCard
+            | Self::SkillUpdate
+            | Self::PromptTemplate
+            | Self::ToolPolicy
+            | Self::NewSkill => false,
+            Self::EngineConfig
+            | Self::EnginePrompt
+            | Self::ObserverFilter
+            | Self::ClusterThreshold => true,
         }
     }
 }
@@ -81,8 +128,100 @@ impl FromStr for EvolutionKind {
             "prompt_template" => Self::PromptTemplate,
             "tool_policy" => Self::ToolPolicy,
             "new_skill" => Self::NewSkill,
+            "engine_config" => Self::EngineConfig,
+            "engine_prompt" => Self::EnginePrompt,
+            "observer_filter" => Self::ObserverFilter,
+            "cluster_threshold" => Self::ClusterThreshold,
             other => return Err(ParseError::UnknownKind(other.into())),
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 W2 B1 — meta proposal payload shapes.
+//
+// The engine writes these as JSON into `EvolutionProposal.diff`; iter 4
+// (the EvolutionApplier extension) decodes them and dispatches to the
+// engine-config / prompt / filter / threshold mutators. They live here
+// rather than in `corlinman-gateway` because the Python EvolutionEngine
+// also speaks this contract — same cross-language rationale that put the
+// existing `EvolutionKind` strings in this crate.
+//
+// Each payload includes the existing value + the proposed value so the
+// applier can build `inverse_diff` (for rollback) and the operator-
+// review UI can render a clean before/after without a separate read.
+// `reason` is a short human string that gets surfaced in the meta queue.
+//
+// These are intentionally minimal. The roadmap doesn't pin field-by-field
+// shapes; iter 2 (engine handlers) is where the engine validates them
+// against the live config / prompt store and can extend the structs (e.g.
+// `min_value` / `max_value` ranges for thresholds) without breaking
+// existing rows because `serde(deny_unknown_fields)` is intentionally
+// **not** set — older payloads remain decodable.
+// ---------------------------------------------------------------------------
+
+pub mod meta {
+    use serde::{Deserialize, Serialize};
+
+    /// Shape for `EvolutionKind::EngineConfig` proposals.
+    /// `target` on the proposal is the dotted config path
+    /// (e.g. `"evolution.budget.weekly_total"`); the JSON value before/
+    /// after lets the engine apply + revert without re-resolving the
+    /// path under a config that may have shifted between propose and
+    /// apply time.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct EngineConfigPayload {
+        pub config_path: String,
+        pub previous_value: serde_json::Value,
+        pub proposed_value: serde_json::Value,
+        pub reason: String,
+    }
+
+    /// Shape for `EvolutionKind::EnginePrompt` proposals — rewrites of
+    /// the engine's own clustering / proposal-generation prompts. The
+    /// roadmap calls out `engine_prompt` as the canonical
+    /// double-confirm kind, so the applier reads these strings raw
+    /// without any templating; the diff is the operator's review surface.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct EnginePromptPayload {
+        /// Stable identifier for which engine prompt this targets, e.g.
+        /// `"clustering"`, `"proposal_generation"`. Engine owns the set;
+        /// unknown ids fail the iter-4 applier, not this layer.
+        pub prompt_id: String,
+        pub previous_text: String,
+        pub proposed_text: String,
+        pub reason: String,
+    }
+
+    /// Shape for `EvolutionKind::ObserverFilter` proposals — adjustments
+    /// to which `evolution_signals.event_kind` rows the EvolutionObserver
+    /// keeps vs. drops. `previous_filter` / `proposed_filter` are
+    /// opaque JSON so the engine can ship richer filter DSLs later
+    /// without a schema bump on this struct.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct ObserverFilterPayload {
+        /// e.g. `"tool.call.failed"` or a glob like `"tool.call.*"` —
+        /// engine decides; this layer is just the wire shape.
+        pub event_kind_pattern: String,
+        pub previous_filter: serde_json::Value,
+        pub proposed_filter: serde_json::Value,
+        pub reason: String,
+    }
+
+    /// Shape for `EvolutionKind::ClusterThreshold` proposals — the
+    /// signal-clustering hyperparameters the engine uses to fold raw
+    /// signals into proposal candidates. f64 because every threshold
+    /// in the engine today is a float (similarity cutoff, severity
+    /// weight, time-window decay).
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct ClusterThresholdPayload {
+        /// Stable name owned by the engine (e.g. `"min_similarity"`,
+        /// `"min_signals_per_cluster"`). Engine validates the name;
+        /// this struct only pins the wire format.
+        pub threshold_name: String,
+        pub previous_value: f64,
+        pub proposed_value: f64,
+        pub reason: String,
     }
 }
 

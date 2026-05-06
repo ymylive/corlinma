@@ -26,6 +26,6 @@ pub use repo::{
 pub use schema::SCHEMA_SQL;
 pub use store::{EvolutionStore, OpenError};
 pub use types::{
-    EvolutionHistory, EvolutionKind, EvolutionProposal, EvolutionRisk, EvolutionSignal,
+    meta, EvolutionHistory, EvolutionKind, EvolutionProposal, EvolutionRisk, EvolutionSignal,
     EvolutionStatus, ProposalId, ShadowMetrics, SignalSeverity,
 };
