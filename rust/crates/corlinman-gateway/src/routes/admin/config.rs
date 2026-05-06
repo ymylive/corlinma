@@ -407,14 +407,17 @@ mod tests {
 
     fn base_config() -> Config {
         let mut cfg = Config::default();
-        cfg.providers.anthropic = Some(ProviderEntry {
-            api_key: Some(SecretRef::EnvVar {
-                env: "ANTHROPIC_API_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                api_key: Some(SecretRef::EnvVar {
+                    env: "ANTHROPIC_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
         cfg
     }
 
@@ -815,14 +818,17 @@ mode = "prompt"
     async fn get_config_returns_redacted_toml_and_version() {
         // Seed a literal secret so we can assert redaction.
         let mut cfg = base_config();
-        cfg.providers.openai = Some(ProviderEntry {
-            api_key: Some(SecretRef::Literal {
-                value: "sk-top-secret".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                api_key: Some(SecretRef::Literal {
+                    value: "sk-top-secret".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
         let state = AdminState::new(
             Arc::new(PluginRegistry::default()),
             Arc::new(ArcSwap::from_pointee(cfg)),

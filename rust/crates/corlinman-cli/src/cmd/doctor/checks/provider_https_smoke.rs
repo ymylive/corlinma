@@ -67,11 +67,13 @@ impl DoctorCheck for ProviderHttpsSmokeCheck {
                 hint: Some("fix the config check first".into()),
             };
         };
-        let enabled: Vec<(&'static str, Option<&str>)> = cfg
+        // Collect owned strings — provider names come from BTreeMap keys
+        // (free-form, not `'static`).
+        let enabled: Vec<(String, Option<String>)> = cfg
             .providers
             .iter()
             .filter(|(_, e)| e.enabled)
-            .map(|(name, e)| (name, e.base_url.as_deref()))
+            .map(|(name, e)| (name.to_string(), e.base_url.clone()))
             .collect();
 
         if enabled.is_empty() {
@@ -83,7 +85,7 @@ impl DoctorCheck for ProviderHttpsSmokeCheck {
         let mut failures: Vec<String> = Vec::new();
         let mut ok_hosts: Vec<String> = Vec::new();
         for (name, base) in enabled {
-            let Some(addr) = host_port(name, base) else {
+            let Some(addr) = host_port(&name, base.as_deref()) else {
                 failures.push(format!("{name}: base_url parse failed"));
                 continue;
             };
@@ -151,12 +153,15 @@ mod tests {
     #[tokio::test]
     async fn unreachable_base_url_is_warn() {
         let mut cfg = Config::default();
-        cfg.providers.openai = Some(ProviderEntry {
-            api_key: Some(SecretRef::Literal { value: "x".into() }),
-            base_url: Some("https://127.0.0.1:1/v1".into()),
-            enabled: true,
-            ..Default::default()
-        });
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                api_key: Some(SecretRef::Literal { value: "x".into() }),
+                base_url: Some("https://127.0.0.1:1/v1".into()),
+                enabled: true,
+                ..Default::default()
+            },
+        );
         let ctx = ctx_with(Some(cfg));
         let res = ProviderHttpsSmokeCheck::new().run(&ctx).await;
         assert_eq!(res.status_str(), "warn", "got: {res:?}");

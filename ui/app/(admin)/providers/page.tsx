@@ -61,6 +61,17 @@ const KINDS: ProviderKind[] = [
   "qwen",
   "glm",
   "openai_compatible",
+  // Market kinds added with the free-form-providers refactor. The backend
+  // accepts them via /admin/providers and the dropdown now offers them as
+  // first-class choices instead of forcing operators to reach for
+  // openai_compatible + a hand-rolled base_url.
+  "mistral",
+  "cohere",
+  "together",
+  "groq",
+  "replicate",
+  "bedrock",
+  "azure",
 ];
 
 type KeySource = "env" | "value" | "unset";

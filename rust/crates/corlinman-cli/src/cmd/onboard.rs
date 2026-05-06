@@ -183,20 +183,18 @@ fn interactive_config(data_dir: &Path) -> Result<Config> {
     cfg.admin.password_hash = password_hash;
 
     let entry = ProviderEntry {
+        // Stamp the explicit kind from the chosen first-party slot name so
+        // a future config-watcher reload doesn't need the inference fallback.
+        kind: corlinman_core::config::ProviderKind::from_slot_name(provider_name),
         api_key: Some(SecretRef::EnvVar { env: env_var }),
         base_url: None,
         enabled: true,
         ..Default::default()
     };
-    match provider_name {
-        "anthropic" => cfg.providers.anthropic = Some(entry),
-        "openai" => cfg.providers.openai = Some(entry),
-        "google" => cfg.providers.google = Some(entry),
-        "deepseek" => cfg.providers.deepseek = Some(entry),
-        "qwen" => cfg.providers.qwen = Some(entry),
-        "glm" => cfg.providers.glm = Some(entry),
-        _ => {}
-    }
+    // Free-form provider keys — operators can pick any name for their own
+    // entries. The onboarding flow itself only offers the six first-party
+    // names today, but the underlying schema is uniform.
+    cfg.providers.insert(provider_name, entry);
 
     Ok(cfg)
 }

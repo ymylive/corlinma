@@ -61,14 +61,17 @@ fn seed_config() -> Config {
     cfg.admin.username = Some(ADMIN_USER.into());
     cfg.admin.password_hash = Some(hash_password(ADMIN_PASS));
     // Provider so validate_report doesn't raise any errors on the round-trip.
-    cfg.providers.anthropic = Some(corlinman_core::config::ProviderEntry {
-        api_key: Some(corlinman_core::config::SecretRef::EnvVar {
-            env: "ANTHROPIC_API_KEY".into(),
-        }),
-        base_url: None,
-        enabled: true,
-        ..Default::default()
-    });
+    cfg.providers.insert(
+        "anthropic",
+        corlinman_core::config::ProviderEntry {
+            api_key: Some(corlinman_core::config::SecretRef::EnvVar {
+                env: "ANTHROPIC_API_KEY".into(),
+            }),
+            base_url: None,
+            enabled: true,
+            ..Default::default()
+        },
+    );
     cfg
 }
 

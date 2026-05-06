@@ -360,15 +360,18 @@ mod tests {
 
     fn state_with_openai(path: Option<std::path::PathBuf>, seed_embed: bool) -> AdminState {
         let mut cfg = Config::default();
-        cfg.providers.openai = Some(ProviderEntry {
-            kind: None,
-            api_key: Some(SecretRef::EnvVar {
-                env: "OPENAI_API_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            params: ParamsMap::new(),
-        });
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                kind: None,
+                api_key: Some(SecretRef::EnvVar {
+                    env: "OPENAI_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                params: ParamsMap::new(),
+            },
+        );
         if seed_embed {
             cfg.embedding = Some(EmbeddingConfig {
                 provider: "openai".into(),

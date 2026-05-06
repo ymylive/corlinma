@@ -52,7 +52,9 @@ pub fn router(state: AdminState) -> Router {
 
 #[derive(Debug, Serialize)]
 struct ProviderRow {
-    name: &'static str,
+    /// Provider name. Owned `String` because the operator chooses arbitrary
+    /// keys (`siliconflow`, `my-vllm`, …) so no `'static` borrow is possible.
+    name: String,
     enabled: bool,
     has_api_key: bool,
     api_key_kind: Option<&'static str>,
@@ -64,18 +66,14 @@ struct ProviderRow {
 }
 
 impl ProviderRow {
-    fn from_entry(
-        name: &'static str,
-        entry: &ProviderEntry,
-        resolved_kind: Option<&'static str>,
-    ) -> Self {
+    fn from_entry(name: &str, entry: &ProviderEntry, resolved_kind: Option<&'static str>) -> Self {
         let (has_api_key, api_key_kind) = match entry.api_key.as_ref() {
             None => (false, None),
             Some(SecretRef::EnvVar { .. }) => (true, Some("env")),
             Some(SecretRef::Literal { .. }) => (true, Some("literal")),
         };
         Self {
-            name,
+            name: name.to_string(),
             enabled: entry.enabled,
             has_api_key,
             api_key_kind,
@@ -366,20 +364,26 @@ mod tests {
 
     fn base_state(path: Option<std::path::PathBuf>) -> AdminState {
         let mut cfg = Config::default();
-        cfg.providers.anthropic = Some(ProviderEntry {
-            api_key: Some(SecretRef::EnvVar {
-                env: "ANTHROPIC_API_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
-        cfg.providers.openai = Some(ProviderEntry {
-            api_key: None,
-            base_url: Some("https://openai.example".into()),
-            enabled: false,
-            ..Default::default()
-        });
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                api_key: Some(SecretRef::EnvVar {
+                    env: "ANTHROPIC_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                api_key: None,
+                base_url: Some("https://openai.example".into()),
+                enabled: false,
+                ..Default::default()
+            },
+        );
         cfg.models.aliases.insert(
             "smart".into(),
             AliasEntry::Shorthand("claude-opus-4-7".into()),

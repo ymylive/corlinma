@@ -43,7 +43,13 @@ pub type ParamsMap = BTreeMap<String, serde_json::Value>;
 
 /// Root TOML schema. Every sub-section defaults to its `Default` so a near-empty
 /// `config.toml` is still loadable.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Validate)]
+///
+/// `Default::default()` is hand-written (not derived) so a fresh install
+/// still seeds a single `[providers.openai]` entry with `kind = "openai"`,
+/// matching the documented onboarding flow ("export OPENAI_API_KEY and
+/// you're done"). All other fields fall through to their per-section
+/// defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Validate)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     #[validate(nested)]
@@ -115,6 +121,53 @@ pub struct Config {
     pub meta: Meta,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        // Seed a single disabled `[providers.openai]` entry so a fresh
+        // `config init` round-trips through serde with a recognisable
+        // demo entry. The entry is disabled and api-key-less by default
+        // (the validator emits a `no_provider_enabled` warning until the
+        // operator flips `enabled = true` and supplies an api_key).
+        let mut providers = ProvidersConfig::default();
+        providers.insert(
+            "openai",
+            ProviderEntry {
+                kind: Some(ProviderKind::Openai),
+                api_key: None,
+                base_url: None,
+                enabled: false,
+                params: ParamsMap::new(),
+            },
+        );
+        Self {
+            server: ServerConfig::default(),
+            admin: AdminConfig::default(),
+            providers,
+            models: ModelsConfig::default(),
+            embedding: None,
+            channels: ChannelsConfig::default(),
+            rag: RagConfig::default(),
+            approvals: ApprovalsConfig::default(),
+            scheduler: SchedulerConfig::default(),
+            logging: LoggingConfig::default(),
+            hooks: HooksConfig::default(),
+            skills: SkillsConfig::default(),
+            variables: VariablesConfig::default(),
+            agents: AgentsConfig::default(),
+            tools: ToolsConfig::default(),
+            telegram: TelegramConfig::default(),
+            vector: VectorConfig::default(),
+            wstool: WsToolConfig::default(),
+            canvas: CanvasConfig::default(),
+            nodebridge: NodeBridgeConfig::default(),
+            evolution: EvolutionConfig::default(),
+            memory: MemoryConfig::default(),
+            persona: PersonaConfig::default(),
+            meta: Meta::default(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // [server]
 // ---------------------------------------------------------------------------
@@ -174,48 +227,108 @@ pub struct AdminConfig {
 // [providers.*]
 // ---------------------------------------------------------------------------
 
-/// Known provider slots. Each is optional; absent = not configured. New
-/// providers should be added as explicit fields rather than a `HashMap` so
-/// typos surface at decode time via `deny_unknown_fields`.
+/// Operator-chosen named provider entries.
+///
+/// Keys are free-form (operators pick them: `[providers.siliconflow]`,
+/// `[providers.my-vllm]`, `[providers.openrouter]`, …). Each entry MUST
+/// declare an explicit `kind = "..."` discriminator unless the chosen name
+/// is a first-party slot name (`anthropic` / `openai` / `google` /
+/// `deepseek` / `qwen` / `glm`) — those names continue to infer the kind so
+/// pre-refactor configs round-trip unchanged.
+///
+/// Backed by a [`BTreeMap`] so the TOML serialiser emits stable key order
+/// and so any number of `kind = "openai_compatible"` entries (or any other
+/// kind) can coexist under different names.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct ProvidersConfig {
-    pub anthropic: Option<ProviderEntry>,
-    pub openai: Option<ProviderEntry>,
-    pub google: Option<ProviderEntry>,
-    pub deepseek: Option<ProviderEntry>,
-    pub qwen: Option<ProviderEntry>,
-    pub glm: Option<ProviderEntry>,
-}
+#[serde(transparent)]
+pub struct ProvidersConfig(pub BTreeMap<String, ProviderEntry>);
 
 impl ProvidersConfig {
-    /// Iterator over `(name, entry)` for every declared provider slot.
-    pub fn iter(&self) -> impl Iterator<Item = (&'static str, &ProviderEntry)> {
-        [
-            ("anthropic", self.anthropic.as_ref()),
-            ("openai", self.openai.as_ref()),
-            ("google", self.google.as_ref()),
-            ("deepseek", self.deepseek.as_ref()),
-            ("qwen", self.qwen.as_ref()),
-            ("glm", self.glm.as_ref()),
-        ]
-        .into_iter()
-        .filter_map(|(k, v)| v.map(|e| (k, e)))
+    /// Iterator over `(name, entry)` for every declared provider entry.
+    /// Borrowed names are tied to the map's storage, not `'static`.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ProviderEntry)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Mutable iterator (used by [`Config::redacted`] and the admin upsert
+    /// path that needs to flip a single entry's `enabled` flag).
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&str, &mut ProviderEntry)> {
+        self.0.iter_mut().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Look up a single entry by name.
+    pub fn get(&self, name: &str) -> Option<&ProviderEntry> {
+        self.0.get(name)
+    }
+
+    /// Mutable accessor.
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut ProviderEntry> {
+        self.0.get_mut(name)
+    }
+
+    /// Insert or replace an entry. Returns the displaced entry, if any.
+    pub fn insert(
+        &mut self,
+        name: impl Into<String>,
+        entry: ProviderEntry,
+    ) -> Option<ProviderEntry> {
+        self.0.insert(name.into(), entry)
+    }
+
+    /// Remove an entry. Returns the removed entry, if any.
+    pub fn remove(&mut self, name: &str) -> Option<ProviderEntry> {
+        self.0.remove(name)
+    }
+
+    /// True iff an entry exists for `name`.
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
+
+    /// Number of declared entries (for tests / metrics).
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// True iff no entries are declared.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// Names of providers with `enabled = true` and a non-empty api_key.
-    pub fn enabled_names(&self) -> Vec<&'static str> {
+    /// Sorted alphabetically (BTreeMap order) so the admin UI / docs stay
+    /// stable across reloads.
+    pub fn enabled_names(&self) -> Vec<String> {
         self.iter()
             .filter(|(_, e)| e.enabled && e.api_key.is_some())
-            .map(|(k, _)| k)
+            .map(|(k, _)| k.to_string())
             .collect()
     }
 
-    /// Resolve the kind for a provider slot, honouring the explicit field
-    /// first and falling back to inferring from the well-known slot name so
-    /// legacy configs without `kind` still load.
+    /// Resolve the kind for an entry, honouring the explicit `kind` field
+    /// first and falling back to inferring from a well-known first-party
+    /// slot name so legacy configs without `kind` still load.
     pub fn kind_for(&self, name: &str, entry: &ProviderEntry) -> Option<ProviderKind> {
         entry.kind.or_else(|| ProviderKind::from_slot_name(name))
+    }
+}
+
+impl std::ops::Deref for ProvidersConfig {
+    type Target = BTreeMap<String, ProviderEntry>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ProvidersConfig {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<S: Into<String>> FromIterator<(S, ProviderEntry)> for ProvidersConfig {
+    fn from_iter<I: IntoIterator<Item = (S, ProviderEntry)>>(iter: I) -> Self {
+        Self(iter.into_iter().map(|(k, v)| (k.into(), v)).collect())
     }
 }
 
@@ -239,9 +352,25 @@ pub struct ProviderEntry {
     pub params: ParamsMap,
 }
 
-/// Provider kind discriminator. `openai_compatible` is the escape hatch for
-/// vLLM / Ollama / SiliconFlow / any local OpenAI-wire-format gateway (that
-/// branch requires [`ProviderEntry::base_url`]).
+/// Provider kind discriminator.
+///
+/// First-party kinds (Anthropic / Openai / Google / Deepseek / Qwen / Glm)
+/// have bespoke Python adapters. The remaining kinds — `openai_compatible`
+/// plus the seven market kinds added in the free-form-providers refactor
+/// (Mistral / Cohere / Together / Groq / Replicate / Bedrock / Azure) — all
+/// speak the OpenAI wire format and run through the shared
+/// `OpenAICompatibleProvider` Python adapter at runtime. They are surfaced
+/// as first-class kinds (instead of "use openai_compatible with a hack")
+/// so the admin UI can show them as named choices, configs document the
+/// operator's intent, and per-kind quirks (Bedrock SigV4 auth, Azure
+/// deployment IDs, etc.) can land later as adapter overrides without a
+/// schema change.
+///
+/// `Bedrock` and `Azure` are declared but the Python runtime currently
+/// raises `NotImplementedError` when one is used — a follow-up iteration
+/// will wire SigV4 / deployment-routing properly. Operators who need them
+/// today should use `kind = "openai_compatible"` with an explicit
+/// `base_url` that points at a compatible proxy.
 ///
 /// Wire format is the lowercase snake_case of the variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -254,6 +383,25 @@ pub enum ProviderKind {
     Qwen,
     Glm,
     OpenaiCompatible,
+    /// Mistral La Plateforme (`api.mistral.ai`). OpenAI-wire-format under
+    /// the hood; the dedicated kind exists so operators can declare intent.
+    Mistral,
+    /// Cohere — primarily exposed via its OpenAI-compat endpoint.
+    Cohere,
+    /// Together AI (`api.together.xyz`) — pure OpenAI-compat.
+    Together,
+    /// Groq Cloud (`api.groq.com/openai/v1`) — pure OpenAI-compat.
+    Groq,
+    /// Replicate — OpenAI-compat predictions endpoint.
+    Replicate,
+    /// AWS Bedrock. OpenAI-compat at the wire level when fronted by a
+    /// SigV4-capable proxy. Real adapter pending — runtime currently
+    /// raises NotImplementedError.
+    Bedrock,
+    /// Azure OpenAI Service. Wire-compatible with OpenAI but routes through
+    /// `<resource>.openai.azure.com/openai/deployments/<deployment>`.
+    /// Real adapter pending — runtime currently raises NotImplementedError.
+    Azure,
 }
 
 impl ProviderKind {
@@ -267,12 +415,44 @@ impl ProviderKind {
             Self::Qwen => "qwen",
             Self::Glm => "glm",
             Self::OpenaiCompatible => "openai_compatible",
+            Self::Mistral => "mistral",
+            Self::Cohere => "cohere",
+            Self::Together => "together",
+            Self::Groq => "groq",
+            Self::Replicate => "replicate",
+            Self::Bedrock => "bedrock",
+            Self::Azure => "azure",
         }
     }
 
+    /// Every variant in declaration order. Used by the admin router to
+    /// populate the "Add provider" modal's kind dropdown without manually
+    /// keeping a parallel list in sync.
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Anthropic,
+            Self::Openai,
+            Self::Google,
+            Self::Deepseek,
+            Self::Qwen,
+            Self::Glm,
+            Self::OpenaiCompatible,
+            Self::Mistral,
+            Self::Cohere,
+            Self::Together,
+            Self::Groq,
+            Self::Replicate,
+            Self::Bedrock,
+            Self::Azure,
+        ]
+    }
+
     /// Infer a kind from a well-known first-party provider slot name.
-    /// Returns `None` for unknown names (forces an explicit `kind` field on
-    /// user-defined providers).
+    /// Returns `None` for unknown names — operators using a free-form name
+    /// (`siliconflow`, `my-vllm`, `openrouter`, …) must set `kind = "..."`
+    /// explicitly. The validator surfaces a friendly error pointing at the
+    /// offending entry name when this returns `None` and the entry has no
+    /// explicit `kind`.
     pub fn from_slot_name(name: &str) -> Option<Self> {
         match name {
             "anthropic" => Some(Self::Anthropic),
@@ -1761,9 +1941,31 @@ impl Config {
 
         // 2. Cross-field rules.
         //
-        // models.default must be reachable — either the literal model id is
-        // resolvable as an alias, or at least one provider is enabled so the
-        // agent layer can route to it.
+        // 2a. Every named provider entry must have a resolvable kind — either
+        //     an explicit `kind = "..."` field or a first-party slot name
+        //     (anthropic / openai / google / deepseek / qwen / glm). Free-form
+        //     names without a kind produce a hard error pointing at the
+        //     offending entry so the operator knows exactly where to add
+        //     `kind = "..."`.
+        for (name, entry) in self.providers.iter() {
+            if entry.kind.is_none() && ProviderKind::from_slot_name(name).is_none() {
+                let valid: Vec<&str> = ProviderKind::all().iter().map(|k| k.as_str()).collect();
+                issues.push(ValidationIssue {
+                    path: format!("providers.{name}.kind"),
+                    code: "missing_kind".into(),
+                    message: format!(
+                        "provider '{name}' has no `kind` field and the name is not a first-party \
+slot. Set `kind = \"...\"` explicitly. Valid kinds: {}",
+                        valid.join(", ")
+                    ),
+                    level: IssueLevel::Error,
+                });
+            }
+        }
+
+        // 2b. models.default must be reachable — either the literal model id is
+        //     resolvable as an alias, or at least one provider is enabled so the
+        //     agent layer can route to it.
         let enabled = self.providers.enabled_names();
         if enabled.is_empty() {
             // Warn, not error: a freshly `config init`-ed default config has no
@@ -1812,7 +2014,7 @@ impl Config {
                         message: "embedding.enabled = true but provider is empty".into(),
                         level: IssueLevel::Error,
                     });
-                } else if !self.providers.iter().any(|(name, _)| name == emb.provider) {
+                } else if !self.providers.contains_key(emb.provider.as_str()) {
                     issues.push(ValidationIssue {
                         path: "embedding.provider".into(),
                         code: "embedding_provider_missing".into(),
@@ -1984,18 +2186,9 @@ fn is_loopback_bind(bind: &str) -> bool {
 }
 
 fn redact_providers(p: &mut ProvidersConfig) {
-    for slot in [
-        &mut p.anthropic,
-        &mut p.openai,
-        &mut p.google,
-        &mut p.deepseek,
-        &mut p.qwen,
-        &mut p.glm,
-    ] {
-        if let Some(e) = slot.as_mut() {
-            if let Some(k) = e.api_key.as_mut() {
-                *k = k.redacted();
-            }
+    for entry in p.0.values_mut() {
+        if let Some(k) = entry.api_key.as_mut() {
+            *k = k.redacted();
         }
     }
 }
@@ -2232,7 +2425,7 @@ file_rolling = true
         let p = dir.path().join("c.toml");
         std::fs::write(&p, full_toml()).unwrap();
         let cfg = Config::load_from_path(&p).unwrap();
-        assert_eq!(cfg.providers.enabled_names(), vec!["anthropic"]);
+        assert_eq!(cfg.providers.enabled_names(), vec!["anthropic".to_string()]);
         assert_eq!(cfg.channels.qq.as_ref().unwrap().self_ids, vec![123456789]);
         assert_eq!(cfg.scheduler.jobs.len(), 1);
         // [rag.rerank] defaults propagate when unspecified.
@@ -2282,14 +2475,17 @@ bogus = "field"
     fn validate_report_catches_out_of_range_port() {
         let mut cfg = Config::default();
         cfg.server.port = 0; // validator min = 1
-        cfg.providers.anthropic = Some(ProviderEntry {
-            api_key: Some(SecretRef::EnvVar {
-                env: "ANTHROPIC_API_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                api_key: Some(SecretRef::EnvVar {
+                    env: "ANTHROPIC_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
         let issues = cfg.validate_report();
         assert!(
             issues.iter().any(|i| i.path.contains("port")),
@@ -2330,17 +2526,20 @@ bogus = "field"
     #[test]
     fn redacted_hides_literals_but_keeps_env_refs() {
         let mut cfg = Config::default();
-        cfg.providers.openai = Some(ProviderEntry {
-            api_key: Some(SecretRef::Literal {
-                value: "sk-top-secret".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                api_key: Some(SecretRef::Literal {
+                    value: "sk-top-secret".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
         cfg.admin.password_hash = Some("$argon2id$v=19$m=...".into());
         let red = cfg.redacted();
-        let openai = red.providers.openai.unwrap();
+        let openai = red.providers.get("openai").unwrap().clone();
         match openai.api_key.unwrap() {
             SecretRef::Literal { value } => assert_eq!(value, "***REDACTED***"),
             SecretRef::EnvVar { .. } => panic!("expected literal"),
@@ -2352,15 +2551,21 @@ bogus = "field"
     fn save_refreshes_meta_and_roundtrips() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("out.toml");
+        // Default config seeds a disabled `openai` entry; replace it so the
+        // round-trip enables a single named slot.
         let mut cfg = Config::default();
-        cfg.providers.anthropic = Some(ProviderEntry {
-            api_key: Some(SecretRef::EnvVar {
-                env: "ANTHROPIC_API_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
+        cfg.providers.remove("openai");
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                api_key: Some(SecretRef::EnvVar {
+                    env: "ANTHROPIC_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
         cfg.save_to_path(&p).unwrap();
         let loaded = Config::load_from_path(&p).unwrap();
         assert!(loaded.meta.last_touched_at.is_some());
@@ -2369,20 +2574,26 @@ bogus = "field"
             Some(env!("CARGO_PKG_VERSION"))
         );
         assert_eq!(loaded.server.port, cfg.server.port);
-        assert_eq!(loaded.providers.enabled_names(), vec!["anthropic"]);
+        assert_eq!(
+            loaded.providers.enabled_names(),
+            vec!["anthropic".to_string()]
+        );
     }
 
     #[test]
     fn get_and_set_dotted_scalars() {
         let mut cfg = Config::default();
-        cfg.providers.anthropic = Some(ProviderEntry {
-            api_key: Some(SecretRef::EnvVar {
-                env: "ANTHROPIC_API_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                api_key: Some(SecretRef::EnvVar {
+                    env: "ANTHROPIC_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(get_dotted(&cfg, "server.port").unwrap(), "6005");
         let updated = set_dotted(&cfg, "server.port", "7777").unwrap();
@@ -2657,14 +2868,21 @@ accept_unsigned = true
 
     fn cfg_with_one_provider() -> Config {
         let mut cfg = Config::default();
-        cfg.providers.anthropic = Some(ProviderEntry {
-            api_key: Some(SecretRef::EnvVar {
-                env: "ANTHROPIC_API_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
+        // Default seeds a disabled `openai` entry — drop it so the helper
+        // returns "exactly one enabled provider", matching the older
+        // pre-refactor expectation.
+        cfg.providers.remove("openai");
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                api_key: Some(SecretRef::EnvVar {
+                    env: "ANTHROPIC_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
         cfg
     }
 
@@ -2799,5 +3017,234 @@ rotation = "hourly"
         assert_eq!(cfg.logging.file.max_size_mb, 5);
         assert_eq!(cfg.logging.file.retention_days, 7);
         assert_eq!(cfg.logging.file.rotation, RotationKind::Daily);
+    }
+
+    // -----------------------------------------------------------------------
+    // Free-form named providers (operator-chosen keys).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parses_named_providers_with_explicit_kind() {
+        // siliconflow is a free-form name (not a first-party slot); the
+        // explicit `kind = "openai_compatible"` makes it parse cleanly and
+        // the round-trip preserves the key + kind + base_url.
+        let frag = r#"
+[providers.siliconflow]
+kind = "openai_compatible"
+base_url = "https://api.siliconflow.cn/v1"
+api_key = { env = "SILICONFLOW_API_KEY" }
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(frag).expect("siliconflow entry must parse");
+        let entry = cfg
+            .providers
+            .get("siliconflow")
+            .expect("siliconflow entry should be present");
+        assert_eq!(entry.kind, Some(ProviderKind::OpenaiCompatible));
+        assert_eq!(
+            entry.base_url.as_deref(),
+            Some("https://api.siliconflow.cn/v1")
+        );
+        assert!(entry.enabled);
+        // Round-trip: serialise then re-parse.
+        let serialised = toml::to_string_pretty(&cfg).unwrap();
+        let reparsed: Config = toml::from_str(&serialised).unwrap();
+        assert!(reparsed.providers.contains_key("siliconflow"));
+        // validate() should be Ok — providers has an explicit kind + api_key.
+        // (The test config has no admin auth so wstool loopback default keeps
+        // it loopback-safe.)
+        reparsed
+            .validate()
+            .expect("named provider with explicit kind validates");
+    }
+
+    #[test]
+    fn multiple_openai_compatible_entries_coexist() {
+        // Three named entries all sharing kind = openai_compatible — the
+        // motivating scenario for free-form keys (one operator wires up
+        // SiliconFlow + OpenRouter + a local vLLM gateway side by side).
+        let frag = r#"
+[providers.siliconflow]
+kind = "openai_compatible"
+base_url = "https://api.siliconflow.cn/v1"
+api_key = { env = "SILICONFLOW_API_KEY" }
+enabled = true
+
+[providers.openrouter]
+kind = "openai_compatible"
+base_url = "https://openrouter.ai/api/v1"
+api_key = { env = "OPENROUTER_API_KEY" }
+enabled = true
+
+[providers.local-vllm]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:8000/v1"
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(frag).expect("three named entries must coexist");
+        assert!(cfg.providers.contains_key("siliconflow"));
+        assert!(cfg.providers.contains_key("openrouter"));
+        assert!(cfg.providers.contains_key("local-vllm"));
+        // enabled_names() reports the two with api_keys; the local-vllm
+        // entry is enabled but key-less so it doesn't count as "enabled
+        // and reachable".
+        let mut enabled = cfg.providers.enabled_names();
+        enabled.sort();
+        assert_eq!(
+            enabled,
+            vec!["openrouter".to_string(), "siliconflow".to_string()]
+        );
+    }
+
+    #[test]
+    fn legacy_slot_names_still_load() {
+        // Pre-refactor config: `[providers.openai]` with no `kind` field.
+        // The slot name infers the kind so the entry remains valid.
+        let frag = r#"
+[providers.openai]
+api_key = { env = "OPENAI_API_KEY" }
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(frag).expect("legacy slot must parse");
+        let entry = cfg.providers.get("openai").expect("openai slot present");
+        // No explicit kind on disk.
+        assert!(entry.kind.is_none());
+        // …but kind_for() infers it from the slot name.
+        assert_eq!(
+            cfg.providers.kind_for("openai", entry),
+            Some(ProviderKind::Openai)
+        );
+        // validate() accepts the legacy shape (no `missing_kind` issue).
+        let issues = cfg.validate_report();
+        assert!(
+            !issues.iter().any(|i| i.code == "missing_kind"),
+            "legacy slot must not raise missing_kind, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn missing_kind_errors_with_helpful_message() {
+        // Free-form name + no `kind` field → validator raises a friendly
+        // error that names the offending entry and lists the valid kinds.
+        let frag = r#"
+[providers.mystery-llm]
+api_key = { env = "MYSTERY_API_KEY" }
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(frag).expect("toml parses (validator runs later)");
+        let issues = cfg.validate_report();
+        let kind_issue = issues
+            .iter()
+            .find(|i| i.code == "missing_kind")
+            .expect("expected missing_kind issue");
+        assert_eq!(kind_issue.path, "providers.mystery-llm.kind");
+        assert!(
+            kind_issue.message.contains("mystery-llm"),
+            "message must name the offending entry, got: {}",
+            kind_issue.message
+        );
+        // The error enumerates valid kinds so the operator can copy/paste.
+        assert!(
+            kind_issue.message.contains("openai_compatible"),
+            "message must list valid kinds, got: {}",
+            kind_issue.message
+        );
+        assert_eq!(kind_issue.level, IssueLevel::Error);
+    }
+
+    #[test]
+    fn embedding_can_reference_any_named_provider() {
+        // The embedding section binds `provider = "<name>"`; with free-form
+        // keys that name can be anything an operator declared, not just
+        // one of the six legacy slot names.
+        let frag = r#"
+[providers.siliconflow]
+kind = "openai_compatible"
+base_url = "https://api.siliconflow.cn/v1"
+api_key = { env = "SILICONFLOW_API_KEY" }
+enabled = true
+
+[embedding]
+provider = "siliconflow"
+model = "BAAI/bge-large-zh-v1.5"
+dimension = 1024
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(frag).expect("named provider + embedding must parse");
+        let issues = cfg.validate_report();
+        // No `embedding_provider_missing` — the named provider was found.
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.code == "embedding_provider_missing"),
+            "embedding ref to named provider must resolve, got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn every_new_provider_kind_round_trips() {
+        // One round-trip per new ProviderKind to lock the snake_case wire
+        // shape so any future rename surfaces here, not three crates over.
+        for (kind, wire) in [
+            (ProviderKind::Mistral, "mistral"),
+            (ProviderKind::Cohere, "cohere"),
+            (ProviderKind::Together, "together"),
+            (ProviderKind::Groq, "groq"),
+            (ProviderKind::Replicate, "replicate"),
+            (ProviderKind::Bedrock, "bedrock"),
+            (ProviderKind::Azure, "azure"),
+        ] {
+            assert_eq!(kind.as_str(), wire, "as_str() for {kind:?}");
+            let frag = format!(
+                r#"
+[providers.my-{wire}]
+kind = "{wire}"
+api_key = {{ env = "X" }}
+enabled = true
+"#
+            );
+            let cfg: Config =
+                toml::from_str(&frag).unwrap_or_else(|e| panic!("kind={wire}: parse failed: {e}"));
+            let entry = cfg
+                .providers
+                .get(&format!("my-{wire}"))
+                .unwrap_or_else(|| panic!("kind={wire}: entry missing"));
+            assert_eq!(entry.kind, Some(kind), "kind round-trip for {wire}");
+            // Re-serialise and re-parse to lock TOML round-trip.
+            let serialised = toml::to_string_pretty(&cfg).unwrap();
+            let reparsed: Config = toml::from_str(&serialised)
+                .unwrap_or_else(|e| panic!("kind={wire}: re-parse failed: {e}"));
+            assert_eq!(
+                reparsed.providers.get(&format!("my-{wire}")).unwrap().kind,
+                Some(kind),
+                "round-trip preserves kind for {wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_config_seeds_openai_entry() {
+        // A fresh `Config::default()` must include a single `[providers.openai]`
+        // entry with `kind = "openai"` so onboarding docs stay accurate
+        // ("export OPENAI_API_KEY and you're done").
+        let cfg = Config::default();
+        let entry = cfg
+            .providers
+            .get("openai")
+            .expect("default config must seed [providers.openai]");
+        assert_eq!(entry.kind, Some(ProviderKind::Openai));
+        // The seeded entry is disabled + key-less — flipping `enabled = true`
+        // and supplying an api_key is the operator's job.
+        assert!(!entry.enabled);
+        assert!(entry.api_key.is_none());
+        // Round-trip through TOML so we know the seeded entry survives a
+        // save/load cycle.
+        let toml_text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            toml_text.contains("[providers.openai]"),
+            "default config TOML must include [providers.openai]; got:\n{toml_text}"
+        );
+        let reparsed: Config = toml::from_str(&toml_text).unwrap();
+        assert!(reparsed.providers.contains_key("openai"));
     }
 }

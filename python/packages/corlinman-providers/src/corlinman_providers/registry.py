@@ -28,6 +28,15 @@ from corlinman_providers.declarative import (
     load_all_specs,
 )
 from corlinman_providers.google_provider import GoogleProvider
+from corlinman_providers.market_providers import (
+    AzureProvider,
+    BedrockProvider,
+    CohereProvider,
+    GroqProvider,
+    MistralProvider,
+    ReplicateProvider,
+    TogetherProvider,
+)
 from corlinman_providers.openai_compatible import OpenAICompatibleProvider
 from corlinman_providers.openai_provider import OpenAIProvider
 from corlinman_providers.specs import AliasEntry, ProviderKind, ProviderSpec
@@ -36,7 +45,11 @@ logger = structlog.get_logger(__name__)
 
 
 # Map ProviderKind → adapter class. Every first-party kind is wired here;
-# ``openai_compatible`` is separate because it carries a user-chosen name.
+# ``openai_compatible`` plus the seven market kinds added in the
+# free-form-providers refactor (Mistral / Cohere / Together / Groq /
+# Replicate / Bedrock / Azure) are also dispatched here so any
+# ``[providers.<name>]`` entry whose ``kind`` is one of these resolves to
+# a concrete adapter without an ad-hoc shim.
 _KIND_TO_CLASS: dict[ProviderKind, type[Any]] = {
     ProviderKind.ANTHROPIC: AnthropicProvider,
     ProviderKind.OPENAI: OpenAIProvider,
@@ -45,6 +58,16 @@ _KIND_TO_CLASS: dict[ProviderKind, type[Any]] = {
     ProviderKind.QWEN: QwenProvider,
     ProviderKind.GLM: GLMProvider,
     ProviderKind.OPENAI_COMPATIBLE: OpenAICompatibleProvider,
+    ProviderKind.MISTRAL: MistralProvider,
+    ProviderKind.COHERE: CohereProvider,
+    ProviderKind.TOGETHER: TogetherProvider,
+    ProviderKind.GROQ: GroqProvider,
+    ProviderKind.REPLICATE: ReplicateProvider,
+    # Bedrock + Azure raise NotImplementedError at build time — config
+    # validation accepts them so operators can declare intent, but the
+    # runtime fails loudly until proper SigV4 / deployment-routing lands.
+    ProviderKind.BEDROCK: BedrockProvider,
+    ProviderKind.AZURE: AzureProvider,
 }
 
 

@@ -589,7 +589,16 @@ export type ProviderKind =
   | "deepseek"
   | "qwen"
   | "glm"
-  | "openai_compatible";
+  | "openai_compatible"
+  // Free-form-providers refactor: market LLMs surfaced as named kinds even
+  // though they all run through the OpenAI-compatible backend today.
+  | "mistral"
+  | "cohere"
+  | "together"
+  | "groq"
+  | "replicate"
+  | "bedrock"
+  | "azure";
 
 /** Loose JSON Schema (draft 2020-12) — enough for the subset we render. */
 export type JSONSchema = {

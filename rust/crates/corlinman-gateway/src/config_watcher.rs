@@ -485,13 +485,19 @@ mod tests {
 
     fn base_cfg() -> Config {
         let mut cfg = Config::default();
-        cfg.providers.anthropic = Some(ProviderEntry {
-            api_key: Some(SecretRef::EnvVar {
-                env: "ANTHROPIC_API_KEY".into(),
-            }),
-            enabled: true,
-            ..Default::default()
-        });
+        // Default seeds a disabled `openai` entry; replace it with anthropic
+        // so this fixture's `enabled_names()` expectation stays singular.
+        cfg.providers.remove("openai");
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                api_key: Some(SecretRef::EnvVar {
+                    env: "ANTHROPIC_API_KEY".into(),
+                }),
+                enabled: true,
+                ..Default::default()
+            },
+        );
         cfg
     }
 
@@ -542,7 +548,7 @@ mod tests {
         // Snapshot unchanged.
         assert_eq!(
             watcher.current().providers.enabled_names(),
-            vec!["anthropic"]
+            vec!["anthropic".to_string()]
         );
     }
 

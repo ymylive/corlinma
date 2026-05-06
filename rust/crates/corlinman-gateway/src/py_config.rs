@@ -226,28 +226,34 @@ mod tests {
     fn cfg_with_everything() -> Config {
         let mut cfg = Config::default();
         std::env::set_var("PY_CONFIG_TEST_KEY", "sk-test-xyz");
-        cfg.providers.anthropic = Some(ProviderEntry {
-            kind: None, // inferred from slot name
-            api_key: Some(SecretRef::EnvVar {
-                env: "PY_CONFIG_TEST_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            params: {
-                let mut p = ParamsMap::new();
-                p.insert("temperature".into(), serde_json::json!(0.7));
-                p
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                kind: None, // inferred from slot name
+                api_key: Some(SecretRef::EnvVar {
+                    env: "PY_CONFIG_TEST_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                params: {
+                    let mut p = ParamsMap::new();
+                    p.insert("temperature".into(), serde_json::json!(0.7));
+                    p
+                },
             },
-        });
-        cfg.providers.openai = Some(ProviderEntry {
-            kind: Some(ProviderKind::Openai),
-            api_key: Some(SecretRef::Literal {
-                value: "sk-literal".into(),
-            }),
-            base_url: Some("https://api.openai.com/v1".into()),
-            enabled: true,
-            params: ParamsMap::new(),
-        });
+        );
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                kind: Some(ProviderKind::Openai),
+                api_key: Some(SecretRef::Literal {
+                    value: "sk-literal".into(),
+                }),
+                base_url: Some("https://api.openai.com/v1".into()),
+                enabled: true,
+                params: ParamsMap::new(),
+            },
+        );
         cfg.models.aliases.insert(
             "smart".into(),
             AliasEntry::Full(AliasSpec {
@@ -333,19 +339,29 @@ mod tests {
     #[test]
     fn missing_env_var_leaves_api_key_null() {
         let mut cfg = Config::default();
+        // Drop the default-seeded openai entry so this test focuses on
+        // anthropic's missing-env-var behaviour without ordering noise.
+        cfg.providers.remove("openai");
         std::env::remove_var("PY_CONFIG_TEST_MISSING");
-        cfg.providers.anthropic = Some(ProviderEntry {
-            kind: None,
-            api_key: Some(SecretRef::EnvVar {
-                env: "PY_CONFIG_TEST_MISSING".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            params: ParamsMap::new(),
-        });
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                kind: None,
+                api_key: Some(SecretRef::EnvVar {
+                    env: "PY_CONFIG_TEST_MISSING".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                params: ParamsMap::new(),
+            },
+        );
         let v = render_py_config(&cfg);
-        let anthropic = &v["providers"][0];
-        assert_eq!(anthropic["name"], "anthropic");
+        let anthropic = v["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "anthropic")
+            .expect("anthropic spec should be rendered");
         assert!(
             anthropic["api_key"].is_null() || anthropic.get("api_key").is_none(),
             "unset env should render as null/absent, got {anthropic}"
@@ -354,7 +370,10 @@ mod tests {
 
     #[test]
     fn empty_config_renders_empty_sections() {
-        let cfg = Config::default();
+        // Default config seeds a single `openai` entry; clear it explicitly
+        // so this test asserts the post-clear "no providers declared" case.
+        let mut cfg = Config::default();
+        cfg.providers.remove("openai");
         let v = render_py_config(&cfg);
         assert!(v["providers"].as_array().unwrap().is_empty());
         assert!(v["aliases"].as_object().unwrap().is_empty());

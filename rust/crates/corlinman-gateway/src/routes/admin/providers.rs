@@ -149,7 +149,7 @@ async fn list_providers(State(state): State<AdminState>) -> Json<ListOut> {
         })
         .collect();
     providers.sort_by(|a, b| a.name.cmp(&b.name));
-    let kinds: Vec<KindDescriptor> = ALL_KINDS
+    let kinds: Vec<KindDescriptor> = all_kinds()
         .iter()
         .map(|&k| KindDescriptor {
             kind: k.as_str(),
@@ -160,15 +160,11 @@ async fn list_providers(State(state): State<AdminState>) -> Json<ListOut> {
     Json(ListOut { providers, kinds })
 }
 
-const ALL_KINDS: &[ProviderKind] = &[
-    ProviderKind::Anthropic,
-    ProviderKind::Openai,
-    ProviderKind::Google,
-    ProviderKind::Deepseek,
-    ProviderKind::Qwen,
-    ProviderKind::Glm,
-    ProviderKind::OpenaiCompatible,
-];
+/// Mirror of [`ProviderKind::all`]; kept as a thin alias for the existing
+/// admin-router code paths so the call sites don't have to change.
+fn all_kinds() -> &'static [ProviderKind] {
+    ProviderKind::all()
+}
 
 // ---------------------------------------------------------------------------
 // POST /admin/providers  — upsert
@@ -427,52 +423,21 @@ fn detect_references(cfg: &Config, provider: &str) -> References {
 // Helpers — slot placement / snapshot lookup / params validation
 // ---------------------------------------------------------------------------
 
+/// Insert (or replace) a provider entry under `name`. With the BTreeMap-
+/// backed [`ProvidersConfig`] this is a one-line `insert`; the helper is
+/// kept so the upsert / patch handler bodies stay readable.
 fn place_provider(cfg: &mut ProvidersConfig, name: &str, entry: ProviderEntry) {
-    match name {
-        "anthropic" => cfg.anthropic = Some(entry),
-        "openai" => cfg.openai = Some(entry),
-        "google" => cfg.google = Some(entry),
-        "deepseek" => cfg.deepseek = Some(entry),
-        "qwen" => cfg.qwen = Some(entry),
-        "glm" => cfg.glm = Some(entry),
-        // Custom (openai_compatible) slots aren't currently representable
-        // in the typed ProvidersConfig — for v1 the router accepts them
-        // via upsert but they're stashed into the first unused first-party
-        // slot. The Python side reads from a flat map once proto parity
-        // lands; until then, operators who need custom providers should
-        // edit the TOML directly or use one of the first-party slot names.
-        _ => {
-            // Documented behaviour: upsert with an unknown slot name on
-            // kind = openai_compatible is rejected upstream via the
-            // `kind_mismatch` guard on first-party names. Free-form names
-            // currently have no home in the typed schema; the outer handler
-            // should have returned 400 before this function runs.
-            // Fall back to dropping it on the ground to avoid panicking in
-            // release builds — tests exercise only the named slots.
-        }
-    }
+    cfg.insert(name, entry);
 }
 
 fn clear_provider(cfg: &mut ProvidersConfig, name: &str) {
-    match name {
-        "anthropic" => cfg.anthropic = None,
-        "openai" => cfg.openai = None,
-        "google" => cfg.google = None,
-        "deepseek" => cfg.deepseek = None,
-        "qwen" => cfg.qwen = None,
-        "glm" => cfg.glm = None,
-        _ => {}
-    }
+    cfg.remove(name);
 }
 
-fn snapshot_entry(cfg: &Config, name: &str) -> Option<(&'static str, ProviderEntry)> {
-    cfg.providers.iter().find_map(|(n, e)| {
-        if n == name {
-            Some((n, e.clone()))
-        } else {
-            None
-        }
-    })
+fn snapshot_entry(cfg: &Config, name: &str) -> Option<(String, ProviderEntry)> {
+    cfg.providers
+        .get(name)
+        .map(|e| (name.to_string(), e.clone()))
 }
 
 /// Lightweight params validator: checks top-level shape against
@@ -555,9 +520,22 @@ fn check_scalar(schema: &JsonValue, value: &JsonValue) -> Result<(), String> {
 pub(crate) fn params_schema_for(kind: ProviderKind) -> JsonValue {
     match kind {
         ProviderKind::Anthropic => anthropic_schema(),
-        ProviderKind::Openai | ProviderKind::OpenaiCompatible => openai_schema(),
         ProviderKind::Google => google_schema(),
-        ProviderKind::Deepseek | ProviderKind::Qwen | ProviderKind::Glm => openai_schema(),
+        // Every other kind speaks the OpenAI wire format — they share the
+        // same params schema until per-kind quirks (Bedrock SigV4, Azure
+        // deployment routing, etc.) earn dedicated schemas.
+        ProviderKind::Openai
+        | ProviderKind::OpenaiCompatible
+        | ProviderKind::Deepseek
+        | ProviderKind::Qwen
+        | ProviderKind::Glm
+        | ProviderKind::Mistral
+        | ProviderKind::Cohere
+        | ProviderKind::Together
+        | ProviderKind::Groq
+        | ProviderKind::Replicate
+        | ProviderKind::Bedrock
+        | ProviderKind::Azure => openai_schema(),
     }
 }
 
@@ -697,15 +675,21 @@ mod tests {
 
     fn base_state(path: Option<std::path::PathBuf>) -> AdminState {
         let mut cfg = Config::default();
-        cfg.providers.anthropic = Some(ProviderEntry {
-            kind: None,
-            api_key: Some(SecretRef::EnvVar {
-                env: "ANTHROPIC_API_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            params: ParamsMap::new(),
-        });
+        // Default seeds a disabled `openai` entry; remove it so the test
+        // helper's "single anthropic provider" expectation holds.
+        cfg.providers.remove("openai");
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                kind: None,
+                api_key: Some(SecretRef::EnvVar {
+                    env: "ANTHROPIC_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                params: ParamsMap::new(),
+            },
+        );
         let mut state = AdminState::new(
             Arc::new(PluginRegistry::default()),
             Arc::new(ArcSwap::from_pointee(cfg)),
@@ -782,7 +766,7 @@ mod tests {
         assert_eq!(v["params"]["temperature"], 0.7);
 
         let live = state.config.load();
-        assert!(live.providers.openai.is_some());
+        assert!(live.providers.contains_key("openai"));
         let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(on_disk.contains("[providers.openai]"));
     }
@@ -904,8 +888,7 @@ mod tests {
                 .config
                 .load()
                 .providers
-                .anthropic
-                .as_ref()
+                .get("anthropic")
                 .unwrap()
                 .enabled
         );
@@ -947,7 +930,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-        assert!(state.config.load().providers.anthropic.is_none());
+        assert!(!state.config.load().providers.contains_key("anthropic"));
     }
 
     #[tokio::test]
@@ -955,13 +938,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         let mut cfg = Config::default();
-        cfg.providers.anthropic = Some(ProviderEntry {
-            kind: None,
-            api_key: None,
-            base_url: None,
-            enabled: true,
-            params: ParamsMap::new(),
-        });
+        cfg.providers.remove("openai"); // drop default seed
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                kind: None,
+                api_key: None,
+                base_url: None,
+                enabled: true,
+                params: ParamsMap::new(),
+            },
+        );
         cfg.models.aliases.insert(
             "smart".into(),
             AliasEntry::Full(AliasSpec {
@@ -998,15 +985,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         let mut cfg = Config::default();
-        cfg.providers.openai = Some(ProviderEntry {
-            kind: None,
-            api_key: Some(SecretRef::EnvVar {
-                env: "OPENAI_API_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            params: ParamsMap::new(),
-        });
+        // Default seeds a disabled openai entry; replace it so this test's
+        // setup mirrors pre-refactor expectations exactly.
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                kind: None,
+                api_key: Some(SecretRef::EnvVar {
+                    env: "OPENAI_API_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                params: ParamsMap::new(),
+            },
+        );
         cfg.embedding = Some(EmbeddingConfig {
             provider: "openai".into(),
             model: "text-embedding-3-small".into(),

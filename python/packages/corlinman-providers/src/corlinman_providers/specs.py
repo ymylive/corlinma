@@ -20,9 +20,20 @@ from pydantic import BaseModel, ConfigDict, Field
 class ProviderKind(StrEnum):
     """Lowercase discriminator identifying the provider wire shape.
 
-    ``openai_compatible`` is the escape hatch for local vLLM / Ollama /
-    SiliconFlow / any gateway that implements the OpenAI wire format and
-    therefore requires an explicit ``base_url``.
+    First-party kinds (``anthropic`` / ``openai`` / ``google`` / ``deepseek``
+    / ``qwen`` / ``glm``) have bespoke adapters.
+
+    ``openai_compatible`` plus the seven market kinds added in the
+    free-form-providers refactor (``mistral`` / ``cohere`` / ``together`` /
+    ``groq`` / ``replicate`` / ``bedrock`` / ``azure``) all speak the OpenAI
+    wire format and route through :class:`OpenAICompatibleProvider`. They
+    are surfaced as named kinds so admin UIs / configs can document operator
+    intent without inventing per-kind adapter classes.
+
+    ``bedrock`` and ``azure`` are declared but the runtime currently raises
+    ``NotImplementedError`` when one is used — proper SigV4 / deployment-id
+    support lands in a follow-up. Operators who need them today should use
+    ``kind = "openai_compatible"`` with an explicit ``base_url``.
     """
 
     ANTHROPIC = "anthropic"
@@ -32,6 +43,13 @@ class ProviderKind(StrEnum):
     QWEN = "qwen"
     GLM = "glm"
     OPENAI_COMPATIBLE = "openai_compatible"
+    MISTRAL = "mistral"
+    COHERE = "cohere"
+    TOGETHER = "together"
+    GROQ = "groq"
+    REPLICATE = "replicate"
+    BEDROCK = "bedrock"
+    AZURE = "azure"
 
 
 class ProviderSpec(BaseModel):

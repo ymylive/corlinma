@@ -67,13 +67,16 @@ fn base_config() -> Config {
     let mut cfg = Config::default();
     cfg.admin.username = Some(ADMIN_USER.into());
     cfg.admin.password_hash = Some(hash_password(ADMIN_PASS));
-    cfg.providers.anthropic = Some(ProviderEntry {
-        api_key: Some(SecretRef::EnvVar {
-            env: "ANTHROPIC_API_KEY".into(),
-        }),
-        enabled: true,
-        ..Default::default()
-    });
+    cfg.providers.insert(
+        "anthropic",
+        ProviderEntry {
+            api_key: Some(SecretRef::EnvVar {
+                env: "ANTHROPIC_API_KEY".into(),
+            }),
+            enabled: true,
+            ..Default::default()
+        },
+    );
     cfg
 }
 

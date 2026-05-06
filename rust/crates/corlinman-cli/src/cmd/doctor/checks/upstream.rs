@@ -48,12 +48,14 @@ impl DoctorCheck for UpstreamCheck {
         }
 
         let mut failures: Vec<String> = Vec::new();
-        let mut ok_names: Vec<&'static str> = Vec::new();
+        // `name` is borrowed from the BTreeMap key, not `'static` — collect
+        // owned strings so we can release the config snapshot's borrow.
+        let mut ok_names: Vec<String> = Vec::new();
         for (name, entry) in &enabled {
             match entry.api_key.as_ref() {
                 None => failures.push(format!("{name}: missing api_key")),
                 Some(secret) => match secret.resolve() {
-                    Ok(_) => ok_names.push(name),
+                    Ok(_) => ok_names.push((*name).to_string()),
                     Err(e) => failures.push(format!("{name}: {e}")),
                 },
             }
@@ -112,14 +114,17 @@ mod tests {
     #[tokio::test]
     async fn literal_secret_resolves_to_ok() {
         let mut cfg = Config::default();
-        cfg.providers.openai = Some(ProviderEntry {
-            api_key: Some(SecretRef::Literal {
-                value: "sk-test".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
+        cfg.providers.insert(
+            "openai",
+            ProviderEntry {
+                api_key: Some(SecretRef::Literal {
+                    value: "sk-test".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
         let ctx = ctx_with(Some(cfg));
         let res = UpstreamCheck::new().run(&ctx).await;
         assert_eq!(res.status_str(), "ok", "got: {:?}", res);
@@ -128,14 +133,17 @@ mod tests {
     #[tokio::test]
     async fn missing_env_var_is_fail() {
         let mut cfg = Config::default();
-        cfg.providers.anthropic = Some(ProviderEntry {
-            api_key: Some(SecretRef::EnvVar {
-                env: "CORLINMAN_DOCTOR_TEST_UNSET_KEY".into(),
-            }),
-            base_url: None,
-            enabled: true,
-            ..Default::default()
-        });
+        cfg.providers.insert(
+            "anthropic",
+            ProviderEntry {
+                api_key: Some(SecretRef::EnvVar {
+                    env: "CORLINMAN_DOCTOR_TEST_UNSET_KEY".into(),
+                }),
+                base_url: None,
+                enabled: true,
+                ..Default::default()
+            },
+        );
         // SAFETY: test-only env clear, no threads racing on this name.
         unsafe { std::env::remove_var("CORLINMAN_DOCTOR_TEST_UNSET_KEY") };
         let ctx = ctx_with(Some(cfg));
