@@ -2056,11 +2056,26 @@ slot. Set `kind = \"...\"` explicitly. Valid kinds: {}",
                 });
             }
             if qq.enabled && qq.self_ids.is_empty() {
+                // Warn — not an error — because the QQ adapter can still
+                // function in keyword-filter / private-chat mode without
+                // knowing the bot's own UIN. The only feature self_ids
+                // unlocks is `@mention` detection in groups (which falls
+                // back to keyword matching when self_ids is empty). Letting
+                // the operator toggle `enabled = true` in the admin UI
+                // even before the QQ login completes is the friendlier
+                // path; once napcat scan-login lands a self_id, the next
+                // `corlinman config show` shows it populated and the
+                // warning self-clears.
                 issues.push(ValidationIssue {
                     path: "channels.qq.self_ids".into(),
                     code: "empty_self_ids".into(),
-                    message: "channels.qq.enabled = true but self_ids is empty".into(),
-                    level: IssueLevel::Error,
+                    message:
+                        "channels.qq.enabled = true but self_ids is empty — \
+                         @mention detection disabled until populated. Run \
+                         `corlinman config set channels.qq.self_ids` or \
+                         complete the napcat scan-login flow."
+                            .into(),
+                    level: IssueLevel::Warn,
                 });
             }
         }
