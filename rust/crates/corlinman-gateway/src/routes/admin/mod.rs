@@ -22,6 +22,7 @@ use arc_swap::ArcSwap;
 use axum::{routing::any, Router};
 use corlinman_core::config::Config;
 use corlinman_evolution::{EvolutionStore, HistoryRepo, ProposalsRepo};
+use corlinman_identity::IdentityStore;
 use corlinman_plugins::registry::PluginRegistry;
 use corlinman_tenant::{AdminDb, TenantId, TenantPool};
 use corlinman_vector::SqliteStore;
@@ -52,6 +53,7 @@ pub mod plugins;
 pub mod providers;
 pub mod rag;
 pub mod scheduler;
+pub mod identity;
 pub mod sessions;
 pub mod tenants;
 
@@ -169,6 +171,14 @@ pub struct AdminState {
     /// tempdir here to avoid the parallel-test race that the env-var
     /// fallback would have if two tests set it concurrently.
     pub data_dir: Option<PathBuf>,
+    /// Phase 4 W2 B2 iter 6: per-tenant identity store backing
+    /// `/admin/identity*`. `None` is the disabled gate — every
+    /// `/admin/identity*` route then returns 503
+    /// `identity_disabled`, mirroring the sessions/tenants
+    /// disabled-503 convention. Boots that opt-in install a
+    /// `SqliteIdentityStore` opened against the tenant's
+    /// `user_identity.sqlite`; tests build one over a tempdir.
+    pub identity_store: Option<Arc<dyn IdentityStore>>,
 }
 
 impl AdminState {
@@ -193,6 +203,7 @@ impl AdminState {
             admin_db: None,
             sessions_disabled: false,
             data_dir: None,
+            identity_store: None,
         }
     }
 
@@ -333,6 +344,16 @@ impl AdminState {
         self
     }
 
+    /// Phase 4 W2 B2 iter 6 fluent: attach the per-tenant
+    /// [`IdentityStore`] backing `/admin/identity*`. Boots that opt
+    /// in pass a `SqliteIdentityStore` here. Test harnesses pin a
+    /// tempdir-backed store; absence of the field is the route-side
+    /// 503 `identity_disabled` gate.
+    pub fn with_identity_store(mut self, store: Arc<dyn IdentityStore>) -> Self {
+        self.identity_store = Some(store);
+        self
+    }
+
     /// Re-serialise the current config snapshot to the Python-side JSON
     /// drop. No-op + warn when the path isn't configured — admin writes
     /// still succeed (the TOML write already landed), they just can't
@@ -403,6 +424,7 @@ pub fn router_with_state(state: AdminState) -> Router {
         .merge(evolution::router(state.clone()))
         .merge(memory::router(state.clone()))
         .merge(sessions::router(state.clone()))
+        .merge(identity::router(state.clone()))
         .merge(tenants::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             tenant_state,

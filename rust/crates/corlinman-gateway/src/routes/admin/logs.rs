@@ -194,6 +194,7 @@ mod tests {
             admin_db: None,
             sessions_disabled: false,
             data_dir: None,
+            identity_store: None,
         };
         router(state)
     }

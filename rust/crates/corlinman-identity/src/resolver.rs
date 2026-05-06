@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 
 use crate::error::IdentityError;
 use crate::store::SqliteIdentityStore;
-use crate::types::{BindingKind, ChannelAlias, UserId};
+use crate::types::{BindingKind, ChannelAlias, UserId, VerificationPhrase};
 
 /// Storage-agnostic surface for identity resolution.
 ///
@@ -74,6 +74,43 @@ pub trait IdentityStore: Send + Sync {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<UserSummary>, IdentityError>;
+
+    /// Issue a fresh verification phrase for `user_id` on the
+    /// `(channel, channel_user_id)` pair the operator confirmed maps
+    /// to that user. The phrase expires in
+    /// [`crate::DEFAULT_TTL_MIN`] minutes; the caller echoes it on
+    /// the source channel for the human to redeem on the other side.
+    ///
+    /// Hoisted onto the trait (rather than left on the concrete
+    /// `SqliteIdentityStore`) so admin routes can issue phrases
+    /// against any future backend through the `Arc<dyn IdentityStore>`
+    /// they hold.
+    async fn issue_phrase(
+        &self,
+        user_id: &UserId,
+        channel: &str,
+        channel_user_id: &str,
+    ) -> Result<VerificationPhrase, IdentityError>;
+
+    /// Operator-driven manual merge. Reattributes every alias bound
+    /// to `from_user_id` to `into_user_id` with `binding_kind =
+    /// 'operator'`, then deletes the orphaned `from_user_id` row.
+    /// Audit trail: `decided_by` is the operator's username so a
+    /// downstream audit log can record who pushed the merge through.
+    ///
+    /// Errors:
+    /// - [`IdentityError::UserNotFound`] when either user_id is missing.
+    /// - [`IdentityError::InvalidInput`] when both ids are equal (no-op
+    ///   merges are a programming error, not a degraded path).
+    ///
+    /// Returns the surviving `into_user_id` so the admin handler can
+    /// echo it back without a follow-up read.
+    async fn merge_users(
+        &self,
+        into_user_id: &UserId,
+        from_user_id: &UserId,
+        decided_by: &str,
+    ) -> Result<UserId, IdentityError>;
 }
 
 /// One row in [`IdentityStore::list_users`]. Wire shape: matches the
@@ -198,6 +235,147 @@ impl IdentityStore for SqliteIdentityStore {
             });
         }
         Ok(out)
+    }
+
+    async fn issue_phrase(
+        &self,
+        user_id: &UserId,
+        channel: &str,
+        channel_user_id: &str,
+    ) -> Result<VerificationPhrase, IdentityError> {
+        // Forward to the inherent method on `SqliteIdentityStore`.
+        // The verification module owns the impl; the trait surface
+        // just exposes it through the `Arc<dyn IdentityStore>` admin
+        // routes hold.
+        SqliteIdentityStore::issue_phrase(self, user_id, channel, channel_user_id).await
+    }
+
+    async fn merge_users(
+        &self,
+        into_user_id: &UserId,
+        from_user_id: &UserId,
+        decided_by: &str,
+    ) -> Result<UserId, IdentityError> {
+        if into_user_id == from_user_id {
+            return Err(IdentityError::InvalidInput(
+                "into_user_id and from_user_id must differ",
+            ));
+        }
+        if decided_by.is_empty() {
+            return Err(IdentityError::InvalidInput(
+                "decided_by must be non-empty",
+            ));
+        }
+
+        let mut tx = self
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| IdentityError::Storage {
+                op: "merge_users_begin",
+                source: e,
+            })?;
+
+        // Both rows must exist before any reattribution. Otherwise an
+        // operator typo silently mutates the surviving row's aliases
+        // and leaves them dangling.
+        let into_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_identities WHERE user_id = ?1",
+        )
+        .bind(into_user_id.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| IdentityError::Storage {
+            op: "merge_users_check_into",
+            source: e,
+        })?;
+        if into_exists == 0 {
+            return Err(IdentityError::UserNotFound(into_user_id.as_str().to_string()));
+        }
+
+        let from_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_identities WHERE user_id = ?1",
+        )
+        .bind(from_user_id.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| IdentityError::Storage {
+            op: "merge_users_check_from",
+            source: e,
+        })?;
+        if from_exists == 0 {
+            return Err(IdentityError::UserNotFound(from_user_id.as_str().to_string()));
+        }
+
+        // Reattribute every alias on the source to the target. Mark
+        // them `operator`-bound so the admin UI can flag the manual
+        // override distinctly from auto/verified bindings. Mirrors
+        // `redeem_phrase`'s reattribution path; the only difference
+        // is the `binding_kind` literal.
+        sqlx::query(
+            "UPDATE user_aliases \
+             SET user_id = ?1, binding_kind = 'operator' \
+             WHERE user_id = ?2",
+        )
+        .bind(into_user_id.as_str())
+        .bind(from_user_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| IdentityError::Storage {
+            op: "merge_users_reattribute_aliases",
+            source: e,
+        })?;
+
+        // Drop the orphaned source. ON DELETE CASCADE on user_aliases
+        // would otherwise wipe the rows we just moved — we already
+        // reattributed every alias above, so nothing cascades here.
+        sqlx::query("DELETE FROM user_identities WHERE user_id = ?1")
+            .bind(from_user_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| IdentityError::Storage {
+                op: "merge_users_delete_orphan",
+                source: e,
+            })?;
+
+        // Touch the surviving row's updated_at so a downstream
+        // "last-modified" sort surfaces the freshly-merged user.
+        let now = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .map_err(|e| IdentityError::Storage {
+                op: "merge_users_format_ts",
+                source: sqlx::Error::ColumnDecode {
+                    index: "now".into(),
+                    source: Box::new(e),
+                },
+            })?;
+        sqlx::query("UPDATE user_identities SET updated_at = ?1 WHERE user_id = ?2")
+            .bind(&now)
+            .bind(into_user_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| IdentityError::Storage {
+                op: "merge_users_touch_into",
+                source: e,
+            })?;
+
+        tx.commit().await.map_err(|e| IdentityError::Storage {
+            op: "merge_users_commit",
+            source: e,
+        })?;
+
+        // `decided_by` isn't yet persisted — the audit-log surface
+        // (Phase 4 W2 follow-up) will pick it up via tracing. For now
+        // we log it so an operator-driven merge always leaves a
+        // breadcrumb in the gateway logs.
+        tracing::info!(
+            into_user_id = %into_user_id,
+            from_user_id = %from_user_id,
+            decided_by = %decided_by,
+            "identity: operator-driven merge",
+        );
+
+        Ok(into_user_id.clone())
     }
 
     async fn aliases_for(
@@ -590,5 +768,86 @@ mod tests {
             .await
             .expect_err("empty channel_user_id must fail");
         assert!(matches!(err, IdentityError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn merge_users_reattributes_aliases_and_deletes_source() {
+        let tmp = TempDir::new().unwrap();
+        let store = fresh(&tmp).await;
+
+        let into = store.resolve_or_create("qq", "1234", None).await.unwrap();
+        let from = store
+            .resolve_or_create("telegram", "9876", None)
+            .await
+            .unwrap();
+        assert_ne!(into, from);
+
+        let surviving = store
+            .merge_users(&into, &from, "operator-alice")
+            .await
+            .unwrap();
+        assert_eq!(surviving, into);
+
+        // Telegram alias now points to `into`.
+        let tg_now = store.lookup("telegram", "9876").await.unwrap().unwrap();
+        assert_eq!(tg_now, into);
+
+        // The orphan is gone.
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_identities WHERE user_id = ?1",
+        )
+        .bind(from.as_str())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(n, 0);
+
+        // The reattributed alias is marked `operator`.
+        let bk: String = sqlx::query_scalar(
+            "SELECT binding_kind FROM user_aliases \
+             WHERE channel = 'telegram' AND channel_user_id = '9876'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(bk, "operator");
+    }
+
+    #[tokio::test]
+    async fn merge_users_rejects_self_merge() {
+        let tmp = TempDir::new().unwrap();
+        let store = fresh(&tmp).await;
+        let uid = store.resolve_or_create("qq", "1234", None).await.unwrap();
+        let err = store
+            .merge_users(&uid, &uid, "operator-alice")
+            .await
+            .expect_err("self-merge must fail");
+        assert!(matches!(err, IdentityError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn merge_users_404s_when_into_missing() {
+        let tmp = TempDir::new().unwrap();
+        let store = fresh(&tmp).await;
+        let from = store.resolve_or_create("qq", "1234", None).await.unwrap();
+        let phantom = UserId::generate();
+        let err = store
+            .merge_users(&phantom, &from, "operator-alice")
+            .await
+            .expect_err("missing into must fail");
+        assert!(matches!(err, IdentityError::UserNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn merge_users_404s_when_from_missing() {
+        let tmp = TempDir::new().unwrap();
+        let store = fresh(&tmp).await;
+        let into = store.resolve_or_create("qq", "1234", None).await.unwrap();
+        let phantom = UserId::generate();
+        let err = store
+            .merge_users(&into, &phantom, "operator-alice")
+            .await
+            .expect_err("missing from must fail");
+        assert!(matches!(err, IdentityError::UserNotFound(_)));
     }
 }
