@@ -401,6 +401,7 @@ impl ApprovalGate {
             tool: row.tool.clone(),
             args_preview: Self::preview_args(args_json),
             timeout_at_ms,
+            user_id: None,
         };
         // `emit_nonblocking` is sync and safe from any context; we don't
         // need the strict yield-between-tiers ordering here because the
@@ -432,6 +433,7 @@ impl ApprovalGate {
             // when /v1/chat/* gains a tenant middleware. For now the
             // observer falls back to "default".
             tenant_id: None,
+            user_id: None,
         };
         bus.emit_nonblocking(ev);
     }

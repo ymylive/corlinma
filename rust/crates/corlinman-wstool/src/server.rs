@@ -618,6 +618,7 @@ async fn emit_tool_called(
         // tenant context to propagate. Observer falls back to
         // "default".
         tenant_id: None,
+        user_id: None,
     };
     let _ = state.hook_bus.emit(event).await;
 }

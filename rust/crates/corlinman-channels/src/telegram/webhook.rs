@@ -163,6 +163,7 @@ async fn process_update_body(
                 session_key: session_key.clone(),
                 content: content.clone(),
                 metadata: meta,
+                user_id: None,
             })
             .await;
 
@@ -179,6 +180,7 @@ async fn process_update_body(
                     transcript: String::new(),
                     media_path,
                     media_type: "voice".to_string(),
+                    user_id: None,
                 })
                 .await;
         }

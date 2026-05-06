@@ -17,28 +17,44 @@ pub enum HookEvent {
         session_key: String,
         content: String,
         metadata: serde_json::Value,
+        /// Phase 4 W2 B2 iter 8: canonical user_id resolved via the
+        /// `IdentityStore` from `(channel, channel_user_id)`. `None`
+        /// when the channel adapter / chat handler hasn't been wired
+        /// to the resolver yet — downstream consumers (persona,
+        /// evolution observer) treat absent as "fall back to legacy
+        /// per-channel-key attribution".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
     },
     MessageSent {
         channel: String,
         session_key: String,
         content: String,
         success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
     },
     MessageTranscribed {
         session_key: String,
         transcript: String,
         media_path: String,
         media_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
     },
     MessagePreprocessed {
         session_key: String,
         transcript: String,
         is_group: bool,
         group_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
     },
     SessionPatch {
         session_key: String,
         patch: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
     },
     AgentBootstrap {
         workspace_dir: String,
@@ -71,6 +87,8 @@ pub enum HookEvent {
         error_code: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tenant_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
     },
     /// An approval request was raised; admins may see it via SSE or the UI.
     ///
@@ -85,6 +103,8 @@ pub enum HookEvent {
         tool: String,
         args_preview: String,
         timeout_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
     },
     /// Administrator (or auto-timeout) decided an approval.
     ///
@@ -102,6 +122,8 @@ pub enum HookEvent {
         decided_at_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tenant_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
     },
     /// Rate-limit rejected a request.
     ///
@@ -112,6 +134,8 @@ pub enum HookEvent {
         session_key: String,
         limit_type: String,
         retry_after_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<String>,
     },
     /// A NodeBridge-connected device emitted a telemetry metric.
     ///

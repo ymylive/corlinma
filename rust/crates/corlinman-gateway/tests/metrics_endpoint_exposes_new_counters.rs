@@ -156,6 +156,7 @@ async fn hook_emits_counter_increments_on_emit() {
         session_key: "telegram:1:1".into(),
         content: "hi".into(),
         metadata: serde_json::Value::Null,
+        user_id: None,
     })
     .await
     .expect("emit ok");

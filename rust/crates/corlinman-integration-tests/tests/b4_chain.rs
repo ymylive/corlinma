@@ -153,6 +153,7 @@ async fn telegram_voice_triggers_transcribed_and_received_hooks() {
             transcript,
             media_type,
             media_path,
+            user_id: _,
         } => {
             assert_eq!(session_key, "telegram:7:7");
             // Real STT lands later — current stub emits empty string.
@@ -324,6 +325,7 @@ async fn approval_path_emits_paired_hook_events() {
             tool,
             args_preview,
             timeout_at_ms,
+            user_id: _,
         } => {
             assert_eq!(session_key, "session-xyz");
             assert_eq!(plugin, "plugin.x");
@@ -333,9 +335,6 @@ async fn approval_path_emits_paired_hook_events() {
                 "args_preview should surface the raw JSON text, got {args_preview:?}"
             );
             assert!(timeout_at_ms > 0, "timeout_at_ms must be populated");
-            // Contract surprise to record in report: id is a plain UUID
-            // (hyphenated v4) — not namespaced or prefixed. Callers that
-            // want a namespaced id must wrap it outside the gate.
             assert!(
                 id.len() == 36 && id.chars().filter(|c| *c == '-').count() == 4,
                 "id must look like a UUID v4 ({id})"

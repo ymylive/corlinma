@@ -173,6 +173,7 @@ async fn full_chain_fake_stream() {
                 session_key: agent_session_key,
                 content,
                 success: true,
+                user_id: None,
             })
             .await;
     });

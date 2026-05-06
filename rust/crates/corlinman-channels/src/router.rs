@@ -221,6 +221,7 @@ impl ChannelRouter {
             // Token bucket refill cadence isn't exposed at this layer;
             // leave the hint at 0 so consumers treat it as "unknown".
             retry_after_ms: 0,
+            user_id: None,
         };
         bus.emit_nonblocking(ev);
     }
@@ -453,6 +454,7 @@ mod tests {
                 session_key,
                 limit_type,
                 retry_after_ms,
+                user_id: _,
             } => {
                 // Group bucket trips → `group_qq` (reason_channel).
                 assert_eq!(limit_type, "group_qq");

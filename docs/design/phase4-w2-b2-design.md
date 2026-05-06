@@ -286,25 +286,29 @@ Each numbered item is a single bounded iteration (~30 min - 2 hours):
    tightly coupled. Crockford-base32 phrase format. 9 new tests
    covering happy unify, fresh-bind, expired, already-consumed,
    GC sweep, and generator format.
-5. **Gateway integration** — middleware lookup; stamp on
-   `SessionContext`. 1 integration test with a real chat request.
-   Touches `rust/crates/corlinman-gateway/src/routes/chat.rs`;
-   needs an `IdentityStore` field added to `ChatState` and plumbed
-   from the boot path.
-6. **Admin REST routes** — `/admin/identity` (list), `/admin/identity/:user_id`
-   (detail), `/admin/identity/:user_id/issue-phrase` (POST),
-   `/admin/identity/merge` (POST operator-driven). ~6 tests.
-7. **Admin UI page** — `/admin/identity` table + dialog flow for
-   issue-phrase + manual merge. Mock-server contract first, like
-   B4 did with sessions.
-8. **HookEvent + persona attribution** — once the gateway stamps
-   `user_id` on `SessionContext`, propagate it to `HookEvent` and
-   the `EvolutionObserver` so per-user (rather than per-alias)
-   trait attribution lands. Pairs with the Phase 4 W1.5 A1 work.
+5. ✅ **Gateway integration** [done `66d24b1`] — `ChatState.identity_store`
+   added; `handle_chat` calls `resolve_or_create` after session_key
+   resolution. 3 unit tests cover the `parse_session_key` splitter.
+6. ✅ **Admin REST routes** [done `5815263`] — `/admin/identity` list,
+   `/admin/identity/:user_id` detail, `/admin/identity/:user_id/issue-phrase`
+   POST, `/admin/identity/merge` POST. 13 admin tests + 4 new
+   identity-crate tests for `merge_users`. `merge_users` and
+   `issue_phrase` hoisted onto the `IdentityStore` trait.
+7. ✅ **Admin UI page** [done `e903fa2`] — `/admin/identity` table
+   + detail dialog with phrase issue (click-to-copy) + manual merge
+   form. Sidebar entry + en/zh-CN locale strings. 51/51 UI test
+   files green.
+8. **HookEvent + persona attribution** — propagate `user_id` from
+   chat to `HookEvent` and `EvolutionSignal` so per-user trait
+   attribution becomes possible. Pairs with the Phase 4 W1.5 A1
+   `tenant_id` propagation that already shipped.
 
-**Status snapshot (2026-04-30)**: iters 1-4 done; identity primitive
-crate fully self-contained at 29 unit tests. Iters 5-8 are the
-integration-side work that surfaces the primitive to chat traffic + UI.
+**Status snapshot (2026-05-01)**: iters 1-7 done. Identity primitive
+crate at 36 unit tests including operator merge_users + issue_phrase
+hoisted to trait. Gateway has chat-path resolution (iter 5,
+`66d24b1`) + admin REST surface (iter 6, `5815263`) + UI page
+(iter 7, `e903fa2`). Iter 8 (HookEvent.user_id propagation) is the
+last remaining iteration; once it lands, B2 is functionally complete.
 
 ## Out of scope (B2)
 

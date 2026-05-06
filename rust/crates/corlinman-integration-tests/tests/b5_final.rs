@@ -580,6 +580,7 @@ async fn full_batch_chain() {
         ok: true,
         error_code: None,
         tenant_id: None,
+        user_id: None,
     })
     .await
     .expect("emit tool_called");
@@ -588,6 +589,7 @@ async fn full_batch_chain() {
         session_key: "telegram:1:1".into(),
         content: "hi".into(),
         success: true,
+        user_id: None,
     })
     .await
     .expect("emit message_sent");

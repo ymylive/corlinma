@@ -155,6 +155,7 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
             ok,
             error_code,
             tenant_id,
+            user_id: _,
         } => {
             if *ok {
                 return None;
@@ -195,6 +196,7 @@ pub(crate) fn adapt(event: &HookEvent) -> Option<EvolutionSignal> {
             decider,
             decided_at_ms,
             tenant_id,
+            user_id: _,
         } => {
             // Only non-allow decisions seed the EvolutionLoop; allow is
             // the happy path and would just pollute clusters.
@@ -365,6 +367,7 @@ mod tests {
             ok: false,
             error_code: code.map(str::to_string),
             tenant_id: None,
+        user_id: None,
         }
     }
 
@@ -378,6 +381,7 @@ mod tests {
             ok: true,
             error_code: None,
             tenant_id: None,
+            user_id: None,
         })
         .is_none());
 
@@ -408,6 +412,7 @@ mod tests {
             ok: false,
             error_code: Some("timeout".into()),
             tenant_id: Some("acme".into()),
+            user_id: None,
         })
         .unwrap();
         assert_eq!(s.tenant_id, "acme");
@@ -422,6 +427,7 @@ mod tests {
             decider: Some("op".into()),
             decided_at_ms: 0,
             tenant_id: None,
+            user_id: None,
         })
         .is_none());
 
@@ -432,6 +438,7 @@ mod tests {
             decider: Some("op".into()),
             decided_at_ms: 0,
             tenant_id: None,
+            user_id: None,
         })
         .unwrap();
         assert_eq!(s.event_kind, "approval.rejected");
@@ -446,6 +453,7 @@ mod tests {
             decider: None,
             decided_at_ms: 0,
             tenant_id: None,
+            user_id: None,
         })
         .unwrap();
         assert_eq!(s.event_kind, "approval.rejected");
@@ -459,6 +467,7 @@ mod tests {
             decider: Some("op".into()),
             decided_at_ms: 0,
             tenant_id: Some("bravo".into()),
+            user_id: None,
         })
         .unwrap();
         assert_eq!(s.tenant_id, "bravo");
@@ -477,6 +486,7 @@ mod tests {
                 session_key: "s".into(),
                 content: "hi".into(),
                 metadata: serde_json::Value::Null,
+            user_id: None,
             },
             HookEvent::Telemetry {
                 node_id: "n".into(),

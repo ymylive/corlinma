@@ -20,28 +20,33 @@ fn all_event_samples() -> Vec<HookEvent> {
             session_key: "s1".into(),
             content: "hi".into(),
             metadata: json!({"from": "u1"}),
+        user_id: None,
         },
         HookEvent::MessageSent {
             channel: "qq".into(),
             session_key: "s1".into(),
             content: "hello".into(),
             success: true,
+        user_id: None,
         },
         HookEvent::MessageTranscribed {
             session_key: "s1".into(),
             transcript: "spoken text".into(),
             media_path: "/tmp/a.ogg".into(),
             media_type: "audio/ogg".into(),
+        user_id: None,
         },
         HookEvent::MessagePreprocessed {
             session_key: "s1".into(),
             transcript: "cleaned".into(),
             is_group: true,
             group_id: Some("g42".into()),
+        user_id: None,
         },
         HookEvent::SessionPatch {
             session_key: "s1".into(),
             patch: json!({"foo": "bar"}),
+        user_id: None,
         },
         HookEvent::AgentBootstrap {
             workspace_dir: "/ws".into(),
@@ -63,6 +68,7 @@ fn all_event_samples() -> Vec<HookEvent> {
             tool: "exec".into(),
             args_preview: "{}".into(),
             timeout_at_ms: 0,
+        user_id: None,
         },
         HookEvent::ApprovalDecided {
             id: "a1".into(),
@@ -70,11 +76,13 @@ fn all_event_samples() -> Vec<HookEvent> {
             decider: Some("root".into()),
             decided_at_ms: 0,
             tenant_id: None,
+        user_id: None,
         },
         HookEvent::RateLimitTriggered {
             session_key: "s1".into(),
             limit_type: "channel_qq".into(),
             retry_after_ms: 0,
+        user_id: None,
         },
         HookEvent::Telemetry {
             node_id: "ios-demo".into(),
@@ -225,6 +233,7 @@ async fn approval_requested_round_trips_and_exposes_session_key() {
         tool: "exec".into(),
         args_preview: "{\"cmd\":\"ls\"}".into(),
         timeout_at_ms: 1_700_000_000_000,
+        user_id: None,
     };
     bus.emit(ev.clone()).await.expect("emit ok");
     let got = sub.recv().await.expect("recv ok");
@@ -249,6 +258,7 @@ async fn approval_decided_round_trips_and_is_session_scoped_none() {
         decider: Some("admin".into()),
         decided_at_ms: 1_700_000_000_500,
         tenant_id: None,
+        user_id: None,
     };
     bus.emit(ev.clone()).await.expect("emit ok");
     let got = sub.recv().await.expect("recv ok");
@@ -278,6 +288,7 @@ async fn rate_limit_triggered_round_trips() {
         session_key: "qq:group:999:u7".into(),
         limit_type: "channel_qq".into(),
         retry_after_ms: 500,
+        user_id: None,
     };
     bus.emit(ev.clone()).await.expect("emit ok");
     let got = sub.recv().await.expect("recv ok");

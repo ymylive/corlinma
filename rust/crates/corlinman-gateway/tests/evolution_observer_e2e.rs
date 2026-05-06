@@ -38,6 +38,7 @@ async fn observer_persists_tool_call_failed_to_evolution_signals() {
         ok: false,
         error_code: Some("disconnected".into()),
         tenant_id: None,
+        user_id: None,
     })
     .await
     .expect("emit ok");
