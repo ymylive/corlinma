@@ -4,6 +4,56 @@ All notable changes to corlinman are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — targets v0.5.0
+
+Free-form named providers + 7 new market `kind`s. Full notes:
+[`docs/release-notes-v0.5.0.md`](docs/release-notes-v0.5.0.md).
+
+### Added
+
+- **Free-form `[providers.*]` configuration**: the providers section is
+  now a `BTreeMap<String, ProviderEntry>` keyed by an operator-chosen
+  name. Add OpenRouter, SiliconFlow, Ollama, vLLM, or any other
+  OpenAI-wire-compatible vendor by writing two TOML lines — no Rust
+  patch required. The six legacy slot names (`anthropic`, `openai`,
+  `google`, `deepseek`, `qwen`, `glm`) continue to infer their `kind`
+  for backwards compatibility.
+- **Seven new `ProviderKind` variants**: `mistral`, `cohere`,
+  `together`, `groq`, `replicate`, `bedrock`, `azure`. The first five
+  route through the shared `OpenAICompatibleProvider` Python adapter
+  with documented default base URLs; `bedrock` and `azure` are
+  declared but raise `NotImplementedError` at build time pending real
+  SigV4 / deployment-routing support.
+- **Validator**: free-form names without an explicit `kind` produce a
+  `missing_kind` error pointing at the offending entry, listing every
+  valid kind in the message.
+
+### Docs
+
+- New: [`docs/providers.md`](docs/providers.md) — provider model + 14
+  supported `kind`s + four end-to-end recipes (OpenRouter + OpenAI
+  embedding, fully-local Ollama, CN-resident SiliconFlow, Groq
+  alongside OpenAI).
+- Updated: [`docs/config.example.toml`](docs/config.example.toml) leads
+  with `[providers.openai]` plus six commented-out vendor recipes; adds
+  named-provider `[embedding]` and full-form `[models.aliases.*]`
+  examples.
+- Updated: [`docs/architecture.md`](docs/architecture.md) §7 inline
+  sample reflects the free-form shape; reading list links the new
+  providers reference.
+- Updated: [`README.md`](README.md) Configuration section shows the
+  new `kind = "..."` shape; documentation map links the new doc.
+
+### Migration notes
+
+- No data migration. Existing configs with first-party slot names
+  parse unchanged.
+- New entries MUST set `kind` explicitly; `corlinman config validate`
+  surfaces any missing `kind` field with a one-line fix hint.
+- `bedrock` and `azure` parse and validate but raise at adapter-build
+  time today — declare `kind = "openai_compatible"` against a
+  compatible proxy until the real adapters ship.
+
 ## [0.4.0] — 2026-04-23
 
 Admin UI redesign: **Tidepool** design system. Warm-amber glass

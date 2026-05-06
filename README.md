@@ -309,14 +309,27 @@ username = "admin"
 # echo -n 'your-password' | argon2 "$(openssl rand -hex 8)" -id -m 15 -t 2 -p 1 -l 32 -e
 password_hash = "$argon2id$v=19$m=32768,t=2,p=1$..."
 
+# Providers are a free-form `BTreeMap<String, ProviderEntry>`. The table
+# key is operator-chosen; `kind` selects the wire shape. Full reference:
+# docs/providers.md (14 supported kinds + recipes).
 [providers.openai]
+kind = "openai"
 api_key = { env = "OPENAI_API_KEY" }
-base_url = "https://api.openai.com/v1"   # or any OpenAI-compatible endpoint
+base_url = "https://api.openai.com/v1"
 enabled = true
 
 [providers.anthropic]
+kind = "anthropic"
 api_key = { env = "ANTHROPIC_API_KEY" }
 enabled = true
+
+# Need a CN endpoint or a niche aggregator? Add an OpenAI-compat entry
+# with a chosen name — no Rust changes required. See docs/providers.md §3.
+# [providers.openrouter]
+# kind = "openai_compatible"
+# api_key = { env = "OPENROUTER_API_KEY" }
+# base_url = "https://openrouter.ai/api/v1"
+# enabled = true
 
 [models]
 default = "gpt-4o-mini"
@@ -421,6 +434,7 @@ ops/                Grafana dashboard + observability compose
 ## Documentation map
 
 - [Architecture](docs/architecture.md) — message flow, crate/package graph, gRPC bus
+- [Providers reference](docs/providers.md) — 14 supported `kind`s + recipes (Ollama / OpenRouter / SiliconFlow / Groq)
 - [Plugin authoring](docs/plugin-authoring.md) — write your own sync / async / service plugin
 - [Skills, agents & the variable cascade](docs/guides/skills-and-agents.md) — author `skills/`, `agents/`, `TVStxt/*`
 - [v0.1 → v0.2 migration](docs/migration/v1-to-v2.md) — manifest v2, vector v6, new config sections, block protocol

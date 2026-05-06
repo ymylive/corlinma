@@ -24,36 +24,129 @@ username = "admin"
 # password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
 
 # ---------------------------------------------------------------------------
-# [providers.*] — at least one must have enabled = true with an api_key
-# for the gateway to serve chats.
+# [providers.*] — free-form named provider entries. The map key (the bit
+# after `providers.`) is operator-chosen: pick whatever name reads well in
+# logs and in `[models.aliases.*].provider`. At least one entry must have
+# `enabled = true` AND a resolvable `api_key` for the gateway to serve chats.
+#
+# `kind` is the wire-shape discriminator and is REQUIRED for any free-form
+# name. The six legacy first-party slot names (anthropic / openai / google /
+# deepseek / qwen / glm) infer their kind for backwards compatibility, but
+# new entries should set it explicitly. Valid kinds:
+#   anthropic | openai | google | deepseek | qwen | glm
+#   openai_compatible
+#   mistral | cohere | together | groq | replicate
+#   bedrock | azure   (declared, runtime raises NotImplementedError today —
+#                      use openai_compatible with a proxy as a workaround)
 #
 # api_key shapes:
-#   { env = "ANTHROPIC_API_KEY" }   # value read from env at startup (preferred)
+#   { env = "OPENAI_API_KEY" }      # value read from env at startup (preferred)
 #   { value = "sk-..." }            # literal; redacted by `config show`
+#
+# See docs/providers.md for the full reference + recipes.
 # ---------------------------------------------------------------------------
-[providers.anthropic]
-api_key = { env = "ANTHROPIC_API_KEY" }
-enabled = true
 
+# Happy path: a single OpenAI provider, ready as soon as you `export
+# OPENAI_API_KEY=...` and flip `enabled = true`.
 [providers.openai]
+kind = "openai"
 api_key = { env = "OPENAI_API_KEY" }
 base_url = "https://api.openai.com/v1"
 enabled = false
 
-# [providers.google]
-# [providers.deepseek]
-# [providers.qwen]
-# [providers.glm]
+# Anthropic (Claude). Drop `enabled = true` once `ANTHROPIC_API_KEY` is set.
+# [providers.anthropic]
+# kind = "anthropic"
+# api_key = { env = "ANTHROPIC_API_KEY" }
+# enabled = false
+
+# Google Gemini under a friendlier slot name (the `kind` is what matters,
+# not the table key — operators are free to pick `gemini` or `google` here).
+# [providers.gemini]
+# kind = "google"
+# api_key = { env = "GOOGLE_API_KEY" }
+# enabled = false
+
+# OpenRouter — universal aggregator that fronts dozens of upstream models
+# behind one OpenAI-wire-compatible endpoint. Great for "I want one key and
+# every model".
+# [providers.openrouter]
+# kind = "openai_compatible"
+# api_key = { env = "OPENROUTER_API_KEY" }
+# base_url = "https://openrouter.ai/api/v1"
+# enabled = false
+
+# SiliconFlow — CN-friendly endpoint with low-latency mainland routing,
+# OpenAI-compatible. Pair with an embedding entry that points at the same
+# provider for a fully-CN-resident RAG stack (see [embedding] below).
+# [providers.siliconflow]
+# kind = "openai_compatible"
+# api_key = { env = "SILICONFLOW_API_KEY" }
+# base_url = "https://api.siliconflow.cn/v1"
+# enabled = false
+
+# Ollama — local OpenAI-compatible runtime (`ollama serve`). No api_key
+# needed; pass any non-empty value (Ollama ignores it but the gateway
+# requires the field for `enabled = true` to take effect).
+# [providers.ollama]
+# kind = "openai_compatible"
+# api_key = { value = "ollama" }
+# base_url = "http://localhost:11434/v1"
+# enabled = false
+
+# Groq Cloud — ultra-fast inference (Llama, Mixtral) at the same OpenAI
+# wire shape. Dedicated `kind` lets the admin UI label it explicitly.
+# [providers.groq]
+# kind = "groq"
+# api_key = { env = "GROQ_API_KEY" }
+# enabled = false
+
+# ---------------------------------------------------------------------------
+# [embedding] — optional dense-retrieval binding. `provider` references one
+# of the keys under `[providers.*]` above; the referenced provider must be
+# embedding-capable (OpenAI-kind / openai_compatible — Anthropic is not).
+# Omit the section (or set `enabled = false`) to fall back to BM25-only
+# retrieval. See docs/providers.md for the per-kind capability table.
+# ---------------------------------------------------------------------------
+# [embedding]
+# provider = "openai"                # must match a [providers.*] key
+# model = "text-embedding-3-small"
+# dimension = 1536
+# enabled = true
+
+# Embedding via SiliconFlow (CN-resident stack). Reference the named
+# provider table key, not the `kind`.
+# [embedding]
+# provider = "siliconflow"
+# model = "BAAI/bge-large-zh-v1.5"
+# dimension = 1024
+# enabled = true
 
 # ---------------------------------------------------------------------------
 # [models] — default + alias table (resolved before routing to providers).
+# Aliases can be either a shorthand string (provider inferred from model id)
+# or a full table that pins the alias to a specific named provider — handy
+# when you have two entries that could both serve the same model id.
 # ---------------------------------------------------------------------------
 [models]
 default = "claude-sonnet-4-5"
 
 [models.aliases]
+# Shorthand form: string target, provider inferred at call time.
 smart = "claude-opus-4-7"
 cheap = "claude-haiku-4-5-20251001"
+
+# Full form: route this alias to the named OpenRouter provider entry above.
+# `provider` must match a key under `[providers.*]`.
+# [models.aliases.gpt4o-via-openrouter]
+# model = "openai/gpt-4o"
+# provider = "openrouter"
+# params = { temperature = 0.3 }
+
+# Full form: pin a friendly alias to the local Ollama runtime.
+# [models.aliases.local]
+# model = "llama3.2:3b"
+# provider = "ollama"
 
 # ---------------------------------------------------------------------------
 # [channels.qq] — OneBot v11 forward-WS bridge. Disabled by default.

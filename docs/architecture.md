@@ -276,12 +276,22 @@ bind = "0.0.0.0"
 username = "admin"
 password_hash = "$argon2id$..."
 
-[providers.anthropic]
-api_key = { env = "ANTHROPIC_API_KEY" }
-
+# Providers are a free-form `BTreeMap<String, ProviderEntry>` — the table
+# key is operator-chosen and the `kind` field selects the wire shape. The
+# six legacy slot names (anthropic / openai / google / deepseek / qwen /
+# glm) infer their kind for backwards compatibility; any other name must
+# set `kind = "..."` explicitly. Full reference: docs/providers.md.
 [providers.openai]
+kind = "openai"
 api_key = { env = "OPENAI_API_KEY" }
 base_url = "https://api.openai.com/v1"
+enabled = true
+
+[providers.openrouter]
+kind = "openai_compatible"
+api_key = { env = "OPENROUTER_API_KEY" }
+base_url = "https://openrouter.ai/api/v1"
+enabled = true
 
 [models]
 default = "claude-sonnet-4-5"
@@ -343,6 +353,7 @@ The gateway ships one wire contract for future device-class clients
 
 ## 延伸阅读
 
+- Provider 配置 reference + 14 种 `kind` 表 + 常见 recipe（Ollama/OpenRouter/SiliconFlow）：[providers.md](providers.md)
 - 跨进程通道更多细节：`proto/corlinman/v1/agent.proto` 的注释（M0 写）
 - 插件运行时的 trait 层次：[plugin-authoring.md](plugin-authoring.md)
 - 每个 crate 的内部模块：该 crate 目录下的 `README.md`（M1 起每个 crate 维护）
