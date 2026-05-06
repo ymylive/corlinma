@@ -41,6 +41,7 @@ use axum::{
 use corlinman_agent_client::tool_callback::{PlaceholderExecutor, ToolExecutor};
 use corlinman_core::session::{SessionMessage, SessionRole, SessionStore};
 use corlinman_core::CorlinmanError;
+use corlinman_identity::IdentityStore;
 use corlinman_plugins::runtime::jsonrpc_stdio::{execute as stdio_execute, DEFAULT_TIMEOUT_MS};
 use corlinman_plugins::runtime::service_grpc::ServiceRuntime;
 use corlinman_plugins::runtime::{PluginInput, PluginOutput};
@@ -270,6 +271,16 @@ pub struct ChatState {
     /// the request, so `Denied` / `Timeout` short-circuit to structured
     /// error results instead of executing the plugin.
     pub approval_gate: Option<Arc<crate::middleware::approval::ApprovalGate>>,
+    /// Phase 4 W2 B2 iter 5: per-tenant identity resolver. When set,
+    /// every chat request with a parseable `<channel>:<channel_user_id>`
+    /// session key is mapped to a canonical [`corlinman_identity::UserId`]
+    /// before downstream handlers see the request. `None` keeps the
+    /// gateway in pre-B2 behaviour where session_key is the only handle.
+    /// Tenant scoping is at the store-open layer (per-file), so the same
+    /// `ChatState` always operates against one tenant — currently the
+    /// reserved `default`. Multi-tenant chat-side scoping lands when the
+    /// chat hot path also reads the `Tenant` extractor (out of scope here).
+    pub identity_store: Option<Arc<dyn IdentityStore>>,
 }
 
 /// Default cap used when [`ChatState`] is constructed without an explicit
@@ -291,6 +302,7 @@ impl ChatState {
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
             approval_gate: None,
+            identity_store: None,
         }
     }
 
@@ -305,6 +317,7 @@ impl ChatState {
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
             approval_gate: None,
+            identity_store: None,
         }
     }
 
@@ -324,6 +337,7 @@ impl ChatState {
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
             approval_gate: None,
+            identity_store: None,
         }
     }
 
@@ -352,6 +366,7 @@ impl ChatState {
             session_max_messages: DEFAULT_SESSION_MAX_MESSAGES,
             model_redirect: Arc::new(ModelRedirect::default()),
             approval_gate: None,
+            identity_store: None,
         }
     }
 
@@ -371,6 +386,19 @@ impl ChatState {
         gate: Arc<crate::middleware::approval::ApprovalGate>,
     ) -> Self {
         self.approval_gate = Some(gate);
+        self
+    }
+
+    /// Phase 4 W2 B2 iter 5 fluent: attach the per-tenant
+    /// [`IdentityStore`]. When set, every chat request whose
+    /// `session_key` parses as `<channel>:<channel_user_id>` is
+    /// resolved to a canonical `UserId` before downstream processing.
+    /// Production boots opt in by calling this with a
+    /// `SqliteIdentityStore` opened against the tenant's
+    /// `user_identity.sqlite`. Test harnesses leave it `None` and the
+    /// chat path behaves exactly as it did pre-B2.
+    pub fn with_identity_store(mut self, store: Arc<dyn IdentityStore>) -> Self {
+        self.identity_store = Some(store);
         self
     }
 
@@ -818,6 +846,40 @@ async fn handle_chat(
     // is the fallback (mirrors the convention we use for trace headers).
     let session_key = resolve_session_key(&req, &headers);
 
+    // Phase 4 W2 B2 iter 5: when an identity store is wired and the
+    // session_key parses as `<channel>:<channel_user_id>`, resolve
+    // (or mint) the canonical user_id for this human. The user_id is
+    // logged today so the audit trail is complete; iter 8 propagates
+    // it onto `HookEvent` and the persona attribution path.
+    if let (Some(key), Some(store)) = (session_key.as_deref(), state.identity_store.as_ref()) {
+        if let Some((channel, channel_user_id)) = parse_session_key(key) {
+            match store
+                .resolve_or_create(channel, channel_user_id, None)
+                .await
+            {
+                Ok(user_id) => {
+                    tracing::debug!(
+                        session_key = %key,
+                        channel = %channel,
+                        user_id = %user_id,
+                        "identity.resolved"
+                    );
+                }
+                Err(err) => {
+                    // Identity lookup failure must NOT break a chat
+                    // request — degrade gracefully to pre-B2 behaviour
+                    // (chat proceeds, no user_id stamped). Emit a warn
+                    // so operators see the lookup failure in logs.
+                    warn!(
+                        session_key = %key,
+                        error = %err,
+                        "identity.resolve_failed; proceeding without user_id",
+                    );
+                }
+            }
+        }
+    }
+
     // Prepend stored history for this session (if any). Runs BEFORE ChatStart
     // is built so Python sees a single well-ordered messages list. Agent B's
     // model-alias rewrite runs earlier in this same handler (on `req.model`),
@@ -903,6 +965,24 @@ async fn handle_chat(
             Err(err) => upstream_error(err),
         }
     }
+}
+
+/// Phase 4 W2 B2 iter 5: split a `session_key` of the form
+/// `<channel>:<channel_user_id>` into `(channel, channel_user_id)`.
+/// Returns `None` for keys without a colon — those came from sources
+/// (CLI sessions, internal tooling) where the channel concept doesn't
+/// apply, so identity resolution is a no-op.
+///
+/// `<channel_user_id>` may itself contain colons (e.g.
+/// `telegram:private:9001` → `("telegram", "private:9001")`); we
+/// only split on the FIRST colon, preserving any sub-namespacing the
+/// channel adapter chose to encode.
+fn parse_session_key(session_key: &str) -> Option<(&str, &str)> {
+    let (channel, rest) = session_key.split_once(':')?;
+    if channel.is_empty() || rest.is_empty() {
+        return None;
+    }
+    Some((channel, rest))
 }
 
 /// Resolve the effective session key from (1) the request body, (2) the
@@ -1640,6 +1720,39 @@ mod tests {
 
     fn app(backend: Arc<dyn ChatBackend>) -> Router {
         router_with_state(ChatState::new(backend))
+    }
+
+    // -- Phase 4 W2 B2 iter 5: session_key → identity parser --------------
+
+    #[test]
+    fn parse_session_key_splits_first_colon() {
+        assert_eq!(
+            parse_session_key("qq:1234"),
+            Some(("qq", "1234")),
+        );
+        // Channel-internal sub-namespacing must survive — we only split
+        // on the first colon, not every colon.
+        assert_eq!(
+            parse_session_key("telegram:private:9001"),
+            Some(("telegram", "private:9001")),
+        );
+    }
+
+    #[test]
+    fn parse_session_key_rejects_no_colon() {
+        // CLI sessions like "local-debug" don't carry a channel
+        // qualifier — identity resolution stays a no-op for them.
+        assert_eq!(parse_session_key("local-debug"), None);
+        assert_eq!(parse_session_key(""), None);
+    }
+
+    #[test]
+    fn parse_session_key_rejects_empty_halves() {
+        // A leading or trailing colon is malformed — we don't try to
+        // mint a user for a blank channel or channel_user_id.
+        assert_eq!(parse_session_key(":1234"), None);
+        assert_eq!(parse_session_key("qq:"), None);
+        assert_eq!(parse_session_key(":"), None);
     }
 
     fn token(text: &str) -> ServerFrame {
