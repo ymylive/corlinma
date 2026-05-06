@@ -95,6 +95,7 @@ export const en = {
     canvas: "Canvas",
     tenants: "Tenants",
     sessions: "Sessions",
+    identity: "Identity",
     expandSidebar: "Expand sidebar",
     collapseSidebar: "Collapse sidebar",
     openPalette: "Open command palette",

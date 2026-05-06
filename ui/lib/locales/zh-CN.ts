@@ -97,6 +97,7 @@ export const zhCN = {
     canvas: "Canvas",
     tenants: "租户",
     sessions: "会话",
+    identity: "身份",
     expandSidebar: "展开侧边栏",
     collapseSidebar: "折叠侧边栏",
     openPalette: "打开命令面板",
