@@ -1680,7 +1680,7 @@ export interface AgentBindingPatch {
 
 /** GET — list every agent's parsed model+provider binding. */
 export async function listAgentBindings(): Promise<AgentBindingsResponse> {
-  return apiFetch<AgentBindingsResponse>("/admin/agents/bindings");
+  return apiFetch<AgentBindingsResponse>("/admin/agent-bindings");
 }
 
 /** PATCH — overwrite an agent's model+provider binding. The endpoint
@@ -1690,7 +1690,7 @@ export async function setAgentModelBinding(
   name: string,
   patch: AgentBindingPatch,
 ): Promise<{ status: string; name: string; model: string | null; provider: string | null }> {
-  return apiFetch(`/admin/agents/${encodeURIComponent(name)}/binding`, {
+  return apiFetch(`/admin/agent-bindings/${encodeURIComponent(name)}`, {
     method: "PATCH",
     body: patch,
   });

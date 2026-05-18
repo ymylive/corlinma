@@ -2,8 +2,8 @@
 
 See ``docs/PLAN_PROVIDER_AUTH.md`` §2 W-D2. Two endpoints:
 
-* ``GET   /admin/agents/bindings``           — list parsed bindings
-* ``PATCH /admin/agents/{name}/binding``     — write back to yaml
+* ``GET   /admin/agent-bindings``           — list parsed bindings
+* ``PATCH /admin/agent-bindings/{name}``     — write back to yaml
 
 The hard contract is round-trip fidelity: the PATCH must preserve any
 unrecognised top-level yaml keys verbatim, multi-line scalar bodies
@@ -106,7 +106,7 @@ def client(admin_state: AdminState) -> TestClient:
 
 def test_get_lists_every_agent_with_binding_fields(client: TestClient) -> None:
     """Both fixture agents appear; bindings reflect what's in the yaml."""
-    resp = client.get("/admin/agents/bindings")
+    resp = client.get("/admin/agent-bindings")
     assert resp.status_code == 200, resp.text
     payload = resp.json()
     names = [a["name"] for a in payload["agents"]]
@@ -131,7 +131,7 @@ def test_get_returns_empty_list_when_dir_missing(tmp_path: Path) -> None:
         app = FastAPI()
         app.include_router(agents_routes.router())
         with TestClient(app) as c:
-            resp = c.get("/admin/agents/bindings")
+            resp = c.get("/admin/agent-bindings")
         assert resp.status_code == 200
         assert resp.json() == {"agents": []}
     finally:
@@ -150,7 +150,7 @@ def test_get_422_on_unparseable_card(
         encoding="utf-8",
     )
 
-    resp = client.get("/admin/agents/bindings")
+    resp = client.get("/admin/agent-bindings")
     assert resp.status_code == 422, resp.text
     body = resp.json()
     assert body["error"] == "agent_load_failed"
@@ -167,7 +167,7 @@ def test_patch_sets_model_when_field_missing(
 ) -> None:
     """First write on researcher inserts model+provider after description."""
     resp = client.patch(
-        "/admin/agents/researcher/binding",
+        "/admin/agent-bindings/researcher",
         json={"model": "gpt-4o-mini", "provider": "openai"},
     )
     assert resp.status_code == 200, resp.text
@@ -197,7 +197,7 @@ def test_patch_inserts_new_fields_after_description(
 ) -> None:
     """Position-sensitive: model+provider should land right after description."""
     client.patch(
-        "/admin/agents/researcher/binding",
+        "/admin/agent-bindings/researcher",
         json={"model": "qwen3-coder", "provider": "qwen"},
     )
     raw = (data_dir / "agents" / "researcher.yaml").read_text(encoding="utf-8")
@@ -221,7 +221,7 @@ def test_patch_updates_existing_binding_in_place(
     original_keys = list(original.keys())
 
     resp = client.patch(
-        "/admin/agents/editor/binding",
+        "/admin/agent-bindings/editor",
         json={"model": "claude-opus-4-7", "provider": "anthropic"},
     )
     assert resp.status_code == 200
@@ -240,7 +240,7 @@ def test_patch_clears_binding_with_null_values(
 ) -> None:
     """Sending null model+provider drops the keys entirely."""
     resp = client.patch(
-        "/admin/agents/editor/binding",
+        "/admin/agent-bindings/editor",
         json={"model": None, "provider": None},
     )
     assert resp.status_code == 200
@@ -260,7 +260,7 @@ def test_patch_empty_string_treated_as_clear(
 ) -> None:
     """Empty string from a UI text field should clear, not store ``""``."""
     resp = client.patch(
-        "/admin/agents/editor/binding",
+        "/admin/agent-bindings/editor",
         json={"model": "", "provider": ""},
     )
     assert resp.status_code == 200
@@ -292,7 +292,7 @@ def test_patch_preserves_unknown_top_level_keys(
     # to a known type — they're freely passed through. Just to be safe
     # we restrict the patched-doc test to round-trip via raw yaml.
     resp = client.patch(
-        "/admin/agents/withextras/binding",
+        "/admin/agent-bindings/withextras",
         json={"model": "mock", "provider": None},
     )
     assert resp.status_code == 200
@@ -311,7 +311,7 @@ def test_patch_preserves_unknown_top_level_keys(
 
 def test_patch_404_when_agent_missing(client: TestClient) -> None:
     resp = client.patch(
-        "/admin/agents/nonexistent/binding",
+        "/admin/agent-bindings/nonexistent",
         json={"model": "gpt-4o-mini", "provider": "openai"},
     )
     assert resp.status_code == 404
@@ -321,7 +321,7 @@ def test_patch_404_when_agent_missing(client: TestClient) -> None:
 
 def test_patch_rejects_path_traversal(client: TestClient) -> None:
     resp = client.patch(
-        "/admin/agents/..%2Fetc%2Fpasswd/binding",
+        "/admin/agent-bindings/..%2Fetc%2Fpasswd",
         json={"model": None, "provider": None},
     )
     # Either FastAPI normalises and the dot-dot makes _validate fail,
@@ -335,7 +335,7 @@ def test_patch_atomic_write_does_not_leave_tmp_file(
 ) -> None:
     """Successful PATCH must clean up the .new staging file."""
     resp = client.patch(
-        "/admin/agents/editor/binding",
+        "/admin/agent-bindings/editor",
         json={"model": "mock", "provider": "mock"},
     )
     assert resp.status_code == 200
@@ -348,10 +348,10 @@ def test_patch_then_get_round_trip_matches(
 ) -> None:
     """After a PATCH the binding shows up on the next GET."""
     client.patch(
-        "/admin/agents/researcher/binding",
+        "/admin/agent-bindings/researcher",
         json={"model": "deepseek-chat", "provider": "deepseek"},
     )
-    payload = client.get("/admin/agents/bindings").json()
+    payload = client.get("/admin/agent-bindings").json()
     researcher = next(a for a in payload["agents"] if a["name"] == "researcher")
     assert researcher["model"] == "deepseek-chat"
     assert researcher["provider"] == "deepseek"

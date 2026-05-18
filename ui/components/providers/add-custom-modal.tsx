@@ -326,8 +326,8 @@ export function AddCustomProviderModal({
               </Button>
             </div>
             <p className="text-[11px] text-tp-ink-3">
-              Leave blank if the provider needs no auth or you'll supply it
-              via env later.
+              Leave blank if the provider needs no auth or you&apos;ll supply
+              it via env later.
             </p>
           </div>
 

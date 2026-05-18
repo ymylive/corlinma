@@ -411,32 +411,32 @@ def _mount_routes(
                                 display_name="Default",
                                 description="Bootstrap profile",
                             )
-                            # Seed the curated starter SKILL.md bundle
-                            # into the default profile's skills/ dir so
-                            # a fresh install has working procedural
-                            # knowledge (plan / TDD / debugging / etc.)
-                            # without the operator having to copy files
-                            # by hand. Idempotent and best-effort — any
-                            # failure logs a warning but does not block
-                            # the boot path.
-                            try:
-                                from corlinman_server.gateway.lifecycle.starter_skills import (  # noqa: PLC0415
-                                    seed_starter_skills,
-                                )
-                                from corlinman_server.profiles import (  # noqa: PLC0415
-                                    profile_skills_dir,
-                                )
+                        # Seed the curated starter SKILL.md bundle into
+                        # the default profile's skills/ dir on every
+                        # boot. The copy is idempotent (existing files
+                        # win, never overwritten) so operator edits
+                        # stick and pre-existing installs pick up new
+                        # bundled skills as the bundle grows over time.
+                        # Best-effort — any failure logs a warning but
+                        # does not block boot.
+                        try:
+                            from corlinman_server.gateway.lifecycle.starter_skills import (  # noqa: PLC0415
+                                seed_starter_skills,
+                            )
+                            from corlinman_server.profiles import (  # noqa: PLC0415
+                                profile_skills_dir,
+                            )
 
-                                seed_starter_skills(
-                                    profile_skills_dir(
-                                        Path(data_dir), "default"
-                                    )
+                            seed_starter_skills(
+                                profile_skills_dir(
+                                    Path(data_dir), "default"
                                 )
-                            except Exception as seed_exc:  # pragma: no cover
-                                logger.warning(
-                                    "gateway.starter_skills.seed_failed",
-                                    error=str(seed_exc),
-                                )
+                            )
+                        except Exception as seed_exc:  # pragma: no cover
+                            logger.warning(
+                                "gateway.starter_skills.seed_failed",
+                                error=str(seed_exc),
+                            )
                     except Exception as exc:  # pragma: no cover
                         logger.warning(
                             "gateway.routes_admin_a.profile_store_init_failed",

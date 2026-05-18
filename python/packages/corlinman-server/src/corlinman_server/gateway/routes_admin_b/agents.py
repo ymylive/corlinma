@@ -309,7 +309,7 @@ def router() -> APIRouter:
     )
 
     @r.get(
-        "/admin/agents/bindings",
+        "/admin/agent-bindings",
         response_model=AgentBindingsResponse,
         summary="List parsed per-agent model+provider bindings",
     )
@@ -348,7 +348,7 @@ def router() -> APIRouter:
         return AgentBindingsResponse(agents=rows)
 
     @r.patch(
-        "/admin/agents/{name}/binding",
+        "/admin/agent-bindings/{name}",
         response_model=StatusOk,
         summary="Update an agent's model+provider binding",
     )
