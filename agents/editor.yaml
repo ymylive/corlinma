@@ -21,5 +21,13 @@ variables:
   edit_depth: "light"
   target_audience: "developers"
 tools_allowed:
+  # Editor only reads — it never edits files on disk; it returns
+  # revised prose for the caller (usually orchestrator) to apply.
   - file.read
-skill_refs: []
+  - memory.search
+  - memory.write
+  - kb.search
+skill_refs:
+  - memory
+  - receiving-feedback
+  - note-taking

@@ -23,6 +23,16 @@ variables:
   years: "15"
 tools_allowed:
   - web.search
+  - web.fetch
   - file.read
+  - kb.search
+  - memory.search
+  - memory.write
 skill_refs:
   - code_review
+  - memory
+  - systematic-debugging
+  - brainstorming
+  - plan
+  - receiving-feedback
+  - verification-before-completion

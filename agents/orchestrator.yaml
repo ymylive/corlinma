@@ -66,9 +66,27 @@ variables:
   decomposition_default: "researcher + editor + mentor"
   fanout_cap: "3"
 tools_allowed:
+  # Decomposition primitives — the orchestrator's main job.
   - subagent.spawn
   - subagent.spawn_many
   - blackboard.read
   - blackboard.write
+  # Shared "read + reason" baseline. The orchestrator never writes
+  # files or runs shell directly — it always delegates that to a
+  # sibling. Memory + kb + web read access is enough for the planning
+  # decisions it makes locally.
+  - memory.write
+  - memory.search
+  - kb.search
+  - web.search
+  - web.fetch
+  - file.read
 skill_refs:
   - memory
+  - note-taking
+  - plan
+  - writing-plans
+  - subagent-driven-development
+  - brainstorming
+  - deep-research
+  - verification-before-completion

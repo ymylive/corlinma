@@ -20,9 +20,24 @@ variables:
   citation_style: "inline-link"
   min_sources: "2"
 tools_allowed:
+  # Research-primary tools.
   - web.search
   - web.fetch
   - file.read
+  # Internal knowledge surfaces — check these before hitting the web.
+  - kb.search
+  - memory.search
+  - memory.write
+  # Optional fan-out when a question genuinely decomposes into
+  # parallel sub-questions (rare; usually researcher is itself the
+  # sibling, but deep-research advertises spawn_many in its body).
+  - subagent.spawn
+  - blackboard.read
+  - blackboard.write
 skill_refs:
   - web_search
   - memory
+  - deep-research
+  - note-taking
+  - verification-before-completion
+  - receiving-feedback
