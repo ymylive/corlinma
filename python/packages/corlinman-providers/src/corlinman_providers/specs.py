@@ -121,9 +121,25 @@ class EmbeddingSpec(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+def list_supported_kinds() -> list[str]:
+    """Return every :class:`ProviderKind` value in stable alphabetical order.
+
+    This is the source the admin "add custom provider" UI consumes for the
+    protocol-selector dropdown — see ``W-B1`` in
+    ``docs/PLAN_PROVIDER_AUTH.md``. Keeping it as a module-level function
+    (rather than an enum classmethod) means callers can route through a
+    cheap import without instantiating the enum, and the sorted return
+    means the UI dropdown order is deterministic across processes /
+    Python builds (enum iteration order is declaration order, which is
+    fine for code but surprising in a dropdown).
+    """
+    return sorted(k.value for k in ProviderKind)
+
+
 __all__ = [
     "AliasEntry",
     "EmbeddingSpec",
     "ProviderKind",
     "ProviderSpec",
+    "list_supported_kinds",
 ]

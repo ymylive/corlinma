@@ -43,14 +43,18 @@ import {
 } from "@/components/ui/table";
 import {
   CorlinmanApiError,
+  deleteCustomProvider,
   deleteProvider,
   fetchProviders,
+  listCustomProviders,
   upsertProvider,
+  type CustomProviderRow,
   type ProviderKind,
   type ProviderUpsert,
   type ProviderView,
 } from "@/lib/api";
 import { DynamicParamsForm } from "@/components/dynamic-params-form";
+import { AddCustomProviderModal } from "@/components/providers/add-custom-modal";
 import { cn } from "@/lib/utils";
 
 const KINDS: ProviderKind[] = [
@@ -304,6 +308,8 @@ export default function ProvidersPage() {
           </Table>
         )}
       </section>
+
+      <CustomProvidersSection />
 
       <ProviderEditorDialog
         open={editorOpen}
@@ -665,4 +671,195 @@ function parseReferences(raw: string): string[] {
     /* not JSON */
   }
   return [raw];
+}
+
+// ----------------------------- custom providers ---------------------------
+//
+// W-B2 — separate "Custom providers" section below the built-in registry.
+// Reads from `GET /admin/providers/custom`, deletes via
+// `DELETE /admin/providers/custom/{slug}`, adds via the
+// AddCustomProviderModal which posts to `POST /admin/providers/custom`.
+//
+// Backend pending (503) renders the same "feature pending" banner used
+// upstairs so a v0.1 gateway doesn't toast-spam the operator.
+
+function CustomProvidersSection() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const [addOpen, setAddOpen] = React.useState(false);
+  const [deleting, setDeleting] =
+    React.useState<CustomProviderRow | null>(null);
+
+  const customs = useQuery<CustomProviderRow[]>({
+    queryKey: ["admin", "providers", "custom"],
+    queryFn: listCustomProviders,
+    retry: false,
+  });
+
+  const backendPending =
+    customs.isError &&
+    customs.error instanceof CorlinmanApiError &&
+    customs.error.status === 503;
+
+  const deleteMutation = useMutation({
+    mutationFn: (slug: string) => deleteCustomProvider(slug),
+    onSuccess: () => {
+      toast.success(`Custom provider "${deleting?.slug ?? ""}" deleted`);
+      setDeleting(null);
+      qc.invalidateQueries({ queryKey: ["admin", "providers", "custom"] });
+      // Built-in section pulls from the same TOML — refresh both so the
+      // operator doesn't see a stale ghost row.
+      qc.invalidateQueries({ queryKey: ["admin", "providers"] });
+    },
+    onError: (err) => {
+      toast.error(
+        `Delete failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    },
+  });
+
+  return (
+    <>
+      <header className="flex items-end justify-between gap-3 pt-2">
+        <div className="space-y-1">
+          <h2 className="text-lg font-semibold tracking-tight">
+            Custom providers
+          </h2>
+          <p className="text-xs text-tp-ink-3">
+            Operator-defined providers registered via{" "}
+            <code>/admin/providers/custom</code>. The transport kind picks
+            which built-in protocol (OpenAI-compatible, Anthropic, etc.)
+            ferries the requests.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          onClick={() => setAddOpen(true)}
+          data-testid="custom-providers-add-btn"
+        >
+          <Plus className="h-3 w-3" />
+          Add custom provider
+        </Button>
+      </header>
+
+      <section className="space-y-3 rounded-lg border border-tp-glass-edge bg-tp-glass p-4">
+        {customs.isPending ? (
+          <Skeleton className="h-24 w-full" />
+        ) : backendPending ? (
+          <BackendPendingBanner label={t("providers.backendPending")} />
+        ) : customs.isError ? (
+          <p className="text-xs text-destructive">
+            Load failed: {(customs.error as Error).message}
+          </p>
+        ) : (customs.data ?? []).length === 0 ? (
+          <EmptyProviders
+            title="No custom providers yet."
+            hint='Click "Add custom provider" to register an OpenAI-compatible endpoint or any other supported transport against a slug of your choice.'
+          />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow className="border-b border-tp-glass-edge hover:bg-transparent">
+                <TableHead className="w-44 pl-3">Slug</TableHead>
+                <TableHead className="w-40">Kind</TableHead>
+                <TableHead>Base URL</TableHead>
+                <TableHead className="w-28">API key</TableHead>
+                <TableHead className="w-24" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {customs.data!.map((p) => (
+                <TableRow
+                  key={p.slug}
+                  className="border-b border-tp-glass-edge"
+                  data-testid={`custom-provider-row-${p.slug}`}
+                >
+                  <TableCell className="pl-3 font-mono text-xs">
+                    {p.slug}
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary" className="font-mono">
+                      {p.kind}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-[11px] text-tp-ink-3">
+                    {p.base_url ?? t("providers.baseUrlDefault")}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {p.has_api_key ? (
+                      <Badge className="border-transparent bg-ok/15 text-ok">
+                        set
+                      </Badge>
+                    ) : (
+                      <Badge variant="secondary">unset</Badge>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Delete ${p.slug}`}
+                        onClick={() => setDeleting(p)}
+                        data-testid={`custom-provider-delete-${p.slug}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </section>
+
+      <AddCustomProviderModal
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        onCreated={() => {
+          qc.invalidateQueries({
+            queryKey: ["admin", "providers", "custom"],
+          });
+          qc.invalidateQueries({ queryKey: ["admin", "providers"] });
+        }}
+      />
+
+      {/* Confirm-delete dialog — same shape as the built-in section's
+          delete confirm, scoped to a single custom row. */}
+      <Dialog
+        open={!!deleting}
+        onOpenChange={(o) => {
+          if (!o) setDeleting(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {deleting?.slug ?? ""}?</DialogTitle>
+            <DialogDescription>
+              This removes the <code>[providers.{deleting?.slug ?? ""}]</code>{" "}
+              block from <code>config.toml</code> and cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleting(null)}>
+              {t("providers.deleteCancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteMutation.isPending}
+              onClick={() =>
+                deleting && deleteMutation.mutate(deleting.slug)
+              }
+              data-testid="custom-providers-confirm-delete-btn"
+            >
+              {deleteMutation.isPending
+                ? t("providers.savingLabel")
+                : t("providers.deleteConfirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
 }

@@ -1416,3 +1416,397 @@ export function pinSkill(
     { method: "POST", body: { pinned } },
   );
 }
+
+// === W-A2 oauth (do not edit other blocks) ===
+// Frontend client for the W-A1 OAuth surface
+// (`gateway/routes_admin_b/oauth.py`). Anthropic PKCE today; Codex /
+// Gemini / xAI come in a later wave. Keep this block self-contained so
+// W-D2 and W-B2 can append independently. Tokens never leave the
+// gateway — these helpers only ferry the PKCE handshake state
+// (session_id, paste code, paste state) plus status/disconnect actions.
+
+/**
+ * One row in `GET /admin/oauth/status`. `source` describes where the
+ * gateway currently resolves a credential from for this provider:
+ *   - "pkce"        — interactive PKCE login token in
+ *                     `<data_dir>/.oauth/<id>.json`
+ *   - "claude-code" — imported from `~/.claude/.credentials.json`
+ *   - "env"         — env-var override
+ *   - "api-key"     — plain api_key in providers TOML / credentials store
+ *   - "none"        — nothing configured
+ */
+export type OAuthSource = "pkce" | "claude-code" | "env" | "api-key" | "none";
+
+export interface OAuthProviderStatus {
+  id: string;
+  source: OAuthSource;
+  expires_in_seconds: number | null;
+  username: string | null;
+}
+
+export interface OAuthStatusResponse {
+  providers: OAuthProviderStatus[];
+}
+
+export interface OAuthStartResponse {
+  session_id: string;
+  auth_url: string;
+  expires_at_ms: number;
+}
+
+export interface OAuthSubmitRequest {
+  session_id: string;
+  code: string;
+  state: string;
+}
+
+export interface OAuthSubmitResponse {
+  ok: true;
+  expires_at_ms: number;
+}
+
+export interface OAuthRefreshResponse {
+  expires_at_ms: number;
+}
+
+export interface ClaudeCodeImportResponse {
+  imported: true;
+  expires_at_ms: number;
+}
+
+/**
+ * GET /admin/oauth/status — every supported OAuth provider with the
+ * gateway-resolved credential source + token expiry (if any).
+ */
+export function getOAuthStatus(
+  opts: { signal?: AbortSignal } = {},
+): Promise<OAuthStatusResponse> {
+  return apiFetch<OAuthStatusResponse>("/admin/oauth/status", {
+    signal: opts.signal,
+  });
+}
+
+/**
+ * POST /admin/oauth/anthropic/start — open a PKCE session. The
+ * returned `auth_url` is what the user opens in a new tab; the
+ * `session_id` rides through to the submit call so the gateway can
+ * pair the paste-back with its stored code_verifier.
+ */
+export function startAnthropicOAuth(
+  opts: { signal?: AbortSignal } = {},
+): Promise<OAuthStartResponse> {
+  return apiFetch<OAuthStartResponse>("/admin/oauth/anthropic/start", {
+    method: "POST",
+    body: {},
+    signal: opts.signal,
+  });
+}
+
+/**
+ * POST /admin/oauth/anthropic/submit — paste-back step of PKCE. The
+ * caller must trim whitespace around `code` and `state` itself.
+ */
+export function submitAnthropicOAuthCode(
+  req: OAuthSubmitRequest,
+  opts: { signal?: AbortSignal } = {},
+): Promise<OAuthSubmitResponse> {
+  return apiFetch<OAuthSubmitResponse>("/admin/oauth/anthropic/submit", {
+    method: "POST",
+    body: req,
+    signal: opts.signal,
+  });
+}
+
+/** POST /admin/oauth/anthropic/refresh — manual refresh trigger. */
+export function refreshAnthropicOAuth(
+  opts: { signal?: AbortSignal } = {},
+): Promise<OAuthRefreshResponse> {
+  return apiFetch<OAuthRefreshResponse>("/admin/oauth/anthropic/refresh", {
+    method: "POST",
+    body: {},
+    signal: opts.signal,
+  });
+}
+
+/** DELETE /admin/oauth/anthropic — wipe the stored OAuth token file. */
+export function disconnectAnthropicOAuth(
+  opts: { signal?: AbortSignal } = {},
+): Promise<void> {
+  return apiFetch<void>("/admin/oauth/anthropic", {
+    method: "DELETE",
+    signal: opts.signal,
+  });
+}
+
+/**
+ * POST /admin/oauth/claude-code/import — one-shot import of
+ * `~/.claude/.credentials.json` from disk. 404 if the file isn't
+ * present; callers should surface that as "not detected".
+ */
+export function importClaudeCodeCredentials(
+  opts: { signal?: AbortSignal } = {},
+): Promise<ClaudeCodeImportResponse> {
+  return apiFetch<ClaudeCodeImportResponse>(
+    "/admin/oauth/claude-code/import",
+    { method: "POST", body: {}, signal: opts.signal },
+  );
+}
+// === end W-A2 ===
+
+// === W-B2 custom provider (do not edit other blocks) ===
+//
+// Mirrors `gateway/routes_admin_b/providers.py` custom-provider CRUD that
+// landed in W-B1. These wrappers drive the new "Custom providers" section
+// on /admin/providers. Slug regex (server-enforced):
+// `^[a-z0-9][a-z0-9_-]{0,31}$`. Built-in slot collisions return 409.
+
+/** GET /admin/providers/kinds → every `ProviderKind` enum value (alphabetised). */
+export interface ProviderKindsResponse {
+  kinds: string[];
+}
+
+/** One row in `GET /admin/providers/custom`. `params.custom = true` is the
+ * UI marker that distinguishes custom-registered providers from the
+ * built-in `[providers.*]` blocks. */
+export interface CustomProviderRow {
+  slug: string;
+  kind: string;
+  base_url: string | null;
+  has_api_key: boolean;
+  params: Record<string, unknown>;
+}
+
+export interface CustomProvidersResponse {
+  providers: CustomProviderRow[];
+}
+
+/** Body for POST /admin/providers/custom. `api_key` is plaintext when
+ * present (the server writes a literal into config); pass `null` (or omit
+ * via `undefined`) to leave the slot unset. */
+export interface CustomProviderCreateBody {
+  slug: string;
+  kind: string;
+  base_url?: string | null;
+  api_key?: { value: string } | null;
+  params?: Record<string, unknown>;
+}
+
+/** Body for PATCH /admin/providers/custom/{slug}. All fields optional. */
+export interface CustomProviderPatchBody {
+  kind?: string;
+  base_url?: string | null;
+  api_key?: { value: string } | null;
+  params?: Record<string, unknown>;
+}
+
+/** GET /admin/providers/kinds */
+export async function listProviderKinds(): Promise<string[]> {
+  const res = await apiFetch<ProviderKindsResponse>("/admin/providers/kinds");
+  return res.kinds ?? [];
+}
+
+/** GET /admin/providers/custom */
+export async function listCustomProviders(): Promise<CustomProviderRow[]> {
+  const res = await apiFetch<CustomProvidersResponse>(
+    "/admin/providers/custom",
+  );
+  return res.providers ?? [];
+}
+
+/** POST /admin/providers/custom → 201 */
+export function createCustomProvider(
+  body: CustomProviderCreateBody,
+): Promise<CustomProviderRow> {
+  return apiFetch<CustomProviderRow>("/admin/providers/custom", {
+    method: "POST",
+    body,
+  });
+}
+
+/** PATCH /admin/providers/custom/{slug} → 200 */
+export function patchCustomProvider(
+  slug: string,
+  body: CustomProviderPatchBody,
+): Promise<CustomProviderRow> {
+  return apiFetch<CustomProviderRow>(
+    `/admin/providers/custom/${encodeURIComponent(slug)}`,
+    { method: "PATCH", body },
+  );
+}
+
+/** DELETE /admin/providers/custom/{slug} → 204 */
+export function deleteCustomProvider(slug: string): Promise<void> {
+  return apiFetch<void>(
+    `/admin/providers/custom/${encodeURIComponent(slug)}`,
+    { method: "DELETE" },
+  );
+}
+
+/** Slug validator mirrored from the backend: `^[a-z0-9][a-z0-9_-]{0,31}$`. */
+export const CUSTOM_PROVIDER_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+// === end W-B2 ===
+
+// === W-D2 agent model binding (do not edit other blocks) ===
+//
+// Surface for the per-agent model+provider binding stored in
+// `<data_dir>/agents/<name>.yaml`. Pairs with the Python admin route
+// `routes_admin_b/agents.py` which mounts under
+// `/admin/agents/bindings*` (the bare `/admin/agents` path is owned by
+// `routes_admin_a` for the Monaco-editor file scan; we deliberately
+// pick a distinct suffix here so both surfaces stay reachable).
+
+/** One row in `GET /admin/agents/bindings`. */
+export interface AgentBinding {
+  /** Filename stem — matches the yaml's `name:` field. */
+  name: string;
+  /** Operator-facing summary; rendered as a column tooltip. */
+  description: string;
+  /** Bound upstream model id (or alias). Null = inherit global default. */
+  model: string | null;
+  /** Pinned provider slot name. Null = let the resolver pick. */
+  provider: string | null;
+}
+
+export interface AgentBindingsResponse {
+  agents: AgentBinding[];
+}
+
+/** Body for `PATCH /admin/agents/{name}/binding`. Either field nulled
+ * (or empty-string) means "clear the slot, revert to fallback chain". */
+export interface AgentBindingPatch {
+  model: string | null;
+  provider: string | null;
+}
+
+/** GET — list every agent's parsed model+provider binding. */
+export async function listAgentBindings(): Promise<AgentBindingsResponse> {
+  return apiFetch<AgentBindingsResponse>("/admin/agents/bindings");
+}
+
+/** PATCH — overwrite an agent's model+provider binding. The endpoint
+ * round-trips the yaml file, preserving unrecognised top-level keys
+ * and field order. */
+export async function setAgentModelBinding(
+  name: string,
+  patch: AgentBindingPatch,
+): Promise<{ status: string; name: string; model: string | null; provider: string | null }> {
+  return apiFetch(`/admin/agents/${encodeURIComponent(name)}/binding`, {
+    method: "PATCH",
+    body: patch,
+  });
+}
+// === end W-D2 ===
+
+// === W-A3 oauth (do not edit other blocks) ===
+//
+// W-A3 fans out the W-A1 / W-A2 OAuth surface to three more providers:
+//
+//   * Codex   — read-only; the gateway shells out to `codex login` and
+//               reads the resulting `~/.codex/auth.json`. No interactive
+//               PKCE handshake is offered; the tile is detection-only.
+//   * Gemini  — read-only; same pattern as Codex via `gemini auth`.
+//   * xAI     — full PKCE flow, same paste-back UX as Anthropic.
+//
+// The umbrella `getOAuthStatus()` lives in the W-A2 block above and is
+// reused unchanged: its response now lists rows for `anthropic`, `codex`,
+// `gemini`, and `xai`. We only expose per-provider helpers here.
+//
+// Wire shape additions (relative to W-A2's OAuthProviderStatus):
+//   - `account_id` is an optional bag carried through from the external
+//     CLI's stored credentials (Codex / Gemini may surface it; xAI may
+//     not). It's tagged `?` so the W-A2 callsite that didn't read it
+//     keeps type-checking.
+//   - The detection-only endpoints return `expires_at_ms` (epoch-ms)
+//     rather than the umbrella's `expires_in_seconds` because they read
+//     a static file on disk and we let the UI compute the delta at
+//     render time. Both shapes are kept distinct on the wire so the
+//     calling tile picks the right one.
+
+/** Source tag added by W-A3 — emitted alongside the W-A2 values. */
+export type OAuthSourceExtended = OAuthSource | "external-cli";
+
+/**
+ * Detection-only status returned by `GET /admin/oauth/codex/status` and
+ * `GET /admin/oauth/gemini/status`. `detected = false` means the CLI
+ * hasn't been logged into yet; the UI hints the operator to run the
+ * appropriate `<cli> login` command.
+ */
+export interface OAuthDetectStatus {
+  detected: boolean;
+  account_id: string | null;
+  expires_at_ms: number | null;
+}
+
+/** GET /admin/oauth/codex/status — detection-only, no login flow. */
+export function getCodexStatus(
+  opts: { signal?: AbortSignal } = {},
+): Promise<OAuthDetectStatus> {
+  return apiFetch<OAuthDetectStatus>("/admin/oauth/codex/status", {
+    signal: opts.signal,
+  });
+}
+
+/** GET /admin/oauth/gemini/status — detection-only, no login flow. */
+export function getGeminiStatus(
+  opts: { signal?: AbortSignal } = {},
+): Promise<OAuthDetectStatus> {
+  return apiFetch<OAuthDetectStatus>("/admin/oauth/gemini/status", {
+    signal: opts.signal,
+  });
+}
+
+/**
+ * POST /admin/oauth/xai/start — open a PKCE session for xAI. The
+ * returned `auth_url` is what the user opens in a new tab; the
+ * `session_id` is paired with the paste-back submit call so the
+ * gateway can match its stored code_verifier.
+ *
+ * Wire shape mirrors `OAuthStartResponse` exactly so the modal can
+ * stay provider-agnostic.
+ */
+export function startXaiOAuth(
+  opts: { signal?: AbortSignal } = {},
+): Promise<OAuthStartResponse> {
+  return apiFetch<OAuthStartResponse>("/admin/oauth/xai/start", {
+    method: "POST",
+    body: {},
+    signal: opts.signal,
+  });
+}
+
+/**
+ * POST /admin/oauth/xai/submit — paste-back step of PKCE. Same shape
+ * as the Anthropic submit; caller trims whitespace itself.
+ */
+export function submitXaiOAuthCode(
+  req: OAuthSubmitRequest,
+  opts: { signal?: AbortSignal } = {},
+): Promise<OAuthSubmitResponse> {
+  return apiFetch<OAuthSubmitResponse>("/admin/oauth/xai/submit", {
+    method: "POST",
+    body: req,
+    signal: opts.signal,
+  });
+}
+
+/** POST /admin/oauth/xai/refresh — manual refresh trigger. */
+export function refreshXaiOAuth(
+  opts: { signal?: AbortSignal } = {},
+): Promise<OAuthRefreshResponse> {
+  return apiFetch<OAuthRefreshResponse>("/admin/oauth/xai/refresh", {
+    method: "POST",
+    body: {},
+    signal: opts.signal,
+  });
+}
+
+/** DELETE /admin/oauth/xai — wipe the stored xAI OAuth token file. */
+export function disconnectXaiOAuth(
+  opts: { signal?: AbortSignal } = {},
+): Promise<void> {
+  return apiFetch<void>("/admin/oauth/xai", {
+    method: "DELETE",
+    signal: opts.signal,
+  });
+}
+// === end W-A3 ===

@@ -19,12 +19,14 @@ schema drift.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Path as FPath
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+from corlinman_server.gateway.routes_admin_b.onboard import _write_config_atomic
 from corlinman_server.gateway.routes_admin_b.state import (
     AdminState,
     config_snapshot,
@@ -210,6 +212,109 @@ async def _persist(state: AdminState, cfg: dict[str, Any]) -> JSONResponse | Non
 
 
 # ---------------------------------------------------------------------------
+# W-B1 — custom-provider wire models + helpers
+#
+# These live alongside the legacy provider-slot CRUD above but address a
+# different operator story: the "Add custom provider" form in
+# ``ui/(admin)/providers``. The marker ``params.custom = true`` is what
+# separates user-added blocks from built-in slots so the credentials UI
+# can show them under their own group. See ``docs/PLAN_PROVIDER_AUTH.md``
+# §1.2 for the on-disk shape.
+# ---------------------------------------------------------------------------
+
+
+# Lazy import to avoid a hard dependency cycle at module load — the
+# providers package is a sibling and may be reshuffled. ImportError
+# bubbles up as a 500 the first time a caller hits the kinds endpoint,
+# which is the desired loud failure for a missing wire-up.
+from corlinman_providers.specs import list_supported_kinds  # noqa: E402
+
+
+# Slug regex pinned by the plan — lowercase ascii + digits, optionally
+# separated by ``-`` or ``_``; 1–32 chars; first char alphanumeric.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+# Built-in slots managed by the credentials surface (or hardwired
+# elsewhere). Operators cannot squat on these via the custom-provider
+# endpoint — they must use ``/admin/credentials`` to configure them so
+# the well-known UX (env-ref hints, masked previews) keeps working.
+_BUILTIN_SLOTS: frozenset[str] = frozenset(
+    {"anthropic", "openai", "google", "mock", "newapi"}
+)
+
+
+class _ApiKeyEnvRef(BaseModel):
+    env: str
+
+
+class _ApiKeyValueRef(BaseModel):
+    value: str
+
+
+class CustomProviderView(BaseModel):
+    """Read-side projection of one ``params.custom = true`` block."""
+
+    slug: str
+    kind: str
+    base_url: str | None = None
+    has_api_key: bool = False
+    params: dict[str, Any] = {}
+
+
+class CustomListOut(BaseModel):
+    providers: list[CustomProviderView]
+
+
+class CustomKindsOut(BaseModel):
+    kinds: list[str]
+
+
+class CustomProviderCreate(BaseModel):
+    slug: str
+    kind: str
+    base_url: str | None = None
+    api_key: dict[str, Any] | None = None
+    params: dict[str, Any] | None = None
+
+
+class CustomProviderPatch(BaseModel):
+    kind: str | None = None
+    base_url: str | None = None
+    api_key: dict[str, Any] | None = None
+    params: dict[str, Any] | None = None
+
+
+def _custom_view_from_entry(slug: str, entry: dict[str, Any]) -> CustomProviderView:
+    """Project a stored ``[providers.<slug>]`` block to the wire view.
+
+    ``has_api_key`` follows the same masking convention as
+    ``credentials._resolve_field_view``: any of literal string / ``{value=…}``
+    / ``{env=…}`` shapes count as "set". We deliberately do NOT echo the
+    literal back — the operator must re-paste to rotate (matches the
+    paste-only edit story of the credentials UI).
+    """
+    api_key = entry.get("api_key")
+    has_api_key = False
+    if isinstance(api_key, str):
+        has_api_key = bool(api_key)
+    elif isinstance(api_key, dict):
+        if "env" in api_key:
+            has_api_key = bool(api_key.get("env"))
+        elif "value" in api_key:
+            has_api_key = bool(api_key.get("value"))
+        else:
+            has_api_key = bool(api_key)
+    return CustomProviderView(
+        slug=slug,
+        kind=str(entry.get("kind") or "openai_compatible"),
+        base_url=entry.get("base_url"),
+        has_api_key=has_api_key,
+        params=dict(entry.get("params") or {}),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
@@ -327,5 +432,181 @@ def router() -> APIRouter:
             if err is not None:
                 return err
         return {"status": "ok", "removed": name}
+
+    # -----------------------------------------------------------------
+    # W-B1 — custom-provider CRUD
+    #
+    # Operators add ad-hoc providers via the admin UI by submitting
+    # ``{slug, kind, base_url, api_key, params}``. The endpoint writes a
+    # ``[providers.<slug>]`` block tagged ``params.custom = true`` — that
+    # marker is the load-bearing distinction between user-added entries
+    # (manageable through this surface) and built-in slots
+    # (anthropic / openai / google / mock / newapi — owned by the
+    # credentials surface). See ``docs/PLAN_PROVIDER_AUTH.md`` §1.2.
+    # -----------------------------------------------------------------
+
+    @r.get("/admin/providers/kinds", response_model=CustomKindsOut)
+    async def list_provider_kinds() -> CustomKindsOut:
+        return CustomKindsOut(kinds=list_supported_kinds())
+
+    @r.get("/admin/providers/custom", response_model=CustomListOut)
+    async def list_custom_providers() -> CustomListOut:
+        cfg = dict(config_snapshot())
+        providers_cfg = cfg.get("providers") or {}
+        items: list[CustomProviderView] = []
+        if isinstance(providers_cfg, dict):
+            for slug, entry in providers_cfg.items():
+                if not isinstance(entry, dict):
+                    continue
+                params = entry.get("params") or {}
+                if not (isinstance(params, dict) and params.get("custom") is True):
+                    continue
+                items.append(_custom_view_from_entry(str(slug), entry))
+        items.sort(key=lambda v: v.slug)
+        return CustomListOut(providers=items)
+
+    @r.post("/admin/providers/custom")
+    async def create_custom_provider(body: CustomProviderCreate):
+        if not _SLUG_RE.match(body.slug):
+            return _bad("invalid_slug", "slug must match ^[a-z0-9][a-z0-9_-]{0,31}$")
+        if body.slug in _BUILTIN_SLOTS:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "builtin_slot",
+                    "message": f"slug {body.slug!r} is reserved for a built-in provider",
+                    "slug": body.slug,
+                },
+            )
+        if body.kind not in list_supported_kinds():
+            return _bad("invalid_kind", f"unknown provider kind: {body.kind}")
+
+        state = get_admin_state()
+        if state.config_path is None:
+            return JSONResponse(status_code=503, content={"error": "config_path_unset"})
+
+        async with state.admin_write_lock:
+            cfg = dict(config_snapshot())
+            providers = dict(cfg.get("providers") or {})
+            if body.slug in providers:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "slug_exists",
+                        "message": f"provider {body.slug!r} already exists",
+                        "slug": body.slug,
+                    },
+                )
+            entry: dict[str, Any] = {
+                "kind": body.kind,
+                "enabled": True,
+            }
+            if body.base_url is not None:
+                entry["base_url"] = body.base_url
+            if body.api_key is not None:
+                entry["api_key"] = dict(body.api_key)
+            params = dict(body.params or {})
+            params["custom"] = True
+            entry["params"] = params
+
+            providers[body.slug] = entry
+            cfg["providers"] = providers
+            err = _write_config_atomic(state.config_path, cfg)
+            if err is not None:
+                return err
+
+        view = _custom_view_from_entry(body.slug, entry)
+        return JSONResponse(status_code=201, content=view.model_dump())
+
+    @r.patch("/admin/providers/custom/{slug}")
+    async def patch_custom_provider(
+        body: CustomProviderPatch,
+        slug: str = FPath(..., min_length=1),
+    ):
+        state = get_admin_state()
+        if state.config_path is None:
+            return JSONResponse(status_code=503, content={"error": "config_path_unset"})
+
+        async with state.admin_write_lock:
+            cfg = dict(config_snapshot())
+            providers = dict(cfg.get("providers") or {})
+            existing = providers.get(slug)
+            if not isinstance(existing, dict):
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": "not_found", "resource": "provider", "id": slug},
+                )
+            params = existing.get("params") or {}
+            if not (isinstance(params, dict) and params.get("custom") is True):
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": "not_custom",
+                        "message": f"provider {slug!r} is not a custom slot",
+                        "id": slug,
+                    },
+                )
+
+            entry = dict(existing)
+            if body.kind is not None:
+                if body.kind not in list_supported_kinds():
+                    return _bad("invalid_kind", f"unknown provider kind: {body.kind}")
+                entry["kind"] = body.kind
+            if body.base_url is not None:
+                entry["base_url"] = body.base_url
+            if body.api_key is not None:
+                entry["api_key"] = dict(body.api_key)
+            if body.params is not None:
+                merged_params = dict(body.params)
+                merged_params["custom"] = True
+                entry["params"] = merged_params
+            else:
+                # Make sure the marker survives even if a caller dropped
+                # the params block from a prior write.
+                existing_params = dict(entry.get("params") or {})
+                existing_params["custom"] = True
+                entry["params"] = existing_params
+
+            providers[slug] = entry
+            cfg["providers"] = providers
+            err = _write_config_atomic(state.config_path, cfg)
+            if err is not None:
+                return err
+
+        view = _custom_view_from_entry(slug, entry)
+        return JSONResponse(status_code=200, content=view.model_dump())
+
+    @r.delete("/admin/providers/custom/{slug}")
+    async def delete_custom_provider(slug: str = FPath(..., min_length=1)):
+        state = get_admin_state()
+        if state.config_path is None:
+            return JSONResponse(status_code=503, content={"error": "config_path_unset"})
+
+        async with state.admin_write_lock:
+            cfg = dict(config_snapshot())
+            providers = dict(cfg.get("providers") or {})
+            existing = providers.get(slug)
+            if not isinstance(existing, dict):
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": "not_found", "resource": "provider", "id": slug},
+                )
+            params = existing.get("params") or {}
+            if not (isinstance(params, dict) and params.get("custom") is True):
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "error": "not_custom",
+                        "message": f"provider {slug!r} is not a custom slot",
+                        "id": slug,
+                    },
+                )
+            providers.pop(slug)
+            cfg["providers"] = providers
+            err = _write_config_atomic(state.config_path, cfg)
+            if err is not None:
+                return err
+
+        return Response(status_code=204)
 
     return r

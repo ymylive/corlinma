@@ -27,7 +27,7 @@ from typing import Any
 
 import grpc
 import structlog
-from corlinman_agent.agents import AgentCardRegistry
+from corlinman_agent.agents import AgentCard, AgentCardRegistry, AgentExpander
 from corlinman_agent.context_assembler import ContextAssembler, PlaceholderError
 from corlinman_agent.hooks import LoggingHookEmitter
 from corlinman_agent.placeholder_client import PlaceholderClient
@@ -179,9 +179,27 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
         start = _to_agent_start(start_frame.start)
         logger.info("agent.chat.start", model=start.model, session=start.session_key)
 
+        # W-D1: per-agent model binding. Peek the messages for an agent
+        # reference; if found, and the card declares ``model:`` while the
+        # request itself omitted a model, the card's model wins. The
+        # card's optional ``provider:`` is always passed as a resolver
+        # hint regardless of who supplied the model id.
+        bound_card = self._peek_agent_binding(start)
+        if bound_card is not None and not start.model and bound_card.model:
+            logger.info(
+                "agent.chat.model_bound_from_card",
+                agent=bound_card.name,
+                model=bound_card.model,
+            )
+            start.model = bound_card.model
+        provider_hint = bound_card.provider if bound_card is not None else None
+
         try:
             provider, upstream_model, merged_params = _call_resolver(
-                self._resolve, start.model, self._aliases
+                self._resolve,
+                start.model,
+                self._aliases,
+                provider_hint=provider_hint,
             )
         except KeyError as exc:
             yield _error_frame("model_not_found", str(exc))
@@ -409,6 +427,31 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
         self._blackboard_store = BlackboardStore(data_dir / "blackboard.sqlite")
         return self._blackboard_store
 
+    def _peek_agent_binding(self, start: AgentChatStart) -> AgentCard | None:
+        """W-D1: detect which agent the request references so we can apply
+        its model / provider binding before the resolver runs.
+
+        Returns the bound :class:`AgentCard` if the messages reference a
+        registered agent, otherwise ``None``. The full assembler will
+        re-run the same expansion later; running it twice is cheap (pure
+        in-memory string scan) and lets us keep this binding logic
+        completely separate from the placeholder / cascade pipeline.
+        """
+        registry = self._get_agent_registry()
+        if registry is None or len(registry) == 0:
+            return None
+        try:
+            expander = AgentExpander(registry, single_agent_gate=True)
+            expansion = expander.expand(list(start.messages))
+        except Exception as exc:
+            # Never fail the dispatch over a peek — fall back to
+            # request-body-driven routing exactly as pre-W-D1.
+            logger.warning("agent.chat.binding_peek_failed", error=str(exc))
+            return None
+        if expansion.expanded_agent is None:
+            return None
+        return registry.get(expansion.expanded_agent)
+
     async def _assemble_context(self, start: AgentChatStart) -> AgentChatStart:
         assembler = self._get_context_assembler()
         if assembler is None:
@@ -634,6 +677,8 @@ def _call_resolver(
     resolve: _ResolverCallable,
     alias_or_model: str,
     aliases: Mapping[str, AliasEntry],
+    *,
+    provider_hint: str | None = None,
 ) -> _ResolvedTriple:
     """Call ``resolve`` with whichever signature it exposes.
 
@@ -642,12 +687,26 @@ def _call_resolver(
     test resolvers are 1-arg ``(model) -> provider`` callables — for those
     we normalise to ``(provider, model, {})`` so the downstream code is
     signature-agnostic.
+
+    ``provider_hint`` (W-D1) is forwarded to new-style resolvers when
+    set. Legacy 1-arg resolvers ignore it; this preserves the existing
+    test-injection contract.
     """
     # Prefer the new keyword-only form; fall back to the legacy 1-arg form.
+    # Two-step degrade: try with provider_hint first; on TypeError (old
+    # resolver without the kwarg) retry without it; on a further
+    # TypeError fall back to the 1-arg legacy shape.
     try:
-        result = resolve(alias_or_model=alias_or_model, aliases=aliases)
+        result = resolve(
+            alias_or_model=alias_or_model,
+            aliases=aliases,
+            provider_hint=provider_hint,
+        )
     except TypeError:
-        result = resolve(alias_or_model)
+        try:
+            result = resolve(alias_or_model=alias_or_model, aliases=aliases)
+        except TypeError:
+            result = resolve(alias_or_model)
     if isinstance(result, tuple) and len(result) == 3:
         provider, model, params = result
         return provider, model, dict(params or {})

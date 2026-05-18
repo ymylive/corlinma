@@ -111,6 +111,7 @@ class ProviderRegistry:
         *,
         declarative_specs: list[DeclarativeProviderSpec] | None = None,
         spec_dir: Path | None = None,
+        data_dir: Path | None = None,
     ) -> None:
         """Build each enabled spec. Disabled specs are retained for listing.
 
@@ -127,8 +128,19 @@ class ProviderRegistry:
         with an already-built provider is dropped with a WARNING —
         class-based wins so operators can't accidentally shadow a
         vetted built-in adapter.
+
+        ``data_dir`` is forwarded as a kwarg to each adapter's
+        ``build()`` so OAuth-aware providers (currently
+        :class:`AnthropicProvider`) can resolve their token file at
+        ``<data_dir>/.oauth/<provider>.json``. Adapters whose
+        ``build()`` signature doesn't accept ``data_dir`` are called
+        through the legacy 1-arg path — keeps every existing provider
+        green without forcing a coordinated signature change. ``None``
+        (the default) is the test-friendly value: OAuth resolution
+        silently falls back to env / api-key.
         """
         specs = specs or []
+        self._data_dir = data_dir
         self._specs: dict[str, ProviderSpec] = {s.name: s for s in specs}
         self._providers: dict[str, CorlinmanProvider] = {}
         # Cache of legacy-fallback providers keyed by adapter class.
@@ -144,7 +156,7 @@ class ProviderRegistry:
                 logger.warning("provider.unknown_kind", name=spec.name, kind=spec.kind)
                 continue
             try:
-                self._providers[spec.name] = cls.build(spec)
+                self._providers[spec.name] = self._build_adapter(cls, spec)
             except Exception as exc:
                 logger.error(
                     "provider.build_failed",
@@ -156,6 +168,25 @@ class ProviderRegistry:
         # Declarative TOML specs — loaded *after* class-based so conflicts
         # resolve in favour of the built-in adapter.
         self._ingest_declarative(declarative_specs, spec_dir)
+
+    def _build_adapter(self, cls: type[Any], spec: ProviderSpec) -> Any:
+        """Call ``cls.build(spec, data_dir=...)`` when the adapter accepts
+        the kwarg; fall back to ``cls.build(spec)`` for legacy adapters.
+
+        Mirrors the graceful-degradation pattern used in
+        :func:`corlinman_server.agent_servicer._call_resolver` so the
+        new ``data_dir`` plumbing doesn't force every adapter to
+        update its signature simultaneously. The TypeError-only catch
+        is deliberate — real build failures inside the adapter must
+        still propagate.
+        """
+        if self._data_dir is None:
+            return cls.build(spec)
+        try:
+            return cls.build(spec, data_dir=self._data_dir)
+        except TypeError:
+            # Adapter's build() doesn't take data_dir yet; legacy path.
+            return cls.build(spec)
 
     def _ingest_declarative(
         self,
@@ -205,6 +236,7 @@ class ProviderRegistry:
         alias_or_model: str,
         *,
         aliases: Mapping[str, AliasEntry] | None = None,
+        provider_hint: str | None = None,
     ) -> tuple[CorlinmanProvider, str, dict[str, Any]]:
         """Resolve a user-supplied string to a provider + upstream model + merged params.
 
@@ -216,6 +248,13 @@ class ProviderRegistry:
              it against :data:`MODEL_PREFIX_DEFAULTS`. Returns the legacy
              adapter with an empty params map.
           3. If neither hits, raise :class:`KeyError`.
+
+        ``provider_hint`` (W-D1) is an optional preferred provider slot
+        name. When set and the named provider is built + claims support
+        for ``alias_or_model`` (or the spec is enabled and ``cls.supports``
+        accepts it), the hinted provider is returned ahead of the
+        configured-provider scan. Unknown / disabled hints fall through
+        silently — the hint never blocks resolution, it only biases it.
         """
         aliases = aliases or {}
 
@@ -231,6 +270,16 @@ class ProviderRegistry:
             provider_params: dict[str, Any] = dict(spec.params) if spec else {}
             merged = _merge_params(provider_params, alias.params)
             return provider, alias.model, merged
+
+        # W-D1: agent-card-supplied provider hint. Tried before the
+        # generic configured-provider scan so a card that pins
+        # ``provider: anthropic`` wins over an OpenAI-compatible spec
+        # that also claims to ``supports()`` the same model id.
+        if provider_hint:
+            hinted = self._providers.get(provider_hint)
+            spec = self._specs.get(provider_hint)
+            if hinted is not None and spec is not None:
+                return hinted, alias_or_model, dict(spec.params)
 
         # Configured-provider fallback — raw model id. This keeps config-driven
         # deployments on their declared base_url/api_key even when callers use

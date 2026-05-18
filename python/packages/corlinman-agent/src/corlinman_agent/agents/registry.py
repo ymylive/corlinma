@@ -42,6 +42,17 @@ def _as_str_list(value: object, field_name: str, path: Path) -> list[str]:
     return out
 
 
+def _as_optional_str(value: object, field_name: str, path: Path) -> str | None:
+    """Coerce an optional yaml scalar-string field. ``None`` / missing
+    yields ``None``; any non-string value is rejected so a stray int /
+    bool can't silently become an upstream model id."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise AgentCardLoadError(path, f"{field_name} must be a string")
+    return value
+
+
 def _as_str_dict(value: object, field_name: str, path: Path) -> dict[str, str]:
     """Coerce the ``variables:`` mapping. Values are stringified
     (yaml may parse ``"15"`` as an int) to keep the expander's
@@ -100,6 +111,12 @@ def _load_card(path: Path) -> AgentCard:
     tools_allowed = _as_str_list(raw.get("tools_allowed"), "tools_allowed", path)
     skill_refs = _as_str_list(raw.get("skill_refs"), "skill_refs", path)
 
+    # W-D1: optional per-agent model binding. Both fields are independent —
+    # an operator may set just ``model``, just ``provider``, or both. ``None``
+    # / absent keeps the pre-W-D1 dispatch path (request-body-driven routing).
+    model = _as_optional_str(raw.get("model"), "model", path)
+    provider = _as_optional_str(raw.get("provider"), "provider", path)
+
     return AgentCard(
         name=name,
         description=description,
@@ -108,6 +125,8 @@ def _load_card(path: Path) -> AgentCard:
         tools_allowed=tools_allowed,
         skill_refs=skill_refs,
         source_path=path,
+        model=model,
+        provider=provider,
     )
 
 

@@ -205,3 +205,73 @@ def test_legacy_module_level_resolve_still_works() -> None:
     assert isinstance(resolve("claude-sonnet-4-5"), AnthropicProvider)
     assert isinstance(resolve("gpt-4o-mini"), OpenAIProvider)
     assert isinstance(resolve("gemini-2.0-flash"), GoogleProvider)
+
+
+# --------------------------------------------------------------------- #
+# W-D1: ``provider_hint`` kwarg                                          #
+# --------------------------------------------------------------------- #
+
+
+def test_resolve_provider_hint_prefers_named_provider() -> None:
+    """When an agent card pins ``provider:``, that provider should win
+    over the generic configured-provider scan order."""
+    # Two configured providers that could both plausibly claim a raw
+    # model id; the hint picks the explicit one.
+    openai_spec = _spec(
+        "openai-main",
+        ProviderKind.OPENAI,
+        params={"timeout_ms": 30_000},
+    )
+    compat_spec = _spec(
+        "extra-compat",
+        ProviderKind.OPENAI_COMPATIBLE,
+        base_url="https://compat.example/v1",
+        params={"timeout_ms": 60_000},
+    )
+    reg = ProviderRegistry([openai_spec, compat_spec])
+
+    # Without the hint, the scan-order winner is returned.
+    no_hint_provider, _, _ = reg.resolve(alias_or_model="gpt-4o", aliases={})
+
+    # With the hint, the hinted provider wins regardless of scan order
+    # and its own params are surfaced.
+    hinted_provider, model, merged = reg.resolve(
+        alias_or_model="gpt-4o",
+        aliases={},
+        provider_hint="extra-compat",
+    )
+    assert hinted_provider is reg.get("extra-compat")
+    assert hinted_provider is not no_hint_provider
+    assert model == "gpt-4o"
+    assert merged["timeout_ms"] == 60_000
+
+
+def test_resolve_provider_hint_unknown_falls_through() -> None:
+    """An unknown / disabled hint must NEVER block resolution — it just
+    biases ordering. The legacy prefix fallback still fires."""
+    reg = ProviderRegistry([])  # no specs at all
+    provider, model, merged = reg.resolve(
+        alias_or_model="claude-sonnet-4-5",
+        aliases={},
+        provider_hint="provider-that-does-not-exist",
+    )
+    assert isinstance(provider, AnthropicProvider)
+    assert model == "claude-sonnet-4-5"
+    assert merged == {}
+
+
+def test_resolve_provider_hint_default_is_back_compat() -> None:
+    """Callers that don't pass ``provider_hint`` keep working — it must
+    default to ``None`` so existing call sites are unchanged."""
+    spec = _spec(
+        "openai-main",
+        ProviderKind.OPENAI,
+        params={"timeout_ms": 30_000},
+    )
+    reg = ProviderRegistry([spec])
+    # Same call as ``test_resolve_raw_model_prefers_configured_provider``,
+    # asserting back-compat after the new kwarg landed.
+    provider, model, merged = reg.resolve(alias_or_model="gpt-5.5", aliases={})
+    assert provider is reg.get("openai-main")
+    assert model == "gpt-5.5"
+    assert merged["timeout_ms"] == 30_000

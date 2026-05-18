@@ -51,6 +51,17 @@ class AgentCard:
     source_path
         Path the card was loaded from; useful for error messages and
         registry hot-reload diffs.
+    model
+        Optional upstream model id (or alias) this agent binds to. When
+        set, it overrides the global default at dispatch time *only* if
+        the chat request did not specify a ``model`` of its own. Empty /
+        unset preserves pre-W-D1 behaviour (request-body-driven routing).
+    provider
+        Optional provider slot name (matches a ``[providers.<name>]``
+        entry). Threaded through to ``ProviderRegistry.resolve()`` as a
+        ``provider_hint`` so the resolver can prefer this specific
+        provider when ambiguity exists. ``None`` keeps the legacy
+        resolution chain untouched.
     """
 
     name: str
@@ -60,6 +71,8 @@ class AgentCard:
     tools_allowed: list[str] = field(default_factory=list)
     skill_refs: list[str] = field(default_factory=list)
     source_path: Path | None = None
+    model: str | None = None
+    provider: str | None = None
 
 
 __all__ = ["AgentCard"]
