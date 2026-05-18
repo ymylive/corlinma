@@ -38,7 +38,7 @@ export function BrandMark({
             corlinman
           </div>
           <div className="font-mono text-[10.5px] text-tp-ink-3">
-            v0.4.0 · Tidepool
+            v1.1.0 · Tidepool
           </div>
         </div>
       )}
