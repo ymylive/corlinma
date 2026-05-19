@@ -128,7 +128,7 @@
 
     /* Pattern image used by `.pattern-active` (sidebar active, tabs,
        chips). Light mode shows the ivory sun-moon mandala. */
-    --tp-pattern-url: url("/bg/pattern-ivory.jpg?v=1");
+    --tp-pattern-url: url("/bg/pattern-ivory.jpg?v=2");
     --tp-pattern-tint: hsl(218 78% 38% / 0.06);
   }
 
@@ -267,7 +267,7 @@
 
     /* Pattern image used by `.pattern-active` — dark mode uses the
        navy sun-moon mandala. */
-    --tp-pattern-url: url("/bg/pattern-navy.jpg?v=1");
+    --tp-pattern-url: url("/bg/pattern-navy.jpg?v=2");
     --tp-pattern-tint: hsl(218 80% 65% / 0.10);
   }
 
