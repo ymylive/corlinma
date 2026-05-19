@@ -14,7 +14,9 @@ import {
   FilterChipGroup,
   type FilterChipOption,
 } from "@/components/ui/filter-chip-group";
-import { MOCK_SKILLS, type Skill } from "@/lib/mocks/skills";
+import { type Skill } from "@/lib/mocks/skills";
+import { listProfileSkills, type SkillSummary } from "@/lib/api";
+import { useActiveProfile } from "@/lib/context/active-profile";
 import { SkillCard } from "@/components/skills/skill-card";
 import { SkillDrawer } from "@/components/skills/skill-drawer";
 import { SkillsHeader } from "@/components/skills/skills-header";
@@ -49,9 +51,29 @@ const SPARK_TOOLS =
 
 type FilterValue = "all" | "ready" | "requires" | "tagged";
 
-async function fetchSkills(): Promise<Skill[]> {
-  // TODO(B2-BE5): replace with `apiFetch<Skill[]>("/admin/skills")`.
-  return MOCK_SKILLS;
+/**
+ * Map the curator summary shape onto the richer Skill shape this page
+ * was originally built around. Fields the summary doesn't carry
+ * (`install`, `allowed_tools`, `body_markdown`, …) get safe empty
+ * defaults — they show as "ready" with no tools attached, which is
+ * truthful for skills the gateway hasn't enriched yet.
+ */
+function summaryToSkill(s: SkillSummary): Skill {
+  return {
+    name: s.name,
+    description: s.description ?? "",
+    emoji: "",
+    allowed_tools: [],
+    requires: [],
+    install: "",
+    source_path: "",
+    body_markdown: "",
+  };
+}
+
+async function fetchSkills(slug: string): Promise<Skill[]> {
+  const res = await listProfileSkills(slug);
+  return res.skills.map(summaryToSkill);
 }
 
 /**
@@ -77,15 +99,15 @@ export default function SkillsPage() {
   const [filter, setFilter] = React.useState<FilterValue>("all");
   const [drawerSkill, setDrawerSkill] = React.useState<Skill | null>(null);
 
+  const { slug } = useActiveProfile();
   const query = useQuery<Skill[]>({
-    queryKey: ["admin", "skills"],
-    queryFn: fetchSkills,
+    queryKey: ["admin", "skills", slug],
+    queryFn: () => fetchSkills(slug),
     retry: false,
   });
 
   const skills = query.data ?? [];
-  // The mock never errors. Treat the query as "offline" only once the real
-  // backend is wired and it raises an error — i.e. `isError`.
+  // Real backend now — treat the query as "offline" when it raises.
   const offline = query.isError;
 
   const counts = React.useMemo(() => {
