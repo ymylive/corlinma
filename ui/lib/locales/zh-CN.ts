@@ -305,9 +305,9 @@ export const zhCN = {
     awaitingCodeGemini: "请在 Google 登录后从 URL 栏拷回 code（state 可选）。",
     openManually: "手动打开",
     codeLabel: "Code",
-    codePlaceholder: "粘贴 provider 返回的 code",
+    codePlaceholder: "粘贴回调 URL 或 code（state 会自动识别）",
     codeSplitHint:
-      "若 provider 给出形如 {{example}} 的单字符串，请直接粘贴，我们会自动拆分。",
+      "可以粘贴完整回调 URL（如 {{example}}），自动识别 code 和 state；也支持 CODE#STATE 或裸 code。",
     stateLabel: "State",
     statePlaceholder: "State token（若粘贴 CODE#STATE 会自动填充）",
     exchanging: "正在兑换 code 为令牌…",

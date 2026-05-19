@@ -319,9 +319,9 @@ export const en = {
       "Sign in with Google, then copy the ?code= value from the address bar here.",
     openManually: "Open manually",
     codeLabel: "Code",
-    codePlaceholder: "Paste the code from the provider",
+    codePlaceholder: "Paste the full callback URL or just the code",
     codeSplitHint:
-      "If the provider gave you a single string like {{example}}, paste it here and we will split it for you.",
+      "Paste the full callback URL (e.g. {{example}}) and we'll auto-extract code + state. CODE#STATE and bare codes work too.",
     stateLabel: "State",
     statePlaceholder:
       "State token (auto-filled if you pasted CODE#STATE)",

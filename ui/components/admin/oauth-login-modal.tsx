@@ -160,14 +160,39 @@ interface Props {
 }
 
 /**
- * The reference (hermes) modal accepts both a paste-back code and a
- * state token. The provider's console returns them in the form
- * `<code>#<state>`; we accept either a single concatenated paste OR
- * two separate fields. Splitting here keeps the gateway contract
- * stable (it always receives both fields).
+ * Accept any of the three paste formats the operator might end up
+ * with after consenting in their browser:
+ *
+ *   1. **Full callback URL** — e.g. `http://localhost:1455/auth/callback?code=ac_…&state=s_…`
+ *      (codex / gemini land here because their registered redirect_uri is loopback
+ *      and the browser shows "connection refused", leaving the URL bar populated).
+ *      We parse `code` + `state` query params directly.
+ *
+ *   2. **Concatenated `<code>#<state>`** — Anthropic's old console behaviour.
+ *
+ *   3. **Bare code** — empty state token.
+ *
+ * The gateway contract is always `{ code, state }`, so this is purely UI
+ * sugar over a single text input.
  */
 function splitConcatenated(input: string): { code: string; state: string } {
   const trimmed = input.trim();
+  // (1) full URL — anything that parses as a URL with a `code` query param.
+  if (/^https?:\/\//i.test(trimmed) || /[?&]code=/.test(trimmed)) {
+    try {
+      // Accept bare query strings too (no scheme): URL constructor needs
+      // something parseable, so prefix a dummy origin when missing.
+      const url = new URL(
+        /^https?:\/\//i.test(trimmed) ? trimmed : `http://x/${trimmed}`,
+      );
+      const code = url.searchParams.get("code") ?? "";
+      const state = url.searchParams.get("state") ?? "";
+      if (code) return { code, state };
+    } catch {
+      // Fall through to the next strategy.
+    }
+  }
+  // (2) CODE#STATE — Anthropic legacy.
   const hashIdx = trimmed.indexOf("#");
   if (hashIdx > 0 && hashIdx < trimmed.length - 1) {
     return {
@@ -175,6 +200,7 @@ function splitConcatenated(input: string): { code: string; state: string } {
       state: trimmed.slice(hashIdx + 1),
     };
   }
+  // (3) bare code.
   return { code: trimmed, state: "" };
 }
 
@@ -356,14 +382,31 @@ export function OAuthLoginModal({
                 <Input
                   id="oauth-code"
                   value={code}
-                  onChange={(e) => setCode(e.target.value)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    // If the operator pasted a full callback URL (or a
+                    // CODE#STATE blob), auto-split into both fields so
+                    // they don't have to think about which token goes
+                    // where. We only overwrite state when the paste
+                    // actually carried one — otherwise their manual
+                    // state input stays intact.
+                    const split = splitConcatenated(v);
+                    if (split.code !== v.trim()) {
+                      setCode(split.code);
+                      if (split.state) setState(split.state);
+                    } else {
+                      setCode(v);
+                    }
+                  }}
                   placeholder={t("oauth.codePlaceholder")}
                   autoComplete="off"
                   spellCheck={false}
                   data-testid="oauth-login-code"
                 />
                 <p className="text-[11px] text-tp-ink-3">
-                  {t("oauth.codeSplitHint", { example: "CODE#STATE" })}
+                  {t("oauth.codeSplitHint", {
+                    example: "http://localhost:1455/auth/callback?code=...&state=...",
+                  })}
                 </p>
               </div>
               <div className="flex flex-col gap-1">
