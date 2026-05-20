@@ -130,12 +130,12 @@ const config: Config = {
       },
       // Glass surfaces stay translucent and frosted so background art reads through.
       backdropBlur: {
-        glass: "18px",
-        "glass-strong": "26px",
+        glass: "10px",
+        "glass-strong": "14px",
       },
       backdropSaturate: {
-        glass: "1.35",
-        "glass-strong": "1.5",
+        glass: "1.18",
+        "glass-strong": "1.25",
       },
       transitionTimingFunction: {
         spring: "cubic-bezier(0.34, 1.56, 0.64, 1)",

@@ -13,27 +13,27 @@
      * ────────────────────────────────────────────────────────────── */
     --background: 36 32% 92%;
     --foreground: 0 0% 0%;
-    --card: 0 0% 100% / 0.16;
+    --card: 0 0% 100% / 0.035;
     --card-foreground: 0 0% 0%;
-    --popover: 0 0% 100% / 0.18;
+    --popover: 0 0% 100% / 0.045;
     --popover-foreground: 0 0% 0%;
     --primary: 218 78% 38%;
     --primary-foreground: 36 40% 98%;
-    --secondary: 0 0% 100% / 0.16;
+    --secondary: 0 0% 100% / 0.05;
     --secondary-foreground: 0 0% 0%;
-    --muted: 0 0% 100% / 0.12;
+    --muted: 0 0% 100% / 0.035;
     --muted-foreground: 0 0% 28%;
-    --accent: 0 0% 100% / 0.18;
+    --accent: 0 0% 100% / 0.06;
     --accent-foreground: 0 0% 0%;
     --destructive: 0 72% 48%;
     --destructive-foreground: 0 0% 98%;
     --border: 32 22% 78%;
-    --input: 0 0% 100% / 0.20;
+    --input: 0 0% 100% / 0.06;
     --ring: 218 78% 50%;
     --radius: 0.5rem;
 
-    --panel: 0 0% 100% / 0.16;
-    --surface: 0 0% 100% / 0.12;
+    --panel: 0 0% 100% / 0.035;
+    --surface: 0 0% 100% / 0.03;
 
     --ok: 160 60% 35%;
     --warn: 32 88% 45%;
@@ -58,12 +58,12 @@
       0 18px 40px -14px hsl(30 30% 20% / 0.18);
     --glow-primary: 0 0 22px hsl(218 78% 60% / 0.25);
 
-    --state-hover: 0 0% 100% / 0.20;
+    --state-hover: 0 0% 100% / 0.08;
     --state-focus: 218 60% 88%;
     --state-press: 36 25% 82%;
-    --state-loading: 0 0% 100% / 0.14;
-    --state-skeleton: 0 0% 100% / 0.18;
-    --state-empty: 0 0% 100% / 0.12;
+    --state-loading: 0 0% 100% / 0.04;
+    --state-skeleton: 0 0% 100% / 0.06;
+    --state-empty: 0 0% 100% / 0.035;
     --state-error: 0 60% 92%;
 
     /* Tidepool ivory tokens. */
@@ -75,16 +75,16 @@
     --tp-aurora-3: oklch(0.88 0.04 40 / 0.12);
 
     /* Glass surfaces stay visibly translucent rather than opaque slabs. */
-    --tp-glass: oklch(1 0 0 / 0.18);
-    --tp-glass-2: oklch(1 0 0 / 0.14);
-    --tp-glass-3: oklch(1 0 0 / 0.10);
+    --tp-glass: oklch(1 0 0 / 0.035);
+    --tp-glass-2: oklch(1 0 0 / 0.05);
+    --tp-glass-3: oklch(1 0 0 / 0.025);
     --tp-glass-edge: oklch(0.40 0.04 80 / 0.18);
     --tp-glass-edge-strong: oklch(0.30 0.05 80 / 0.30);
-    --tp-glass-hl: oklch(1 0 0 / 0.46);
-    --tp-glass-inner: oklch(1 0 0 / 0.10);
-    --tp-glass-inner-hover: oklch(1 0 0 / 0.22);
-    --tp-glass-inner-strong: oklch(1 0 0 / 0.16);
-    --tp-row-alt: rgba(255, 248, 230, 0.55);
+    --tp-glass-hl: oklch(1 0 0 / 0.18);
+    --tp-glass-inner: oklch(1 0 0 / 0.035);
+    --tp-glass-inner-hover: oklch(1 0 0 / 0.09);
+    --tp-glass-inner-strong: oklch(1 0 0 / 0.055);
+    --tp-row-alt: rgba(255, 255, 255, 0.04);
 
     --tp-ink: #000000;
     --tp-ink-2: #111111;
@@ -126,10 +126,10 @@
       0 0 28px -4px var(--tp-amber-glow),
       0 10px 24px -8px hsl(30 30% 25% / 0.18);
 
-    /* Pattern image used by `.pattern-active` (sidebar active, tabs,
-       chips). Light mode shows the ivory sun-moon mandala. */
+    /* Small accent artwork token retained for patterned buttons. Active
+       navigation uses tint-only glass so it does not turn into a pale slab. */
     --tp-pattern-url: url("/bg/pattern-ivory.jpg?v=2");
-    --tp-pattern-tint: hsl(218 78% 38% / 0.06);
+    --tp-pattern-tint: hsl(218 78% 38% / 0.035);
   }
 
   .dark {
@@ -266,8 +266,8 @@
       0 0 32px -4px var(--tp-amber-glow),
       0 12px 30px -10px rgb(0 0 0 / 0.6);
 
-    /* Pattern image used by `.pattern-active` — dark mode uses the
-       navy sun-moon mandala. */
+    /* Small accent artwork token retained for patterned buttons. Active
+       navigation uses tint-only glass in dark mode too. */
     --tp-pattern-url: url("/bg/pattern-navy.jpg?v=2");
     --tp-pattern-tint: hsl(218 80% 65% / 0.10);
   }
@@ -484,21 +484,17 @@
    * for users on the warm tidepool theme.
    * ──────────────────────────────────────────────────────────────── */
 
-  /* All `.emboss` surfaces carry the sun-moon mandala as a subtle
-     pattern tile — same `--tp-pattern-url` token that drives
-     `.pattern-active`. The panel itself stays translucent glass so
-     large surfaces do not become opaque white slabs in day mode. */
+  /* `.emboss` surfaces are translucent glass over the scenic relief.
+     Pattern tiles are reserved for small intentional accents; using them
+     on cards/inputs makes light mode read like an opaque white slab. */
   .emboss {
     background-color: var(--tp-glass);
-    background-image: var(--tp-pattern-url);
-    background-size: 480px 480px;
-    background-position: center center;
-    background-blend-mode: soft-light;
+    background-image: none;
     border: 1px solid var(--tp-glass-edge);
     box-shadow:
-      inset 0 1px 0 rgb(255 255 255 / 0.28),
-      0 10px 28px -18px rgb(0 0 0 / 0.28);
-    backdrop-filter: blur(18px) saturate(1.35);
+      inset 0 1px 0 rgb(255 255 255 / 0.16),
+      0 10px 28px -18px rgb(0 0 0 / 0.22);
+    backdrop-filter: blur(10px) saturate(1.18);
   }
   .dark .emboss {
     background-color: var(--tp-glass);
@@ -512,14 +508,11 @@
 
   .emboss-inset {
     background-color: var(--tp-glass-inner);
-    background-image: var(--tp-pattern-url);
-    background-size: 360px 360px;
-    background-position: center center;
-    background-blend-mode: soft-light;
+    background-image: none;
     border: 1px solid var(--tp-glass-edge);
     box-shadow:
-      inset 0 1px 3px rgb(0 0 0 / 0.08),
-      inset 0 -1px 0 rgb(255 255 255 / 0.22);
+      inset 0 1px 3px rgb(0 0 0 / 0.05),
+      inset 0 -1px 0 rgb(255 255 255 / 0.14);
   }
   .dark .emboss-inset {
     background-color: var(--tp-glass-inner);
@@ -565,37 +558,24 @@
   }
 
   /* ────────────────────────────────────────────────────────────────
-   * .pattern-active — selection / active highlight box that carries
-   * the sun-moon mandala carving instead of a flat fill. Used on:
-   * sidebar nav item (active), tab triggers (selected state), chips/
-   * pills in "on" state, segmented controls. The pattern image is
-   * sourced from `--tp-pattern-url` (pattern-ivory.jpg in light mode,
-   * pattern-navy.jpg in dark) so it auto-retints with the theme.
-   *
-   * Composition:
-   *   - background-image is the pattern bitmap
-   *   - background-blend-mode `soft-light` lets the underlying tint
-   *     soak through, keeping the box readable
-   *   - inset shadow stack gives the carved-in box look (concave),
-   *     opposite of .emboss (convex)
-   *   - 1px outline in the primary hue brackets the box like the
-   *     blue ring in the reference screenshot
+   * .pattern-active — selection / active highlight box for sidebar nav,
+   * selected tabs, and on-state chips. It is deliberately tint-only glass:
+   * large patterned rectangles were too visually heavy in light mode and
+   * looked like opaque white slabs over the scenic background.
    * ──────────────────────────────────────────────────────────────── */
   .pattern-active {
     position: relative;
     background-color: var(--tp-pattern-tint);
-    background-image: var(--tp-pattern-url);
-    background-size: 360px 360px;
-    background-position: center center;
-    background-blend-mode: soft-light;
+    background-image: none;
+    backdrop-filter: blur(10px) saturate(1.12);
     box-shadow:
-      inset 0 1px 2px hsl(var(--background) / 0.5),
-      inset 0 -1px 0 hsl(var(--background) / 0.35),
-      0 0 0 1px hsl(var(--primary) / 0.35),
-      0 0 0 3px hsl(var(--primary) / 0.06);
+      inset 0 1px 1px hsl(var(--background) / 0.18),
+      inset 0 -1px 0 hsl(var(--background) / 0.12),
+      0 0 0 1px hsl(var(--primary) / 0.28),
+      0 0 0 3px hsl(var(--primary) / 0.035);
   }
   .dark .pattern-active {
-    background-blend-mode: overlay;
+    background-image: none;
     box-shadow:
       inset 0 1px 2px hsl(226 80% 2% / 0.65),
       inset 0 -1px 0 hsl(220 60% 25% / 0.18),
@@ -621,9 +601,9 @@
   .bg-card,
   .bg-popover,
   .bg-panel {
-    background-color: var(--tp-glass) !important;
-    background-image: none;
-    backdrop-filter: blur(18px) saturate(1.28);
+    background-color: var(--tp-glass-3) !important;
+    background-image: none !important;
+    backdrop-filter: blur(10px) saturate(1.16);
   }
 
   /* Monaco ships its own opaque `vs-light` / `vs-dark` surfaces. Keep the

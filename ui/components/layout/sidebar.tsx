@@ -375,9 +375,8 @@ function SidebarItem({
       onKeyDown={onKeyDown}
       className={cn(
         "group relative flex min-h-9 items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors",
-        // Active: carved-out highlight box with the sun-moon mandala
-        // pattern as its background (see .pattern-active in globals.css).
-        // Inactive: text lift on hover only.
+        // Active: subtle tint-only glass highlight (see .pattern-active in
+        // globals.css). Inactive: text lift on hover only.
         active
           ? "pattern-active text-tp-ink"
           : "text-tp-ink-2 hover:text-tp-ink",
