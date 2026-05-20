@@ -148,7 +148,7 @@
     --popover-foreground: 0 0% 100%;
     /* Primary = sapphire highlight — like moonlight catching stone. */
     --primary: 218 70% 70%;
-    --primary-foreground: 226 60% 8%;
+    --primary-foreground: 0 0% 100%;
     --secondary: 226 35% 14% / 0.42;
     --secondary-foreground: 0 0% 100%;
     --muted: 226 30% 11% / 0.36;
