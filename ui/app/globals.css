@@ -494,7 +494,7 @@
     box-shadow:
       inset 0 1px 0 rgb(255 255 255 / 0.16),
       0 10px 28px -18px rgb(0 0 0 / 0.22);
-    backdrop-filter: blur(10px) saturate(1.18);
+    backdrop-filter: blur(8px) saturate(1.14);
   }
   .dark .emboss {
     background-color: var(--tp-glass);
@@ -567,7 +567,7 @@
     position: relative;
     background-color: var(--tp-pattern-tint);
     background-image: none;
-    backdrop-filter: blur(10px) saturate(1.12);
+    backdrop-filter: blur(8px) saturate(1.12);
     box-shadow:
       inset 0 1px 1px hsl(var(--background) / 0.18),
       inset 0 -1px 0 hsl(var(--background) / 0.12),
@@ -603,7 +603,7 @@
   .bg-panel {
     background-color: var(--tp-glass-3) !important;
     background-image: none !important;
-    backdrop-filter: blur(10px) saturate(1.16);
+    backdrop-filter: blur(8px) saturate(1.14);
   }
 
   /* Monaco ships its own opaque `vs-light` / `vs-dark` surfaces. Keep the

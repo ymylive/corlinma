@@ -25,15 +25,16 @@ export interface PageTransitionVariants {
 }
 
 /**
- * Baseline entry/exit animation: 200ms fade + 8px y-translate. This is the
- * shared-layout-compatible baseline every Batch 2-5 page starts with; per-
- * route overrides flow in through the `variants` prop.
+ * Baseline entry/exit animation: a short 4px y-translate with opacity pinned
+ * at 1. Glass-heavy pages must not fade their wrapper through opacity 0:
+ * Chromium can show the translucent cards before their backdrop-filter has
+ * settled, which reads as "transparent first, blurred later" on route changes.
  */
 export const baselinePageVariants: PageTransitionVariants = {
-  initial: { opacity: 0, y: 8 },
+  initial: { opacity: 1, y: 4 },
   animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0, y: -8 },
-  transition: { duration: 0.2, ease: [0.22, 0.61, 0.36, 1] },
+  exit: { opacity: 1, y: -4 },
+  transition: { duration: 0.14, ease: [0.22, 0.61, 0.36, 1] },
 };
 
 /**
@@ -84,6 +85,7 @@ export function PageTransition({
           exit={active.exit}
           transition={active.transition}
           className="flex flex-1 flex-col"
+          data-testid="page-transition"
         >
           {children}
         </motion.div>

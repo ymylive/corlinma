@@ -7,10 +7,10 @@ import { cn } from "@/lib/utils";
  * Glass surface primitive — the core container of the Tidepool theme.
  *
  * Three variants trade visual weight against performance:
- *   - `soft` (default) — 24px blur + 1.5x saturation, subtle inset highlight.
+ *   - `soft` (default) — 8px blur + 1.14x saturation, subtle inset highlight.
  *     Used for lists, sidebars, plain panels.
- *   - `strong` — 28px blur + 1.7x saturation, deeper shadow. Hero-class
- *     surfaces (dashboard hero, palette modal card).
+ *   - `strong` — same blur budget, deeper shadow. Hero-class surfaces
+ *     (dashboard hero, palette modal card).
  *   - `subtle` — NO `backdrop-filter`; solid panel with --tp-glass-inner
  *     background + soft shadow. Use inside a scroll container with many
  *     stacked panels to preserve scroll perf — 9 blur layers per viewport

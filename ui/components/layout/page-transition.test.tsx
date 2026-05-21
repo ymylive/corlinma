@@ -4,7 +4,8 @@
  * The component is mostly a framer-motion wrapper, so the tests focus on the
  * contract we expose to Batches 2-5:
  *   1. Children actually mount.
- *   2. Baseline `y: 8 → 0` variant is applied when nothing is passed.
+ *   2. Baseline route animation keeps opacity pinned at 1 so glass cards do
+ *      not briefly render transparent before backdrop-filter settles.
  *   3. A custom `variants` prop overrides the baseline.
  *   4. `prefers-reduced-motion: reduce` collapses translate/duration.
  *
@@ -62,11 +63,11 @@ describe("PageTransition", () => {
     expect(screen.getByTestId("child")).toHaveTextContent("hello");
   });
 
-  it("exposes the baseline variant (y:8 → 0, opacity fade)", () => {
-    expect(baselinePageVariants.initial).toMatchObject({ opacity: 0, y: 8 });
+  it("exposes a glass-safe baseline variant without opacity fade", () => {
+    expect(baselinePageVariants.initial).toMatchObject({ opacity: 1, y: 4 });
     expect(baselinePageVariants.animate).toMatchObject({ opacity: 1, y: 0 });
-    expect(baselinePageVariants.exit).toMatchObject({ opacity: 0, y: -8 });
-    expect(baselinePageVariants.transition).toMatchObject({ duration: 0.2 });
+    expect(baselinePageVariants.exit).toMatchObject({ opacity: 1, y: -4 });
+    expect(baselinePageVariants.transition).toMatchObject({ duration: 0.14 });
   });
 
   it("applies the baseline animation to the motion wrapper", () => {
@@ -79,7 +80,7 @@ describe("PageTransition", () => {
     // AnimatePresence wrappers; framer-motion writes the `animate` target
     // into the inline style once mounted.
     const motionDiv = container.querySelector<HTMLDivElement>(
-      "div.flex.flex-1.flex-col",
+      "[data-testid='page-transition']",
     );
     expect(motionDiv).not.toBeNull();
     // opacity lands at 1 for the baseline `animate` state.
@@ -99,7 +100,7 @@ describe("PageTransition", () => {
       </PageTransition>,
     );
     const motionDiv = container.querySelector<HTMLDivElement>(
-      "div.flex.flex-1.flex-col",
+      "[data-testid='page-transition']",
     );
     expect(motionDiv).not.toBeNull();
     // The override's `animate` opacity (0.75) wins over the baseline's 1.
@@ -121,7 +122,7 @@ describe("PageTransition", () => {
       </PageTransition>,
     );
     const motionDiv = container.querySelector<HTMLDivElement>(
-      "div.flex.flex-1.flex-col",
+      "[data-testid='page-transition']",
     );
     expect(motionDiv).not.toBeNull();
     // Reduced-motion branch forces opacity=1 immediately and never writes a
