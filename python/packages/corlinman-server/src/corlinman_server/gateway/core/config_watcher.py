@@ -90,6 +90,13 @@ class ReloadReport:
 ConfigParser = Callable[[Path], dict[str, Any]]
 ConfigValidator = Callable[[dict[str, Any]], list[str]]
 HookEmitter = Callable[[str, str, Any, Any], Awaitable[None]]
+#: Post-reload callback ``(report, old_cfg, new_cfg)`` — fired exactly
+#: once per *successful* reload (after the snapshot swap, before the
+#: function returns). The gateway lifespan uses this to re-run
+#: hot-reloadable bootstraps (provider registry rebuild, …). May be a
+#: plain or async callable; exceptions are caught + logged so a buggy
+#: re-apply hook can never crash the watcher loop.
+ReloadHook = Callable[["ReloadReport", dict[str, Any], dict[str, Any]], Any]
 
 
 class _AtomicSnapshot:
@@ -132,6 +139,12 @@ class ConfigWatcher:
       ⇒ valid). Optional; defaults to "always valid".
     * ``hook_emitter`` — async callback ``(event_name, section, old, new)``
       invoked once per changed section. Optional.
+    * ``on_reload`` — callback ``(report, old_cfg, new_cfg)`` fired once
+      per *successful* reload, after the snapshot swap and the per-section
+      hook emits. The gateway lifespan wires this to re-run the
+      hot-reloadable sibling bootstraps (provider registry rebuild). May
+      be sync or async; a raised exception is caught + logged so a buggy
+      re-apply hook can never crash the watcher. Optional.
     * ``debounce`` — seconds to coalesce fs events for a single save.
     """
 
@@ -143,6 +156,7 @@ class ConfigWatcher:
         parser: ConfigParser,
         validator: ConfigValidator | None = None,
         hook_emitter: HookEmitter | None = None,
+        on_reload: ReloadHook | None = None,
         debounce: float = DEFAULT_DEBOUNCE_SECONDS,
     ) -> None:
         self.path = Path(path)
@@ -150,6 +164,7 @@ class ConfigWatcher:
         self._parser = parser
         self._validator = validator or (lambda _cfg: [])
         self._hook_emitter = hook_emitter
+        self._on_reload = on_reload
         self._debounce = debounce
 
         self._reload_lock = asyncio.Lock()
@@ -276,7 +291,34 @@ class ConfigWatcher:
 
         logger.info("config_watcher.applied", path=str(self.path), changed=changed)
         report.changed_sections = changed
+        _stamp_last_reload()
+
+        # Stage 7: re-apply hot-reloadable sections. The gateway lifespan
+        # wires ``on_reload`` to rebuild the provider registry etc. so a
+        # newly-edited section goes live without a restart. Best-effort —
+        # a raised exception is caught so the snapshot (already swapped)
+        # stays the source of truth and the watcher loop survives.
+        await self._maybe_on_reload(report, old_cfg, new_cfg)
         return report
+
+    async def _maybe_on_reload(
+        self,
+        report: ReloadReport,
+        old_cfg: dict[str, Any],
+        new_cfg: dict[str, Any],
+    ) -> None:
+        if self._on_reload is None:
+            return
+        try:
+            result = self._on_reload(report, old_cfg, new_cfg)
+            if isinstance(result, Awaitable):
+                await result
+        except Exception as err:  # pragma: no cover — hook ownership
+            logger.warning(
+                "config_watcher.on_reload_failed",
+                changed=report.changed_sections,
+                error=str(err),
+            )
 
     async def _maybe_emit(self, event: str, section: str, old: Any, new: Any) -> None:
         if self._hook_emitter is None:
@@ -508,6 +550,7 @@ __all__ = [
     "ConfigWatcher",
     "DEFAULT_DEBOUNCE_SECONDS",
     "DEFAULT_SECTIONS",
+    "ReloadHook",
     "ReloadReport",
     "RESTART_REQUIRED_SECTIONS",
     "diff_sections",

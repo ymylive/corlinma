@@ -38,13 +38,23 @@ imported, so the FastAPI app factory uses :func:`_lazy_import` to swallow
   (chat / admin / channels / canvas / …).
 * ``gateway.grpc.serve_placeholder_in_background(state, cancel)`` →
   spawns the Rust→Python placeholder UDS server (returns an awaitable).
-* ``gateway.services.bootstrap(state)`` → spins up channel adapters,
-  plugin supervisors, hot reloaders.
-* ``gateway.evolution.bootstrap(state)`` → spawns the evolution observer
-  + scheduler.
+* ``gateway.<sibling>.bootstrap(state)`` → optional startup hook every
+  runtime sibling may export. The lifespan iterates a fixed list
+  (``providers``, ``services``, ``evolution``) and calls each module's
+  ``bootstrap`` if present. A hook may return ``None``, an awaitable,
+  or a list of :class:`asyncio.Task`; returned tasks are registered
+  into the background list and cancelled + awaited at shutdown. New
+  Wave-1 runtime modules plug in by adding a ``bootstrap`` symbol — the
+  seam itself does not need re-editing. See
+  ``docs/contracts/runtime-wiring.md`` §2 for the full contract.
 
 Each hook is best-effort: a missing sibling logs ``warning`` and the
 gateway boots in degraded mode so a partial port can still serve.
+
+The config loader (``gateway.core.config.load_from_path``) is a
+sibling too — :func:`_load_config` lazy-imports it. It is no longer
+missing (Parcel P0); a TOML parse failure still falls through to
+degraded mode.
 """
 
 from __future__ import annotations
@@ -237,6 +247,169 @@ def _emit_py_config_drop(cfg: Any | None) -> None:
             path=str(target),
             error=str(exc),
         )
+
+
+# ---------------------------------------------------------------------------
+# Config hot-reload (Parcel P11)
+# ---------------------------------------------------------------------------
+
+
+#: Sibling bootstraps re-run when their owning config section changes on
+#: a hot-reload. ``providers`` rebuilds ``AppState.provider_registry``
+#: from the freshly-loaded ``[providers]`` / ``[models]`` tables. Each
+#: sibling exports the same ``bootstrap(state)`` symbol the boot-time
+#: seam calls — re-running it is idempotent (it replaces the handle).
+_HOT_RELOAD_BOOTSTRAPS: tuple[tuple[str, str], ...] = (
+    # (dotted module, section that triggers a re-run)
+    ("corlinman_server.gateway.providers", "providers"),
+    ("corlinman_server.gateway.providers", "models"),
+)
+
+
+def _reapply_hot_reloadable(state: Any, changed: list[str]) -> list[str]:
+    """Re-run the sibling bootstraps whose config section changed.
+
+    Returns the list of sibling module names that were re-applied.
+    Best-effort per sibling: a failing bootstrap logs a warning and the
+    rest still run — the gateway never crashes on a hot-reload. The
+    ``providers`` bootstrap rebuilds ``AppState.provider_registry`` so a
+    newly-added / edited provider goes live without a restart.
+    """
+    changed_set = set(changed)
+    reapplied: list[str] = []
+    seen: set[str] = set()
+    for dotted, section in _HOT_RELOAD_BOOTSTRAPS:
+        if section not in changed_set or dotted in seen:
+            continue
+        seen.add(dotted)
+        sibling = _lazy_import(dotted)
+        if sibling is None:
+            continue
+        bootstrap = getattr(sibling, "bootstrap", None)
+        if bootstrap is None:
+            continue
+        name = dotted.rsplit(".", 1)[-1]
+        try:
+            result = bootstrap(state)
+            if isinstance(result, Awaitable):
+                # Hot-reload runs on the event loop; a sync bootstrap
+                # (providers today) returns None — guard the async case
+                # so a future async bootstrap still re-applies cleanly.
+                logger.debug(
+                    "gateway.config_reload.bootstrap_returned_awaitable",
+                    sibling=name,
+                )
+            reapplied.append(name)
+        except Exception as exc:  # pragma: no cover — sibling-owned
+            logger.warning(
+                "gateway.config_reload.bootstrap_failed",
+                sibling=name,
+                error=str(exc),
+            )
+    return reapplied
+
+
+def _start_config_watcher(app: Any, state: Any, config_path: Path | None) -> Any:
+    """Build + start a :class:`ConfigWatcher` for the gateway config TOML.
+
+    Returns the watcher's debounce-loop :class:`asyncio.Task` (registered
+    into the lifespan's ``background`` list so it is cancelled + awaited
+    at shutdown), or ``None`` when no watcher could be started (no config
+    path, the file is missing, or the watcher module is absent).
+
+    On every detected change the watcher re-loads via
+    ``config.load_from_path``, swaps ``AppState.config``, diffs sections,
+    and re-runs the hot-reloadable sibling bootstraps (provider registry
+    rebuild). A malformed reload keeps the previous good snapshot.
+    """
+    if config_path is None or not config_path.exists():
+        return None
+    watcher_mod = _lazy_import("corlinman_server.gateway.core.config_watcher")
+    config_mod = _lazy_import("corlinman_server.gateway.core.config")
+    if watcher_mod is None or config_mod is None:
+        return None
+    ConfigWatcher = getattr(watcher_mod, "ConfigWatcher", None)
+    load_from_path = getattr(config_mod, "load_from_path", None)
+    if ConfigWatcher is None or load_from_path is None:
+        return None
+
+    initial = getattr(state, "config", None)
+    if not isinstance(initial, dict):
+        # Degraded boot (parse failed at build time / no loader). Seed
+        # with an empty dict so the watcher still arms — the first
+        # successful reload then publishes the real snapshot.
+        initial = {}
+
+    def _on_reload(report: Any, old_cfg: dict[str, Any], new_cfg: dict[str, Any]) -> None:
+        # Publish the new snapshot onto the live AppState first so any
+        # re-applied bootstrap reads the fresh config.
+        state.config = new_cfg
+        with suppress(AttributeError, TypeError):
+            app.state.corlinman_config = new_cfg
+        changed = list(getattr(report, "changed_sections", []))
+        restart_needed = sorted(
+            set(changed) & RESTART_REQUIRED_SECTIONS_LOCAL()
+        )
+        reapplied = _reapply_hot_reloadable(state, changed)
+        logger.info(
+            "gateway.config_reload.applied",
+            path=str(config_path),
+            changed=changed,
+            reapplied=reapplied,
+        )
+        for section in restart_needed:
+            logger.warning(
+                "gateway.config_reload.restart_required",
+                section=section,
+                detail=(
+                    "section changed but cannot hot-apply; restart the "
+                    "gateway for it to take effect"
+                ),
+            )
+
+    watcher = ConfigWatcher(
+        config_path,
+        initial,
+        parser=load_from_path,
+        on_reload=_on_reload,
+    )
+    # Expose the watcher on AppState so the admin /admin/config/reload
+    # route (routes_admin_b) can drive a manual reload via the same
+    # ConfigWatcher instance.
+    with suppress(AttributeError, TypeError):
+        state.config_watcher = watcher
+    extras = getattr(state, "extras", None)
+    if isinstance(extras, dict):
+        extras["config_watcher"] = watcher
+
+    async def _run() -> None:
+        await watcher.start()
+        try:
+            # Park until cancelled — ``ConfigWatcher`` owns its own
+            # debounce/SIGHUP tasks; this coroutine just keeps the
+            # watcher alive for the process lifetime and tears it down.
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await watcher.stop()
+
+    task = asyncio.create_task(_run(), name="gateway.config_watcher")
+    logger.info("gateway.config_reload.watcher_started", path=str(config_path))
+    return task
+
+
+def RESTART_REQUIRED_SECTIONS_LOCAL() -> frozenset[str]:
+    """Lazy accessor for the watcher's restart-required section set.
+
+    Imported via a function (not a module-level ``from``) so the
+    entrypoint stays importable when ``config_watcher`` is mid-port —
+    consistent with the rest of the lazy-import discipline in this file.
+    """
+    watcher_mod = _lazy_import("corlinman_server.gateway.core.config_watcher")
+    if watcher_mod is None:
+        return frozenset()
+    return getattr(watcher_mod, "RESTART_REQUIRED_SECTIONS", frozenset())
 
 
 # ---------------------------------------------------------------------------
@@ -732,26 +905,65 @@ def build_app(
                 error=str(exc),
             )
 
-        services = _lazy_import("corlinman_server.gateway.services")
-        evolution = _lazy_import("corlinman_server.gateway.evolution")
         grpc_mod = _lazy_import("corlinman_server.gateway.grpc")
 
         cancel = asyncio.Event()
         background: list[asyncio.Task[Any]] = []
 
-        for sibling, name in (
-            (services, "services"),
-            (evolution, "evolution"),
-        ):
+        # Parcel P14: build + connect the external MCP client manager
+        # *before* the sibling-bootstrap loop, so ``services.bootstrap``
+        # → ``build_tool_executor`` can bind ``mcp``-kind plugin dispatch
+        # to live MCP servers. Best-effort: a missing package, no
+        # ``[mcp]`` config, or an unreachable server degrades to "no MCP
+        # tools" — the gateway still boots. Closed in the lifespan-exit
+        # ``finally``.
+        try:
+            from corlinman_mcp_server import McpClientManager
+
+            mcp_manager = McpClientManager.from_config(state.config)
+            await mcp_manager.connect_all()
+            state.extras["mcp_manager"] = mcp_manager
+            logger.info("gateway.mcp.manager_connected")
+        except Exception as exc:  # noqa: BLE001 — MCP is optional
+            logger.warning("gateway.mcp.manager_failed", error=str(exc))
+
+        # Generic sibling-bootstrap seam (see docs/contracts/runtime-
+        # wiring.md §2). Each sibling module *may* export
+        # ``bootstrap(state) -> None | Awaitable | list[asyncio.Task]``.
+        # P0 made this list the single place new Wave-1 runtime modules
+        # plug in: P1 (providers), P2/P3 (services — chat + channels),
+        # and evolution all land here without editing the seam again.
+        # The order is load-bearing: ``providers`` must boot before
+        # ``services`` so the ChatService/registry attach points on
+        # ``AppState`` are populated when the chat + channel bootstraps
+        # read them.
+        sibling_names = (
+            "corlinman_server.gateway.providers",  # P1 — provider_registry
+            "corlinman_server.gateway.services",   # P2/P3 — chat + channels
+            "corlinman_server.gateway.evolution",  # evolution observer
+        )
+        for dotted in sibling_names:
+            sibling = _lazy_import(dotted)
             if sibling is None:
                 continue
+            name = dotted.rsplit(".", 1)[-1]
             bootstrap = getattr(sibling, "bootstrap", None)
             if bootstrap is None:
                 continue
             try:
                 result = bootstrap(state)
                 if isinstance(result, Awaitable):
-                    await result
+                    result = await result
+                # A bootstrap may hand back background tasks (channel
+                # adapters, hot reloaders). Register them so the
+                # lifespan-exit ``finally`` cancels + awaits them under
+                # the same ``cancel`` event.
+                if isinstance(result, asyncio.Task):
+                    background.append(result)
+                elif isinstance(result, (list, tuple)):
+                    for item in result:
+                        if isinstance(item, asyncio.Task):
+                            background.append(item)
             except Exception as exc:  # pragma: no cover — sibling-owned
                 logger.warning(
                     "gateway.sibling.bootstrap_failed",
@@ -759,13 +971,36 @@ def build_app(
                     error=str(exc),
                 )
 
+        # Parcel P11: arm config hot-reload. The ConfigWatcher must boot
+        # *after* the provider/services bootstraps so its first reload
+        # re-applies onto a fully-wired AppState. Its debounce-loop task
+        # is registered into ``background`` so the lifespan-exit
+        # ``finally`` cancels + awaits it (which stops the fs observer +
+        # SIGHUP handler) on shutdown.
+        try:
+            watcher_task = _start_config_watcher(app, state, config_path)
+            if watcher_task is not None:
+                background.append(watcher_task)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "gateway.config_reload.watcher_start_failed", error=str(exc)
+            )
+
         if grpc_mod is not None:
             serve = getattr(
                 grpc_mod, "serve_placeholder_in_background", None
             )
             if serve is not None:
                 try:
-                    task = asyncio.create_task(serve(state, cancel))
+                    result = serve(state, cancel)
+                    # ``serve_placeholder_in_background`` may hand back an
+                    # already-scheduled Task (its name implies so) or a
+                    # bare coroutine — accept either without double-wrap.
+                    task = (
+                        result
+                        if isinstance(result, asyncio.Task)
+                        else asyncio.create_task(result)
+                    )
                     background.append(task)
                 except Exception as exc:  # pragma: no cover — sibling-owned
                     logger.warning(
@@ -871,6 +1106,13 @@ def build_app(
             for task in background:
                 with suppress(asyncio.CancelledError, Exception):
                     await task
+            # P14 teardown: close the external MCP client manager so
+            # stdio child processes / ws connections are released.
+            mcp_manager = state.extras.get("mcp_manager")
+            if mcp_manager is not None:
+                with suppress(Exception):
+                    await mcp_manager.aclose()
+                state.extras.pop("mcp_manager", None)
             # W5.0 teardown: close the evolution sqlite cleanly so the
             # WAL file is checkpointed and tests don't leave stale
             # file handles open on Windows.
@@ -887,6 +1129,11 @@ def build_app(
 
     app = FastAPI(lifespan=_lifespan)
     app.state.corlinman_state = state
+    # ``get_app_state`` (gateway.core.state) + the runtime route handlers
+    # (chat / models, see docs/contracts/runtime-wiring.md) resolve the
+    # live AppState via ``app.state.corlinman``. Keep ``corlinman_state``
+    # for back-compat; ``corlinman`` is the documented contract name.
+    app.state.corlinman = state
     app.state.corlinman_config = cfg
     app.state.corlinman_data_dir = resolved_data_dir
 
@@ -943,16 +1190,28 @@ def build_app(
     app.state.corlinman_admin_b_state = admin_b_state
     app.state.corlinman_admin_config_path = admin_config_path
 
-    # Degraded-mode safety net: if no routes module mounted a ``/health``
-    # path, expose a trivial liveness endpoint so probes succeed.
+    # Liveness + readiness net: if no routes module mounted a ``/health``
+    # path, expose one here. ``mode`` is computed from the live runtime
+    # rather than hard-coded — ``ok`` once the Wave 1 attach points
+    # (provider registry + chat service) are wired, ``degraded`` while
+    # either slot is still unfilled. See docs/contracts/runtime-wiring.md.
     _have_health = any(
         getattr(r, "path", None) == "/health" for r in app.routes
     )
     if not _have_health:
 
         @app.get("/health")
-        async def _health() -> dict[str, str]:  # pragma: no cover — trivial
-            return {"status": "ok", "mode": "degraded"}
+        async def _health() -> dict[str, str]:
+            rt = getattr(app.state, "corlinman", None)
+            wired = (
+                rt is not None
+                and getattr(rt, "provider_registry", None) is not None
+                and getattr(rt, "chat", None) is not None
+            )
+            return {
+                "status": "ok",
+                "mode": "ok" if wired else "degraded",
+            }
 
     # UI static fall-through. The docker image bakes the Next.js static
     # export into ``/app/ui-static``; this mount serves it for any path

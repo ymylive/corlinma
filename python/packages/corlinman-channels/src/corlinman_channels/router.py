@@ -229,6 +229,14 @@ class ChannelRouter:
 
         Mirrors ``ChannelRouter::dispatch`` in Rust step-for-step.
         """
+        # Auto-detect the bot's own QQ id from the live event stream:
+        # every OneBot event carries ``self_id``. Learning it here keeps
+        # @mention detection correct even when the configured
+        # ``self_ids`` is stale or empty, and tracks a NapCat re-login
+        # under a different account in real time — no config edit needed.
+        if event.self_id and event.self_id not in self.self_ids:
+            self.self_ids.append(event.self_id)
+
         text = _flatten_and_trim(event.message, event.raw_message)
 
         # @mention short-circuits keyword filtering. Matches qqBot.js

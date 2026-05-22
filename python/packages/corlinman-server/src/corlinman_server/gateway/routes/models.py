@@ -28,7 +28,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
 __all__ = [
@@ -76,9 +76,25 @@ def router(source: ModelSource | None = None) -> APIRouter:
     api = APIRouter()
 
     @api.get("/v1/models")
-    async def list_models() -> JSONResponse:  # noqa: D401
+    async def list_models(request: Request) -> JSONResponse:  # noqa: D401
         """Enumerate models exposed by the wired provider registry."""
-        if source is None:
+        src = source
+        if src is None:
+            # Build-time ``source`` is unset — the router is composed
+            # before the lifespan runs. Resolve the live source the P1
+            # ``providers.bootstrap`` attached to ``AppState``
+            # (docs/contracts/runtime-wiring.md).
+            app_state = getattr(request.app.state, "corlinman", None)
+            if app_state is not None:
+                try:
+                    from corlinman_server.gateway.providers import (
+                        model_source_for,
+                    )
+
+                    src = model_source_for(app_state)
+                except Exception:  # noqa: BLE001 — degrade to the 501
+                    src = None
+        if src is None:
             return JSONResponse(
                 {
                     "error": "not_implemented",
@@ -89,7 +105,7 @@ def router(source: ModelSource | None = None) -> APIRouter:
                 },
                 status_code=status.HTTP_501_NOT_IMPLEMENTED,
             )
-        entries = [e.to_json() for e in source.list_models()]
+        entries = [e.to_json() for e in src.list_models()]
         return JSONResponse({"object": "list", "data": entries})
 
     return api

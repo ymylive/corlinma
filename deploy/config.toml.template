@@ -11,26 +11,9 @@ bind = "0.0.0.0:6005"
 data_dir = "/data"
 
 [admin]
-# meta_approver_users gates Phase 4 W2 B1 self-improvement proposals.
-# Add operator QQ ids that should be able to apply engine-prompt mutations.
-meta_approver_users = []
-# Bootstrap-token check for the very first /admin login. After that,
-# rotate via the admin UI.
-bootstrap_token = { env = "ADMIN_BOOTSTRAP_TOKEN" }
-
-# === Providers ==============================================================
-# Each `[providers.<name>]` entry has free-form name (the bit after the dot)
-# but a CLOSED `kind` value picked from this list:
-#   anthropic | openai | google | deepseek | qwen | glm |
-#   openai_compatible | mistral | cohere | together | groq |
-#   replicate | bedrock | azure
-# Unknown kinds break TOML parse → admin/scheduler/channels all fall back.
-# OpenAI-compatible 3rd-party clouds (SiliconFlow, OpenRouter, Groq-OpenAI,
-# vLLM, Ollama-OpenAI shim, etc.) all use `kind = "openai_compatible"`.
-
-# OpenAI placeholder. The api_key resolves from .env at start.sh time.
-# Empty key = provider stays disabled; gateway logs a warn instead of
-# erroring so other providers still work.
+username = "admin"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$2CjzN59FDSWZlKzi3/PJzA$lZAUfQCGsBCd8ulibr8iFWlEdtsC8l5fVKla3UabPXk"
+must_change_password = true
 [providers.openai]
 kind = "openai"
 api_key = { env = "OPENAI_API_KEY" }

@@ -43,6 +43,21 @@ from typing import Any, Protocol
 import httpx
 
 from corlinman_channels.common import InboundEvent
+from corlinman_channels.discord import (
+    DEFAULT_GATEWAY_URL,
+    DEFAULT_REST_BASE,
+    DiscordAdapter,
+    DiscordConfig,
+    DiscordSender,
+)
+from corlinman_channels.feishu import (
+    DEFAULT_API_BASE as FEISHU_API_BASE,
+)
+from corlinman_channels.feishu import (
+    FeishuAdapter,
+    FeishuConfig,
+    FeishuSender,
+)
 from corlinman_channels.onebot import (
     Action,
     MessageEvent,
@@ -55,17 +70,34 @@ from corlinman_channels.onebot import (
 )
 from corlinman_channels.rate_limit import TokenBucket
 from corlinman_channels.router import ChannelRouter, GroupKeywords, RoutedRequest
+from corlinman_channels.slack import (
+    DEFAULT_API_BASE as SLACK_API_BASE,
+)
+from corlinman_channels.slack import (
+    SlackAdapter,
+    SlackConfig,
+    SlackSender,
+)
 from corlinman_channels.telegram import TelegramAdapter, TelegramConfig
 from corlinman_channels.telegram_send import TelegramSender
 
 __all__ = [
     "ChatEventLike",
     "ChatServiceLike",
+    "DiscordChannelParams",
+    "FeishuChannelParams",
     "QqChannelParams",
+    "SlackChannelParams",
     "TelegramChannelParams",
+    "handle_one_discord",
+    "handle_one_feishu",
     "handle_one_qq",
+    "handle_one_slack",
     "handle_one_telegram",
+    "run_discord_channel",
+    "run_feishu_channel",
     "run_qq_channel",
+    "run_slack_channel",
     "run_telegram_channel",
 ]
 
@@ -147,9 +179,13 @@ async def run_qq_channel(
     ws_url = _attr(cfg, "ws_url", "")
     if not ws_url:
         raise ValueError("channels.qq.ws_url is empty")
+    # ``self_ids`` is an optional seed list. The bot's real QQ id is
+    # auto-detected from the live OneBot event stream — every event
+    # carries ``self_id``, learned in :meth:`ChannelRouter.dispatch`.
+    # A stale or empty config value no longer breaks @mention
+    # detection, and a NapCat re-login under a different account is
+    # picked up at runtime with no config edit.
     self_ids = list(_attr(cfg, "self_ids", []) or [])
-    if not self_ids:
-        raise ValueError("channels.qq.self_ids is empty")
 
     # Token buckets — None on either dimension disables it.
     rate_cfg = _attr(cfg, "rate_limit", None)
@@ -452,8 +488,343 @@ async def handle_one_telegram(
 
 
 # ---------------------------------------------------------------------------
+# Discord channel
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class DiscordChannelParams:
+    """Parameters for :func:`run_discord_channel`.
+
+    corlinman has no Rust reference for Discord; this mirrors the shape
+    of :class:`TelegramChannelParams`."""
+
+    config: Any
+    """``cfg.channels.discord`` — must expose ``bot_token``, optional
+    ``allowed_channel_ids``, optional ``keyword_filter``, optional
+    ``respond_to_all``, optional ``gateway_url`` / ``rest_base``."""
+
+    model: str = ""
+    chat_service: ChatServiceLike | None = None
+
+
+async def run_discord_channel(
+    params: DiscordChannelParams,
+    cancel: asyncio.Event,
+) -> None:
+    """Spawn the Discord channel loop and run until ``cancel`` is set.
+
+    Inbound over the Discord Gateway WebSocket, outbound replies via
+    :class:`DiscordSender`. Parallel structure to :func:`run_telegram_channel`.
+    Raises ``ValueError`` on missing required config (matches the Rust
+    ``anyhow::bail!`` shape used by the QQ / Telegram runners).
+    """
+    cfg = params.config
+    bot_token = _attr(cfg, "bot_token", "")
+    if not bot_token:
+        raise ValueError("channels.discord.bot_token is empty")
+
+    dc_cfg = DiscordConfig(
+        bot_token=str(bot_token),
+        allowed_channel_ids=[str(c) for c in (_attr(cfg, "allowed_channel_ids", []) or [])],
+        keyword_filter=list(_attr(cfg, "keyword_filter", []) or []),
+        respond_to_all=bool(_attr(cfg, "respond_to_all", False)),
+        gateway_url=str(_attr(cfg, "gateway_url", DEFAULT_GATEWAY_URL)),
+        rest_base=str(_attr(cfg, "rest_base", DEFAULT_REST_BASE)),
+    )
+    adapter = DiscordAdapter(dc_cfg)
+    send_client = httpx.AsyncClient()
+    sender = DiscordSender(send_client, dc_cfg.bot_token, base=dc_cfg.rest_base)
+    pending: set[asyncio.Task[None]] = set()
+    try:
+        async with adapter:
+            iterator = adapter.inbound()
+            while not cancel.is_set():
+                ev = await _race_iter_or_cancel(iterator, cancel)
+                if ev is None:
+                    break
+                if params.chat_service is None:
+                    continue
+                t = asyncio.create_task(
+                    handle_one_discord(
+                        params.chat_service, ev, params.model, sender, cancel
+                    )
+                )
+                pending.add(t)
+                t.add_done_callback(pending.discard)
+    finally:
+        for t in pending:
+            t.cancel()
+        await send_client.aclose()
+
+
+async def handle_one_discord(
+    chat_service: ChatServiceLike,
+    inbound: InboundEvent[Any],
+    model: str,
+    sender: DiscordSender,
+    cancel: asyncio.Event,
+) -> None:
+    """Run one Discord chat turn and post the reply via
+    :class:`DiscordSender`. Parallel structure to :func:`handle_one_telegram`.
+    """
+    body = await _collect_reply(chat_service, inbound, model, cancel)
+    if body is None:
+        return
+    # ``binding.thread`` is the Discord channel id.
+    await sender.send_message(
+        inbound.binding.thread,
+        body,
+        reply_to_message_id=inbound.message_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slack channel
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class SlackChannelParams:
+    """Parameters for :func:`run_slack_channel`.
+
+    corlinman has no Rust reference for Slack; this mirrors the shape of
+    :class:`TelegramChannelParams`."""
+
+    config: Any
+    """``cfg.channels.slack`` — must expose ``app_token`` + ``bot_token``,
+    optional ``allowed_channel_ids``, optional ``keyword_filter``,
+    optional ``respond_to_all``, optional ``api_base``."""
+
+    model: str = ""
+    chat_service: ChatServiceLike | None = None
+
+
+async def run_slack_channel(
+    params: SlackChannelParams,
+    cancel: asyncio.Event,
+) -> None:
+    """Spawn the Slack channel loop and run until ``cancel`` is set.
+
+    Inbound over Slack Socket Mode (WebSocket), outbound replies via the
+    Web API :class:`SlackSender`. Parallel structure to
+    :func:`run_telegram_channel`. Raises ``ValueError`` on missing
+    required config.
+    """
+    cfg = params.config
+    app_token = _attr(cfg, "app_token", "")
+    bot_token = _attr(cfg, "bot_token", "")
+    if not app_token:
+        raise ValueError("channels.slack.app_token is empty")
+    if not bot_token:
+        raise ValueError("channels.slack.bot_token is empty")
+
+    sl_cfg = SlackConfig(
+        app_token=str(app_token),
+        bot_token=str(bot_token),
+        allowed_channel_ids=[str(c) for c in (_attr(cfg, "allowed_channel_ids", []) or [])],
+        keyword_filter=list(_attr(cfg, "keyword_filter", []) or []),
+        respond_to_all=bool(_attr(cfg, "respond_to_all", False)),
+        api_base=str(_attr(cfg, "api_base", SLACK_API_BASE)),
+    )
+    adapter = SlackAdapter(sl_cfg)
+    send_client = httpx.AsyncClient()
+    sender = SlackSender(send_client, sl_cfg.bot_token, base=sl_cfg.api_base)
+    pending: set[asyncio.Task[None]] = set()
+    try:
+        async with adapter:
+            iterator = adapter.inbound()
+            while not cancel.is_set():
+                ev = await _race_iter_or_cancel(iterator, cancel)
+                if ev is None:
+                    break
+                if params.chat_service is None:
+                    continue
+                t = asyncio.create_task(
+                    handle_one_slack(
+                        params.chat_service, ev, params.model, sender, cancel
+                    )
+                )
+                pending.add(t)
+                t.add_done_callback(pending.discard)
+    finally:
+        for t in pending:
+            t.cancel()
+        await send_client.aclose()
+
+
+async def handle_one_slack(
+    chat_service: ChatServiceLike,
+    inbound: InboundEvent[Any],
+    model: str,
+    sender: SlackSender,
+    cancel: asyncio.Event,
+) -> None:
+    """Run one Slack chat turn and post the reply via :class:`SlackSender`.
+
+    The reply is threaded under the inbound message ``ts`` so the
+    conversation stays grouped — parallel to the Telegram ``reply_to``.
+    """
+    body = await _collect_reply(chat_service, inbound, model, cancel)
+    if body is None:
+        return
+    # ``binding.thread`` is the Slack channel id; ``message_id`` is the ts.
+    await sender.send_message(
+        inbound.binding.thread,
+        body,
+        thread_ts=inbound.message_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Feishu / Lark channel
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class FeishuChannelParams:
+    """Parameters for :func:`run_feishu_channel`.
+
+    corlinman has no Rust reference for Feishu; this mirrors the shape of
+    :class:`TelegramChannelParams`."""
+
+    config: Any
+    """``cfg.channels.feishu`` — must expose ``app_id`` + ``app_secret``,
+    optional ``allowed_chat_ids``, optional ``keyword_filter``, optional
+    ``respond_to_all``, optional ``api_base``."""
+
+    model: str = ""
+    chat_service: ChatServiceLike | None = None
+
+
+async def run_feishu_channel(
+    params: FeishuChannelParams,
+    cancel: asyncio.Event,
+) -> None:
+    """Spawn the Feishu / Lark channel loop and run until ``cancel`` is set.
+
+    Inbound over the Feishu long-connection (WebSocket), outbound replies
+    via the IM REST :class:`FeishuSender`. Parallel structure to
+    :func:`run_telegram_channel`. Raises ``ValueError`` on missing
+    required config.
+    """
+    cfg = params.config
+    app_id = _attr(cfg, "app_id", "")
+    app_secret = _attr(cfg, "app_secret", "")
+    if not app_id:
+        raise ValueError("channels.feishu.app_id is empty")
+    if not app_secret:
+        raise ValueError("channels.feishu.app_secret is empty")
+
+    fs_cfg = FeishuConfig(
+        app_id=str(app_id),
+        app_secret=str(app_secret),
+        allowed_chat_ids=[str(c) for c in (_attr(cfg, "allowed_chat_ids", []) or [])],
+        keyword_filter=list(_attr(cfg, "keyword_filter", []) or []),
+        respond_to_all=bool(_attr(cfg, "respond_to_all", False)),
+        api_base=str(_attr(cfg, "api_base", FEISHU_API_BASE)),
+    )
+    adapter = FeishuAdapter(fs_cfg)
+    send_client = httpx.AsyncClient()
+    # The sender needs a fresh tenant_access_token per call; the adapter
+    # owns the token lifecycle, so hand it the adapter's refresh hook.
+    sender = FeishuSender(send_client, adapter._refresh_token, api_base=fs_cfg.api_base)
+    pending: set[asyncio.Task[None]] = set()
+    try:
+        async with adapter:
+            iterator = adapter.inbound()
+            while not cancel.is_set():
+                ev = await _race_iter_or_cancel(iterator, cancel)
+                if ev is None:
+                    break
+                if params.chat_service is None:
+                    continue
+                t = asyncio.create_task(
+                    handle_one_feishu(
+                        params.chat_service, ev, params.model, sender, cancel
+                    )
+                )
+                pending.add(t)
+                t.add_done_callback(pending.discard)
+    finally:
+        for t in pending:
+            t.cancel()
+        await send_client.aclose()
+
+
+async def handle_one_feishu(
+    chat_service: ChatServiceLike,
+    inbound: InboundEvent[Any],
+    model: str,
+    sender: FeishuSender,
+    cancel: asyncio.Event,
+) -> None:
+    """Run one Feishu chat turn and post the reply via :class:`FeishuSender`.
+
+    The reply is posted via the ``/messages/{id}/reply`` endpoint so the
+    addressing stays clear — parallel to the Telegram ``reply_to``.
+    """
+    body = await _collect_reply(chat_service, inbound, model, cancel)
+    if body is None:
+        return
+    # ``binding.thread`` is the Feishu chat id; ``message_id`` is the
+    # original message id we reply to.
+    await sender.send_message(
+        inbound.binding.thread,
+        body,
+        reply_to_message_id=inbound.message_id,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+async def _collect_reply(
+    chat_service: ChatServiceLike,
+    inbound: InboundEvent[Any],
+    model: str,
+    cancel: asyncio.Event,
+) -> str | None:
+    """Run one chat turn for an :class:`InboundEvent` and collect the reply.
+
+    Shared by the Discord / Slack / Feishu ``handle_one_*`` helpers — the
+    inbound→chat→reply collapse is identical across these three text-only
+    channels. Returns the reply body, or ``None`` when the assistant
+    produced an empty reply (caller should send nothing). On a backend
+    error the body is a short ``[corlinman error] <msg>`` string so the
+    user knows something failed — matching :func:`handle_one_telegram`.
+    """
+    request = {
+        "model": model,
+        "messages": [{"role": "user", "content": inbound.text}],
+        "session_key": inbound.binding.session_key(),
+        "stream": True,
+        "max_tokens": None,
+        "temperature": None,
+        "attachments": list(inbound.attachments),
+        "binding": inbound.binding,
+    }
+    stream = await chat_service.run(request, cancel)
+    text_parts: list[str] = []
+    error_message: str | None = None
+    async for ev in stream:
+        kind = _event_kind(ev)
+        if kind == "token_delta":
+            text_parts.append(getattr(ev, "text", "") or "")
+        elif kind == "done":
+            break
+        elif kind == "error":
+            error_message = getattr(ev, "error", "") or getattr(ev, "message", "")
+            break
+
+    if error_message is not None:
+        return f"[corlinman error] {error_message}"
+    body = "".join(text_parts)
+    if not body.strip():
+        return None
+    return body
 
 
 async def _race_iter_or_cancel(

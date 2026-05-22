@@ -22,6 +22,7 @@ import structlog
 from corlinman_providers.anthropic_provider import AnthropicProvider
 from corlinman_providers.base import CorlinmanProvider
 from corlinman_providers.china import DeepSeekProvider, GLMProvider, QwenProvider
+from corlinman_providers.codex_provider import CodexProvider
 from corlinman_providers.declarative import (
     DeclarativeProvider,
     DeclarativeProviderSpec,
@@ -64,11 +65,15 @@ _KIND_TO_CLASS: dict[ProviderKind, type[Any]] = {
     ProviderKind.TOGETHER: TogetherProvider,
     ProviderKind.GROQ: GroqProvider,
     ProviderKind.REPLICATE: ReplicateProvider,
-    # Bedrock + Azure raise NotImplementedError at build time — config
-    # validation accepts them so operators can declare intent, but the
-    # runtime fails loudly until proper SigV4 / deployment-routing lands.
+    # Bedrock + Azure are real adapters: Bedrock signs
+    # ``InvokeModelWithResponseStream`` with hand-rolled SigV4 over httpx;
+    # Azure reuses the OpenAI wire shape with deployment-id routing and
+    # ``api-key`` auth. See bedrock_provider.py / azure_provider.py.
     ProviderKind.BEDROCK: BedrockProvider,
     ProviderKind.AZURE: AzureProvider,
+    # Codex (ChatGPT subscription) OAuth — reads ~/.codex/auth.json
+    # written by ``codex login``.  Shares the OpenAI wire format.
+    ProviderKind.CODEX: CodexProvider,
     # Built-in echo provider for the easy-setup skip path (Wave 2.2).
     # Zero-config; always builds successfully even without credentials.
     ProviderKind.MOCK: MockProvider,

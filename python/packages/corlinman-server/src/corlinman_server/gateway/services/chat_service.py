@@ -27,6 +27,8 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
+from corlinman_server import telemetry
+
 from corlinman_grpc._generated.corlinman.v1 import (
     agent_pb2,
     common_pb2,
@@ -105,8 +107,17 @@ class ChatService(ChatServiceBase):
 
     Mirrors :rust:`corlinman_gateway::services::chat_service::ChatService`:
     holds an :class:`Arc<dyn ChatBackend>` (Python: a shared backend
-    reference) plus a default :class:`ToolExecutor` that ack's tool
-    calls so the reasoning loop keeps progressing.
+    reference) plus a :class:`ToolExecutor` that runs ``tool_call``
+    frames and feeds the result back so the reasoning loop keeps
+    progressing.
+
+    Production wiring (:func:`corlinman_server.gateway.services.\
+grpc_backend.build_grpc_chat_service`) injects a
+    :class:`~corlinman_grpc.agent_client.RegistryToolExecutor` bound to
+    the gateway's plugin registry — i.e. tool calls are *really*
+    executed. The :class:`~corlinman_grpc.agent_client.PlaceholderExecutor`
+    remains the constructor default only as a degraded fallback for
+    callers (and tests) that have no executor to inject.
     """
 
     def __init__(
@@ -119,10 +130,11 @@ class ChatService(ChatServiceBase):
         self._tool_executor: ToolExecutor = tool_executor or PlaceholderExecutor()
 
     def with_tool_executor(self, executor: ToolExecutor) -> ChatService:
-        """Customise the tool executor — used by tests; production
-        bundles the placeholder exec (same as the HTTP route) so
-        ``tool_calls`` keep the Python loop progressing. Returns
-        ``self`` so callers can chain (mirrors the Rust builder shape)."""
+        """Customise the tool executor — used by tests and by the
+        gateway assembly layer to inject the real
+        :class:`~corlinman_grpc.agent_client.RegistryToolExecutor`.
+        Returns ``self`` so callers can chain (mirrors the Rust builder
+        shape)."""
         self._tool_executor = executor
         return self
 
@@ -140,7 +152,55 @@ class ChatService(ChatServiceBase):
         exactly one terminal :class:`DoneEvent` or :class:`ErrorEvent`.
         Honours ``cancel`` between every yield.
         """
-        return _run_chat(self._backend, self._tool_executor, req, cancel)
+        return _run_chat_traced(self._backend, self._tool_executor, req, cancel)
+
+
+async def _run_chat_traced(
+    backend: ChatBackend,
+    executor: ToolExecutor,
+    req: InternalChatRequest,
+    cancel: asyncio.Event,
+) -> AsyncIterator[Any]:
+    """Thin span-aware wrapper around :func:`_run_chat`.
+
+    Opens a ``chat.service`` span with backend kind and model, then drives
+    the inner generator unchanged. Token and tool-call counts are recorded on
+    the span before it closes. This is a pure passthrough when telemetry is
+    not initialised — the ``telemetry.span`` helper is a no-op in that case.
+    """
+    backend_kind = type(backend).__name__
+    with telemetry.span(
+        "chat.service",
+        attributes={
+            "chat.backend": backend_kind,
+            "chat.model": req.model,
+            "chat.stream": req.stream,
+        },
+    ) as svc_span:
+        token_count = 0
+        chunk_count = 0
+        async for event in _run_chat(backend, executor, req, cancel):
+            if isinstance(event, TokenDeltaEvent):
+                token_count += len(event.text)
+                chunk_count += 1
+            elif isinstance(event, DoneEvent):
+                svc_span.set_attribute("chat.token_chars", token_count)
+                svc_span.set_attribute("chat.chunks", chunk_count)
+                if event.usage is not None:
+                    svc_span.set_attribute(
+                        "chat.prompt_tokens", event.usage.prompt_tokens
+                    )
+                    svc_span.set_attribute(
+                        "chat.completion_tokens", event.usage.completion_tokens
+                    )
+                    svc_span.set_attribute(
+                        "chat.total_tokens", event.usage.total_tokens
+                    )
+                svc_span.set_attribute("chat.finish_reason", event.finish_reason)
+            elif isinstance(event, ErrorEvent):
+                svc_span.set_attribute("chat.error_reason", event.error.reason)
+                svc_span.set_attribute("chat.error_message", event.error.message)
+            yield event
 
 
 async def _run_chat(
@@ -209,8 +269,12 @@ async def _run_chat(
 
             if kind == "tool_call":
                 tc = frame.tool_call
-                # Echo the placeholder result so the Python reasoning
-                # loop advances — matches what the HTTP handler does.
+                # Execute the tool via the injected executor and feed the
+                # genuine result back into the reasoning loop so it makes
+                # real multi-round progress. The production executor
+                # (RegistryToolExecutor) never raises — but a custom
+                # executor might, and a failed feedback send must not
+                # tear the stream down, so this stays guarded.
                 try:
                     result = await executor.execute(tc)
                     await tx.put(agent_pb2.ClientFrame(tool_result=result))

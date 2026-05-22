@@ -1,0 +1,599 @@
+"""Feishu / Lark long-connection (WebSocket) + REST adapter.
+
+corlinman has no Rust reference for Feishu — this is a new channel,
+high-value for the project's China-region deployment. It is modelled on
+:mod:`corlinman_channels.slack` (both use an outbound long-lived
+WebSocket carrying an Events payload that must be acked), so the inbound
+shape and the outbound :class:`FeishuSender` mirror the existing pairs.
+
+## Transport — long connection
+
+Feishu's "long connection" mode (长连接) lets an app receive events over
+an outbound WebSocket instead of a public HTTP callback — the same NAT-
+friendly story as Slack Socket Mode, which matters for a China-region
+self-host. The flow:
+
+1. ``POST /open-apis/auth/v3/tenant_access_token/internal`` exchanges the
+   ``app_id`` + ``app_secret`` for a short-lived ``tenant_access_token``.
+2. ``POST /callback/ws/endpoint`` (the gateway endpoint API) returns a
+   single-use ``wss://`` URL.
+3. The adapter dials that URL. Feishu pushes event frames; each frame
+   that needs acknowledgement carries headers the adapter echoes back.
+4. ``im.message.receive_v1`` events are decoded into
+   :class:`InboundEvent` objects.
+
+Outbound replies go through ``POST /open-apis/im/v1/messages`` with the
+``tenant_access_token``.
+
+We implement against the raw protocol over ``websockets`` / ``httpx``
+(both already dependencies) rather than the ``lark-oapi`` SDK — the
+slice corlinman needs is small and the SDK is heavyweight.
+
+## Reply gating
+
+Feishu messages arrive from p2p (1:1) chats or group chats. The adapter
+mirrors the Telegram / Slack gate:
+
+* ``chat_type == "p2p"`` (1:1) always responds.
+* Group chats respond only when the bot is @-mentioned, unless
+  ``respond_to_all``. An optional ``keyword_filter`` narrows group
+  messages further (case-insensitive substring).
+* The bot never replies to its own messages.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from collections.abc import AsyncIterator
+from contextlib import suppress
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+import websockets
+from websockets.asyncio.client import ClientConnection
+
+from corlinman_channels.common import (
+    ChannelBinding,
+    ConfigError,
+    InboundEvent,
+    TransportError,
+)
+
+__all__ = [
+    "DEFAULT_API_BASE",
+    "FeishuAdapter",
+    "FeishuConfig",
+    "FeishuSender",
+    "binding_from_event",
+    "extract_text",
+    "is_mentioning_bot",
+]
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+#: Feishu (China) open-platform API base. Lark (international) callers
+#: override this with ``https://open.larksuite.com``.
+DEFAULT_API_BASE: str = "https://open.feishu.cn"
+
+#: Backoff after a long-connection failure (seconds). Mirrors the
+#: Telegram adapter's ``ERROR_BACKOFF_SECS``.
+ERROR_BACKOFF_SECS: float = 5.0
+
+
+# ===========================================================================
+# Config
+# ===========================================================================
+
+
+@dataclass(slots=True)
+class FeishuConfig:
+    """Configuration for :class:`FeishuAdapter`.
+
+    ``app_id`` + ``app_secret`` are the internal-app credentials used to
+    mint a ``tenant_access_token``. Both are required.
+    ``allowed_chat_ids`` (empty == allow all) and ``keyword_filter``
+    (case-insensitive substring; empty == allow all) mirror the Telegram
+    gates. ``respond_to_all`` disables the mention-required gate for
+    group chats. ``api_base`` switches between Feishu (China) and Lark
+    (international).
+    """
+
+    app_id: str
+    app_secret: str
+    allowed_chat_ids: list[str] = field(default_factory=list)
+    keyword_filter: list[str] = field(default_factory=list)
+    respond_to_all: bool = False
+    api_base: str = DEFAULT_API_BASE
+
+
+# ===========================================================================
+# Mention / binding / parsing helpers — pure functions, easy to unit-test.
+# ===========================================================================
+
+
+def extract_text(message: dict[str, Any]) -> str:
+    """Flatten a Feishu message payload into plain text.
+
+    Feishu wraps the message body in a JSON-encoded ``content`` string.
+    ``msg_type == "text"`` carries ``{"text": "..."}``; ``post`` (rich
+    text) carries a nested block structure we walk for ``text`` runs.
+    Anything else flattens to an empty string (image-only, sticker, ...).
+    """
+    raw = message.get("content")
+    if not raw:
+        return ""
+    try:
+        body = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    msg_type = message.get("message_type") or message.get("msg_type")
+    if msg_type == "text":
+        return str(body.get("text", "")).strip()
+    if msg_type == "post":
+        # Rich-text post: {"<lang>": {"title": ..., "content": [[run, ...]]}}.
+        parts: list[str] = []
+        for lang_block in body.values():
+            if not isinstance(lang_block, dict):
+                continue
+            for line in lang_block.get("content", []) or []:
+                for run in line or []:
+                    if isinstance(run, dict) and run.get("tag") == "text":
+                        parts.append(str(run.get("text", "")))
+        return " ".join(parts).strip()
+    return ""
+
+
+def is_mentioning_bot(message: dict[str, Any], bot_open_id: str) -> bool:
+    """True iff ``message`` @-mentions the bot.
+
+    Feishu resolves mentions into a ``mentions`` array; each entry has an
+    ``id`` object whose ``open_id`` identifies the mentioned user/bot.
+    """
+    if not bot_open_id:
+        return False
+    for mention in message.get("mentions") or []:
+        if not isinstance(mention, dict):
+            continue
+        ident = mention.get("id")
+        if isinstance(ident, dict) and ident.get("open_id") == bot_open_id:
+            return True
+        # Some payloads inline the id directly on the mention.
+        if mention.get("open_id") == bot_open_id:
+            return True
+    return False
+
+
+def binding_from_event(event_message: dict[str, Any], bot_open_id: str) -> ChannelBinding:
+    """Build a :class:`ChannelBinding` from a Feishu message event.
+
+    ``account`` is the bot's open id, ``thread`` the ``chat_id``,
+    ``sender`` the sender's open id. p2p chats keep the chat id as
+    ``thread`` so the session key stays stable per-peer.
+    """
+    chat_id = str(event_message.get("chat_id", ""))
+    sender = event_message.get("_sender_open_id", "") or chat_id
+    return ChannelBinding(
+        channel="feishu",
+        account=bot_open_id,
+        thread=chat_id,
+        sender=str(sender),
+    )
+
+
+def _strip_mention_keys(text: str) -> str:
+    """Strip Feishu ``@_user_N`` mention placeholders from flattened text.
+
+    Feishu substitutes mentions in the text body with ``@_user_1`` style
+    keys (the real names live in the ``mentions`` array). Removing them
+    keeps the text the chat backend sees clean.
+    """
+    import re
+
+    return re.sub(r"@_user_\d+", " ", text).strip()
+
+
+# ===========================================================================
+# Adapter
+# ===========================================================================
+
+
+class FeishuAdapter:
+    """Feishu / Lark long-connection adapter.
+
+    Same surface as the other adapters: ``async with`` for lifecycle,
+    ``inbound()`` for the normalized event stream. The long connection
+    (token → endpoint → events) runs in a background task; decoded
+    ``im.message.receive_v1`` events land on an internal queue the
+    ``inbound`` iterator drains.
+
+    Outbound replies are a separate concern — see :class:`FeishuSender`.
+    """
+
+    def __init__(
+        self,
+        config: FeishuConfig,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        if not config.app_id:
+            raise ConfigError("FeishuConfig.app_id is empty")
+        if not config.app_secret:
+            raise ConfigError("FeishuConfig.app_secret is empty")
+        self._cfg = config
+        self._owns_client = http_client is None
+        self._client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+        self._closed = False
+        self._bot_open_id: str = ""
+        self._inbound_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
+        self._reader_task: asyncio.Task[None] | None = None
+        # tenant_access_token cache — (token, expiry_unix).
+        self._token: str = ""
+        self._token_expiry: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> FeishuAdapter:
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        await self.close()
+
+    async def connect(self) -> None:
+        """Mint the first access token and spawn the long-connection loop.
+
+        The initial token exchange must succeed so we fail fast on bad
+        credentials — the Telegram adapter does the same with ``getMe``.
+        """
+        if self._reader_task is not None:
+            return
+        await self._refresh_token()
+        self._closed = False
+        self._reader_task = asyncio.create_task(
+            self._connection_loop(), name="feishu-longconn"
+        )
+
+    async def close(self) -> None:
+        """Stop the long-connection loop and (if we own it) the client."""
+        self._closed = True
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._reader_task
+            self._reader_task = None
+        if self._owns_client:
+            await self._client.aclose()
+
+    @property
+    def tenant_access_token(self) -> str:
+        """The current ``tenant_access_token`` (refreshed on demand)."""
+        return self._token
+
+    # ------------------------------------------------------------------
+    # Inbound iterator
+    # ------------------------------------------------------------------
+
+    async def inbound(self) -> AsyncIterator[InboundEvent[dict[str, Any]]]:
+        """Yield one :class:`InboundEvent` per accepted inbound message.
+
+        Filtering rules (parallel to the Telegram / Slack adapters):
+
+        * ``allowed_chat_ids`` whitelist (empty = allow all);
+        * group chats: require an @-mention unless ``respond_to_all``,
+          then apply the optional keyword filter;
+        * empty / whitespace-only text is silently skipped.
+        """
+        if self._reader_task is None:
+            await self.connect()
+        while not self._closed:
+            try:
+                event = await self._inbound_q.get()
+            except asyncio.CancelledError:
+                return
+
+            # ``event`` is the inner Feishu event object: it carries
+            # ``sender`` + ``message`` sub-objects.
+            sender = event.get("sender") or {}
+            message = event.get("message") or {}
+            if not isinstance(sender, dict) or not isinstance(message, dict):
+                continue
+
+            sender_id = sender.get("sender_id") or {}
+            sender_open_id = (
+                str(sender_id.get("open_id", ""))
+                if isinstance(sender_id, dict)
+                else ""
+            )
+            # The bot's own open id sits on the mentioned-bot side; we
+            # detect self-messages by sender_type == "app" / "bot".
+            if sender.get("sender_type") in ("app", "bot"):
+                continue
+
+            chat_id = str(message.get("chat_id", ""))
+            if not self._chat_allowed(chat_id):
+                continue
+
+            chat_type = message.get("chat_type")
+            is_p2p = chat_type == "p2p"
+            mentioned = is_mentioning_bot(message, self._bot_open_id)
+            if not is_p2p:
+                if not self._cfg.respond_to_all and not mentioned:
+                    continue
+                if not mentioned and not self._keyword_match(message):
+                    continue
+
+            text = _strip_mention_keys(extract_text(message))
+            if not text.strip():
+                continue
+
+            # Stash the sender open id so ``binding_from_event`` can read it.
+            message["_sender_open_id"] = sender_open_id
+            binding = binding_from_event(message, self._bot_open_id)
+            yield InboundEvent(
+                channel="feishu",
+                binding=binding,
+                text=text,
+                message_id=str(message.get("message_id", "")) or None,
+                timestamp=_parse_create_time(message.get("create_time")),
+                mentioned=mentioned or is_p2p,
+                attachments=[],  # multimodal download is out of scope here
+                payload=event,
+            )
+
+    # ------------------------------------------------------------------
+    # Long-connection loop
+    # ------------------------------------------------------------------
+
+    async def _connection_loop(self) -> None:
+        """Open a long connection and pump event frames forever.
+
+        Reconnects on any transport failure with a fixed backoff —
+        matching the Telegram poll loop's resilience contract. Exits
+        promptly once :meth:`close` flips ``self._closed``.
+        """
+        while not self._closed:
+            try:
+                ws_url = await self._open_endpoint()
+                await self._run_one_connection(ws_url)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                # Transient — back off and retry, same as the TG adapter.
+                try:
+                    await asyncio.sleep(ERROR_BACKOFF_SECS)
+                except asyncio.CancelledError:
+                    return
+
+    async def _run_one_connection(self, ws_url: str) -> None:
+        """Drive a single long-connection WebSocket until it closes."""
+        async with websockets.connect(ws_url, max_size=2 ** 23) as ws:
+            while not self._closed:
+                try:
+                    frame = await self._recv_json(ws)
+                except websockets.ConnectionClosed:
+                    return
+                self._handle_frame(frame)
+
+    def _handle_frame(self, frame: dict[str, Any]) -> None:
+        """Decode one long-connection frame and enqueue message events.
+
+        Feishu wraps the Events payload in an envelope; ``ping`` control
+        frames are skipped. The inner ``event`` for an
+        ``im.message.receive_v1`` is what the inbound iterator consumes.
+        """
+        # Control frames (ping / pong) carry no event.
+        header = frame.get("header") or {}
+        event_type = header.get("event_type") if isinstance(header, dict) else None
+        if event_type != "im.message.receive_v1":
+            return
+        event = frame.get("event")
+        if not isinstance(event, dict):
+            return
+        if self._closed:
+            return
+        with suppress(asyncio.QueueFull):
+            self._inbound_q.put_nowait(event)
+
+    # ------------------------------------------------------------------
+    # REST primitives
+    # ------------------------------------------------------------------
+
+    async def _refresh_token(self) -> str:
+        """Mint / refresh the ``tenant_access_token``.
+
+        Cached until ~5 minutes before expiry so most calls are free.
+        Raises :class:`TransportError` on bad credentials or transport
+        failure.
+        """
+        now = time.time()
+        if self._token and now < self._token_expiry:
+            return self._token
+        try:
+            resp = await self._client.post(
+                f"{self._cfg.api_base}/open-apis/auth/v3/"
+                "tenant_access_token/internal",
+                json={
+                    "app_id": self._cfg.app_id,
+                    "app_secret": self._cfg.app_secret,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise TransportError(f"feishu token exchange failed: {exc}") from exc
+        if resp.status_code >= 400:
+            raise TransportError(
+                f"feishu token exchange HTTP {resp.status_code}"
+            )
+        try:
+            env = resp.json()
+        except ValueError as exc:
+            raise TransportError(f"feishu token invalid JSON: {exc}") from exc
+        if not isinstance(env, dict) or env.get("code") != 0:
+            code = env.get("code") if isinstance(env, dict) else "?"
+            raise TransportError(f"feishu token exchange error code {code}")
+        token = str(env.get("tenant_access_token", ""))
+        if not token:
+            raise TransportError("feishu token exchange returned no token")
+        expire = int(env.get("expire", 7200))
+        self._token = token
+        self._token_expiry = now + max(expire - 300, 60)
+        return token
+
+    async def _open_endpoint(self) -> str:
+        """``POST /callback/ws/endpoint`` → a single-use ``wss://`` URL."""
+        token = await self._refresh_token()
+        try:
+            resp = await self._client.post(
+                f"{self._cfg.api_base}/callback/ws/endpoint",
+                json={"AppID": self._cfg.app_id},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except httpx.HTTPError as exc:
+            raise TransportError(f"feishu ws endpoint failed: {exc}") from exc
+        if resp.status_code >= 400:
+            raise TransportError(
+                f"feishu ws endpoint HTTP {resp.status_code}"
+            )
+        try:
+            env = resp.json()
+        except ValueError as exc:
+            raise TransportError(f"feishu ws endpoint invalid JSON: {exc}") from exc
+        # The endpoint URL sits under ``data.URL`` (Feishu's casing).
+        data = env.get("data") if isinstance(env, dict) else None
+        ws_url = data.get("URL") if isinstance(data, dict) else None
+        if not isinstance(ws_url, str) or not ws_url:
+            raise TransportError("feishu ws endpoint returned no URL")
+        return ws_url
+
+    @staticmethod
+    async def _recv_json(ws: ClientConnection) -> dict[str, Any]:
+        """Receive one WS frame and decode it as a JSON object."""
+        raw = await ws.recv()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise TransportError("feishu long-conn: frame was not a JSON object")
+        return obj
+
+    # ------------------------------------------------------------------
+    # Gates
+    # ------------------------------------------------------------------
+
+    def _chat_allowed(self, chat_id: str) -> bool:
+        allow = self._cfg.allowed_chat_ids
+        return not allow or chat_id in allow
+
+    def _keyword_match(self, message: dict[str, Any]) -> bool:
+        filter_ = self._cfg.keyword_filter
+        if not filter_:
+            return True
+        lower = extract_text(message).lower()
+        return any(kw.lower() in lower for kw in filter_)
+
+
+# ===========================================================================
+# Outbound sender
+# ===========================================================================
+
+
+class FeishuSender:
+    """Thin client over the Feishu IM REST surface, scoped to outbound.
+
+    Parallel to :class:`corlinman_channels.telegram_send.TelegramSender`.
+    The sender needs a fresh ``tenant_access_token`` per call; the
+    adapter owns the token lifecycle, so the sender takes a
+    ``token_provider`` async callable that yields a current token.
+    """
+
+    __slots__ = ("api_base", "client", "token_provider")
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        token_provider: Any,
+        api_base: str = DEFAULT_API_BASE,
+    ) -> None:
+        self.client = client
+        self.token_provider = token_provider
+        self.api_base = api_base
+
+    async def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        """Send a text message to ``chat_id``. Returns the new message id.
+
+        When ``reply_to_message_id`` is supplied the message is posted as
+        a reply via the ``/messages/{id}/reply`` endpoint so the
+        addressing stays clear — parallel to the Telegram ``reply_to``.
+        Otherwise it posts a fresh message into the chat.
+        """
+        token = await self.token_provider()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        content = json.dumps({"text": text}, ensure_ascii=False)
+        if reply_to_message_id is not None:
+            url = (
+                f"{self.api_base}/open-apis/im/v1/messages/"
+                f"{reply_to_message_id}/reply"
+            )
+            body: dict[str, Any] = {"content": content, "msg_type": "text"}
+        else:
+            url = (
+                f"{self.api_base}/open-apis/im/v1/messages"
+                "?receive_id_type=chat_id"
+            )
+            body = {
+                "receive_id": chat_id,
+                "content": content,
+                "msg_type": "text",
+            }
+        try:
+            resp = await self.client.post(url, json=body, headers=headers)
+        except httpx.HTTPError as exc:
+            raise TransportError(f"feishu send failed: {exc}") from exc
+        if resp.status_code >= 400:
+            raise TransportError(f"feishu send HTTP {resp.status_code}")
+        try:
+            env = resp.json()
+        except ValueError as exc:
+            raise TransportError(f"feishu send invalid JSON: {exc}") from exc
+        if not isinstance(env, dict) or env.get("code") != 0:
+            code = env.get("code") if isinstance(env, dict) else "?"
+            raise TransportError(f"feishu send error code {code}")
+        data = env.get("data") or {}
+        return str(data.get("message_id", "")) if isinstance(data, dict) else ""
+
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+
+def _parse_create_time(raw: Any) -> int:
+    """Best-effort Feishu ``create_time`` → Unix-seconds conversion.
+
+    Feishu sends ``create_time`` as a millisecond epoch string. Falls
+    back to ``0`` (the :class:`InboundEvent` "no timestamp" sentinel)
+    when the value is missing or unparseable.
+    """
+    if raw is None:
+        return 0
+    try:
+        ms = int(raw)
+    except (ValueError, TypeError):
+        return 0
+    # Feishu uses milliseconds; values look 13-digit.
+    return ms // 1000 if ms > 10_000_000_000 else ms
