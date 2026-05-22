@@ -250,6 +250,169 @@ def _emit_py_config_drop(cfg: Any | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Config hot-reload (Parcel P11)
+# ---------------------------------------------------------------------------
+
+
+#: Sibling bootstraps re-run when their owning config section changes on
+#: a hot-reload. ``providers`` rebuilds ``AppState.provider_registry``
+#: from the freshly-loaded ``[providers]`` / ``[models]`` tables. Each
+#: sibling exports the same ``bootstrap(state)`` symbol the boot-time
+#: seam calls — re-running it is idempotent (it replaces the handle).
+_HOT_RELOAD_BOOTSTRAPS: tuple[tuple[str, str], ...] = (
+    # (dotted module, section that triggers a re-run)
+    ("corlinman_server.gateway.providers", "providers"),
+    ("corlinman_server.gateway.providers", "models"),
+)
+
+
+def _reapply_hot_reloadable(state: Any, changed: list[str]) -> list[str]:
+    """Re-run the sibling bootstraps whose config section changed.
+
+    Returns the list of sibling module names that were re-applied.
+    Best-effort per sibling: a failing bootstrap logs a warning and the
+    rest still run — the gateway never crashes on a hot-reload. The
+    ``providers`` bootstrap rebuilds ``AppState.provider_registry`` so a
+    newly-added / edited provider goes live without a restart.
+    """
+    changed_set = set(changed)
+    reapplied: list[str] = []
+    seen: set[str] = set()
+    for dotted, section in _HOT_RELOAD_BOOTSTRAPS:
+        if section not in changed_set or dotted in seen:
+            continue
+        seen.add(dotted)
+        sibling = _lazy_import(dotted)
+        if sibling is None:
+            continue
+        bootstrap = getattr(sibling, "bootstrap", None)
+        if bootstrap is None:
+            continue
+        name = dotted.rsplit(".", 1)[-1]
+        try:
+            result = bootstrap(state)
+            if isinstance(result, Awaitable):
+                # Hot-reload runs on the event loop; a sync bootstrap
+                # (providers today) returns None — guard the async case
+                # so a future async bootstrap still re-applies cleanly.
+                logger.debug(
+                    "gateway.config_reload.bootstrap_returned_awaitable",
+                    sibling=name,
+                )
+            reapplied.append(name)
+        except Exception as exc:  # pragma: no cover — sibling-owned
+            logger.warning(
+                "gateway.config_reload.bootstrap_failed",
+                sibling=name,
+                error=str(exc),
+            )
+    return reapplied
+
+
+def _start_config_watcher(app: Any, state: Any, config_path: Path | None) -> Any:
+    """Build + start a :class:`ConfigWatcher` for the gateway config TOML.
+
+    Returns the watcher's debounce-loop :class:`asyncio.Task` (registered
+    into the lifespan's ``background`` list so it is cancelled + awaited
+    at shutdown), or ``None`` when no watcher could be started (no config
+    path, the file is missing, or the watcher module is absent).
+
+    On every detected change the watcher re-loads via
+    ``config.load_from_path``, swaps ``AppState.config``, diffs sections,
+    and re-runs the hot-reloadable sibling bootstraps (provider registry
+    rebuild). A malformed reload keeps the previous good snapshot.
+    """
+    if config_path is None or not config_path.exists():
+        return None
+    watcher_mod = _lazy_import("corlinman_server.gateway.core.config_watcher")
+    config_mod = _lazy_import("corlinman_server.gateway.core.config")
+    if watcher_mod is None or config_mod is None:
+        return None
+    ConfigWatcher = getattr(watcher_mod, "ConfigWatcher", None)
+    load_from_path = getattr(config_mod, "load_from_path", None)
+    if ConfigWatcher is None or load_from_path is None:
+        return None
+
+    initial = getattr(state, "config", None)
+    if not isinstance(initial, dict):
+        # Degraded boot (parse failed at build time / no loader). Seed
+        # with an empty dict so the watcher still arms — the first
+        # successful reload then publishes the real snapshot.
+        initial = {}
+
+    def _on_reload(report: Any, old_cfg: dict[str, Any], new_cfg: dict[str, Any]) -> None:
+        # Publish the new snapshot onto the live AppState first so any
+        # re-applied bootstrap reads the fresh config.
+        state.config = new_cfg
+        with suppress(AttributeError, TypeError):
+            app.state.corlinman_config = new_cfg
+        changed = list(getattr(report, "changed_sections", []))
+        restart_needed = sorted(
+            set(changed) & RESTART_REQUIRED_SECTIONS_LOCAL()
+        )
+        reapplied = _reapply_hot_reloadable(state, changed)
+        logger.info(
+            "gateway.config_reload.applied",
+            path=str(config_path),
+            changed=changed,
+            reapplied=reapplied,
+        )
+        for section in restart_needed:
+            logger.warning(
+                "gateway.config_reload.restart_required",
+                section=section,
+                detail=(
+                    "section changed but cannot hot-apply; restart the "
+                    "gateway for it to take effect"
+                ),
+            )
+
+    watcher = ConfigWatcher(
+        config_path,
+        initial,
+        parser=load_from_path,
+        on_reload=_on_reload,
+    )
+    # Expose the watcher on AppState so the admin /admin/config/reload
+    # route (routes_admin_b) can drive a manual reload via the same
+    # ConfigWatcher instance.
+    with suppress(AttributeError, TypeError):
+        state.config_watcher = watcher
+    extras = getattr(state, "extras", None)
+    if isinstance(extras, dict):
+        extras["config_watcher"] = watcher
+
+    async def _run() -> None:
+        await watcher.start()
+        try:
+            # Park until cancelled — ``ConfigWatcher`` owns its own
+            # debounce/SIGHUP tasks; this coroutine just keeps the
+            # watcher alive for the process lifetime and tears it down.
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await watcher.stop()
+
+    task = asyncio.create_task(_run(), name="gateway.config_watcher")
+    logger.info("gateway.config_reload.watcher_started", path=str(config_path))
+    return task
+
+
+def RESTART_REQUIRED_SECTIONS_LOCAL() -> frozenset[str]:
+    """Lazy accessor for the watcher's restart-required section set.
+
+    Imported via a function (not a module-level ``from``) so the
+    entrypoint stays importable when ``config_watcher`` is mid-port —
+    consistent with the rest of the lazy-import discipline in this file.
+    """
+    watcher_mod = _lazy_import("corlinman_server.gateway.core.config_watcher")
+    if watcher_mod is None:
+        return frozenset()
+    return getattr(watcher_mod, "RESTART_REQUIRED_SECTIONS", frozenset())
+
+
+# ---------------------------------------------------------------------------
 # AppState bridge
 # ---------------------------------------------------------------------------
 
@@ -790,6 +953,21 @@ def build_app(
                     sibling=name,
                     error=str(exc),
                 )
+
+        # Parcel P11: arm config hot-reload. The ConfigWatcher must boot
+        # *after* the provider/services bootstraps so its first reload
+        # re-applies onto a fully-wired AppState. Its debounce-loop task
+        # is registered into ``background`` so the lifespan-exit
+        # ``finally`` cancels + awaits it (which stops the fs observer +
+        # SIGHUP handler) on shutdown.
+        try:
+            watcher_task = _start_config_watcher(app, state, config_path)
+            if watcher_task is not None:
+                background.append(watcher_task)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "gateway.config_reload.watcher_start_failed", error=str(exc)
+            )
 
         if grpc_mod is not None:
             serve = getattr(
