@@ -655,3 +655,63 @@ def test_servicer_prewarm_swallows_resolution_errors() -> None:
     s = servicer.pool_stats()
     # Only the two good ones landed warm.
     assert s.warm_count == 2
+
+
+# ─── v0.8 builtin web tools ───────────────────────────────────────────
+
+
+def test_builtin_tools_includes_web_surface() -> None:
+    """``BUILTIN_TOOLS`` must list the v0.8 web tools so the streaming
+    loop dispatches them in-process instead of emitting a ToolCall
+    frame to the (nonexistent) plugin runtime."""
+    from corlinman_server.agent_servicer import BUILTIN_TOOLS
+
+    assert {"web_fetch", "web_search", "calculator"} <= BUILTIN_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_servicer_dispatches_calculator_in_process() -> None:
+    """``calculator`` flows through ``_dispatch_builtin`` and returns a
+    JSON result envelope — no network, fully self-contained."""
+    from corlinman_agent.reasoning_loop import ChatStart, ToolCallEvent
+    from corlinman_server.agent_servicer import CorlinmanAgentServicer
+
+    servicer = CorlinmanAgentServicer(provider_resolver=lambda _m: _FakeProvider([]))
+    start = ChatStart(model="m", messages=[], tools=[], session_key="s")
+    event = ToolCallEvent(
+        call_id="c1",
+        plugin="builtin",
+        tool="calculator",
+        args_json=b'{"expression": "6 * 7"}',
+    )
+    payload = json.loads(
+        await servicer._dispatch_builtin(event, start, _FakeProvider([]))
+    )
+    assert payload["result"] == 42
+
+
+@pytest.mark.asyncio
+async def test_servicer_web_search_degrades_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``web_search`` builtin call with no reachable backend returns a
+    well-formed degraded envelope rather than raising, so the reasoning
+    loop keeps going."""
+    from corlinman_agent.reasoning_loop import ChatStart, ToolCallEvent
+    from corlinman_server.agent_servicer import CorlinmanAgentServicer
+
+    monkeypatch.setenv("CORLINMAN_WEB_SEARCH_BACKEND", "totally-unknown")
+
+    servicer = CorlinmanAgentServicer(provider_resolver=lambda _m: _FakeProvider([]))
+    start = ChatStart(model="m", messages=[], tools=[], session_key="s")
+    event = ToolCallEvent(
+        call_id="c2",
+        plugin="builtin",
+        tool="web_search",
+        args_json=b'{"query": "anything"}',
+    )
+    payload = json.loads(
+        await servicer._dispatch_builtin(event, start, _FakeProvider([]))
+    )
+    assert payload["results"] == []
+    assert "error" in payload

@@ -61,6 +61,14 @@ from corlinman_agent.subagent.blackboard import (
     dispatch_blackboard_write,
 )
 from corlinman_agent.variables import VariableCascade
+from corlinman_agent.web import (
+    CALCULATOR_TOOL,
+    WEB_FETCH_TOOL,
+    WEB_SEARCH_TOOL,
+    dispatch_calculator,
+    dispatch_web_fetch,
+    dispatch_web_search,
+)
 from corlinman_grpc import agent_pb2, agent_pb2_grpc, common_pb2
 from corlinman_providers import registry as provider_registry
 from corlinman_providers.base import CorlinmanProvider, ProviderChunk
@@ -72,15 +80,19 @@ logger = structlog.get_logger(__name__)
 
 #: Tool names dispatched in-process by the servicer rather than routed
 #: through the Rust plugin registry. These cover the v0.7 multi-agent
-#: surface (subagent fan-out + shared blackboard); adding to this set
-#: is the way to expose a new builtin tool that doesn't fit the plugin
-#: model.
+#: surface (subagent fan-out + shared blackboard) plus the v0.8 web
+#: tools (web_fetch / web_search) and a self-contained calculator;
+#: adding to this set is the way to expose a new builtin tool that
+#: doesn't fit the plugin model.
 BUILTIN_TOOLS: frozenset[str] = frozenset(
     {
         SUBAGENT_SPAWN_TOOL,
         SUBAGENT_SPAWN_MANY_TOOL,
         BLACKBOARD_READ_TOOL,
         BLACKBOARD_WRITE_TOOL,
+        WEB_FETCH_TOOL,
+        WEB_SEARCH_TOOL,
+        CALCULATOR_TOOL,
     }
 )
 
@@ -386,6 +398,12 @@ class CorlinmanAgentServicer(agent_pb2_grpc.AgentServicer):
                     trace_id=parent_ctx.trace_id,
                     written_by=parent_ctx.parent_agent_id,
                 )
+            if event.tool == WEB_FETCH_TOOL:
+                return await dispatch_web_fetch(args_json=event.args_json)
+            if event.tool == WEB_SEARCH_TOOL:
+                return await dispatch_web_search(args_json=event.args_json)
+            if event.tool == CALCULATOR_TOOL:
+                return dispatch_calculator(args_json=event.args_json)
         except Exception as exc:
             logger.exception(
                 "agent.chat.builtin_tool_failed",
