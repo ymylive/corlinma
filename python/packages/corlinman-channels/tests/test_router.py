@@ -123,6 +123,38 @@ class TestKeywordAndMention:
         assert req is not None
         assert req.mentioned is True
 
+    def test_dispatch_auto_detects_self_id_from_event(self) -> None:
+        """The bot's QQ id is learned from the event's ``self_id``, so a
+        stale/empty configured ``self_ids`` does not break @mention
+        detection — the router self-updates in real time."""
+        router = ChannelRouter(
+            group_keywords={"123": ["never_matches"]},
+            self_ids=[],  # nothing configured
+        )
+        ev = _group_event(
+            "[CQ:at,qq=999] help",
+            [AtSegment(qq="999"), TextSegment(text=" help")],
+            123,
+            self_id=999,
+        )
+        req = router.dispatch(ev)
+        # Learned from the event...
+        assert 999 in router.self_ids
+        # ...and the @mention on that same event is recognized.
+        assert req is not None
+        assert req.mentioned is True
+
+    def test_dispatch_tracks_self_id_change(self) -> None:
+        """A NapCat re-login under a different account is tracked live:
+        the new ``self_id`` is appended; previously-known ids stay."""
+        router = ChannelRouter(group_keywords={}, self_ids=[100])
+        ev = _group_event(
+            "hi", [TextSegment(text="hi")], 9999, self_id=2952532060
+        )
+        router.dispatch(ev)
+        assert 2952532060 in router.self_ids
+        assert 100 in router.self_ids
+
     def test_private_message_always_dispatches(self) -> None:
         router = ChannelRouter(group_keywords={}, self_ids=[100])
         ev = MessageEvent(

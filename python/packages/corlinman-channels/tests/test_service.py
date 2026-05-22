@@ -332,14 +332,19 @@ class TestRunChannelConfig:
             await run_qq_channel(params, asyncio.Event())
 
     @pytest.mark.asyncio
-    async def test_run_qq_channel_requires_self_ids(self) -> None:
+    async def test_run_qq_channel_allows_empty_self_ids(self) -> None:
+        """``self_ids`` is optional now — the bot id is auto-detected
+        from the OneBot event stream, so an empty config value must not
+        raise. (cancel is pre-set so the loop exits immediately.)"""
         import asyncio
 
+        cancel = asyncio.Event()
+        cancel.set()
         params = QqChannelParams(
             config=SimpleNamespace(ws_url="ws://x", self_ids=[]),
         )
-        with pytest.raises(ValueError, match="self_ids"):
-            await run_qq_channel(params, asyncio.Event())
+        # Must not raise ValueError about self_ids.
+        await run_qq_channel(params, cancel)
 
     @pytest.mark.asyncio
     async def test_run_telegram_channel_requires_bot_token(self) -> None:

@@ -179,9 +179,13 @@ async def run_qq_channel(
     ws_url = _attr(cfg, "ws_url", "")
     if not ws_url:
         raise ValueError("channels.qq.ws_url is empty")
+    # ``self_ids`` is an optional seed list. The bot's real QQ id is
+    # auto-detected from the live OneBot event stream — every event
+    # carries ``self_id``, learned in :meth:`ChannelRouter.dispatch`.
+    # A stale or empty config value no longer breaks @mention
+    # detection, and a NapCat re-login under a different account is
+    # picked up at runtime with no config edit.
     self_ids = list(_attr(cfg, "self_ids", []) or [])
-    if not self_ids:
-        raise ValueError("channels.qq.self_ids is empty")
 
     # Token buckets — None on either dimension disables it.
     rate_cfg = _attr(cfg, "rate_limit", None)
