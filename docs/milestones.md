@@ -106,6 +106,30 @@ release notes: [`docs/release-notes-v0.1.1.md`](release-notes-v0.1.1.md)。
 
 详见 [`docs/runbook.md`](runbook.md)。
 
+### ap1.0.0 — 2026-05-22 agent-port runtime-complete ✅
+
+Rust→Python 移植「最后一公里」。Python 网关从**降级模式**（`mode:degraded`）
+转为**完全接通**（`mode:ok`）。release notes:
+[`docs/release-notes-ap1.0.0.md`](release-notes-ap1.0.0.md)。
+
+计划: [`docs/PLAN_PORT_COMPLETION.md`](PLAN_PORT_COMPLETION.md)（4 个 Wave，13 个 Parcel）。
+
+**关键 evidence**（`pytest python/packages -q`：**2586 passed**）：
+
+| Parcel | 内容 | 状态 |
+| --- | --- | --- |
+| **P0** | `gateway/core/config.py` 配置加载器 + `runtime-wiring.md` 契约 | ✅ |
+| **P1** | `gateway/providers` bootstrap — `ProviderRegistry` 接线，`/v1/models` 200 | ✅ |
+| **P2** | `gateway/services/direct_backend` — `DirectProviderBackend` + `ChatService` 接线，`/v1/chat/completions` 200 | ✅ |
+| **P3** | `gateway/channels_runtime` — QQ/Telegram 频道运行时后台任务启动 | ✅ |
+| **P4** | `gateway/grpc` + `services/grpc_backend` — gRPC Agent server 替换占位实现 | ✅ |
+| **P5** | `RegistryToolExecutor` + `PluginInvoker` — 真实插件分派取代 `PlaceholderExecutor` | ✅ |
+| **P12** | 配置/后端/doctor 三项 runtime 健康检查覆盖，+89 tests | ✅ |
+| **P13** | 本 release notes + milestones + plan 状态更新 | ✅ |
+
+延迟工作（P6–P11，后续迭代）：evolution apply、voice、Bedrock/Azure、
+记忆/RAG episodes、频道广度（Discord/Slack）、config 热重载接线。
+
 ## 更新约定
 
 - 每次滩头推进（新 milestone 跑通 / 风险状态变化 / 新 evidence）更新本文件

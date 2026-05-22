@@ -1,6 +1,6 @@
 # corlinman Python 运行时补全 —— 多 Agent 并行派发计划
 
-> **状态**: draft — 待 operator 确认 §6 范围
+> **状态**: ✅ shipped — ap1.0.0 (2026-05-22)。所有已确认 parcel（P0、P1–P4、P5、P12、P13）已完成；P6–P11 推迟至后续迭代（见 §6）。
 > **作者**: Claude Code(规划 agent),2026-05-21
 > **目的**: 把 corlinman 的 Rust→Python 移植「最后一公里」拆成可并行派发的工作包,
 > 多个 agent 同时开工,加速补全网关运行时。
@@ -116,9 +116,9 @@ class Config(BaseModel):
 
 ## 3. 派发计划 —— Waves & Parcels
 
-### Wave 0 — 地基(1 个 agent,串行,阻塞全部)
+### Wave 0 — 地基(1 个 agent,串行,阻塞全部) ✅
 
-| Parcel | P0 — 配置加载器 + 契约固化 |
+| Parcel | P0 — 配置加载器 + 契约固化 ✅ |
 | --- | --- |
 | Owner | `core-config` agent |
 | 依赖 | 无 |
@@ -127,11 +127,11 @@ class Config(BaseModel):
 | 验收 | 启动日志不再出现 `sibling_missing ...core.config`;`AppState.config` 是类型化对象;`runtime-wiring.md` 提交 |
 | 工期 | ~1 天 |
 
-### Wave 1 — 运行时核心(4 个 agent,**完全并行**)
+### Wave 1 — 运行时核心(4 个 agent,**完全并行**) ✅
 
 > 全部据 §2 契约编码。P2 给「能聊天」的快路径,P4 给「完整 agent」路径;两者并行。
 
-| Parcel | P1 — Provider 注册表接线 |
+| Parcel | P1 — Provider 注册表接线 ✅ |
 | --- | --- |
 | Owner | `providers` agent · 依赖 P0 |
 | 涉及 | `gateway/lifecycle/entrypoint.py`、`gateway/routes/models.py`、`gateway/routes/register.py`、`corlinman-providers/registry.py` |
@@ -139,7 +139,7 @@ class Config(BaseModel):
 | 验收 | `GET /v1/models` 返回已配置模型列表(200) |
 | 工期 | ~1 天 |
 
-| Parcel | P2 — ChatService + 直连 backend |
+| Parcel | P2 — ChatService + 直连 backend ✅ |
 | --- | --- |
 | Owner | `chat-service` agent · 依赖 P0(契约)、P1(运行期取 registry) |
 | 涉及 | `gateway/services/`(新建 `direct_backend.py`)、`gateway/services/__init__.py`(加 `bootstrap`)、`gateway/routes/chat.py`、`register.py` |
@@ -147,7 +147,7 @@ class Config(BaseModel):
 | 验收 | `POST /v1/chat/completions` 流式+非流式均返回真实补全(200) |
 | 工期 | ~2 天 |
 
-| Parcel | P3 — 频道运行时启动器 |
+| Parcel | P3 — 频道运行时启动器 ✅ |
 | --- | --- |
 | Owner | `channels` agent · 依赖 P0;按 §2.4 契约可与 P2 并行开发,末端集成 |
 | 涉及 | `gateway/services/bootstrap.py`(新建)、`corlinman-server/pyproject.toml`(加 `corlinman-channels` 依赖)、`entrypoint.py` |
@@ -155,7 +155,7 @@ class Config(BaseModel):
 | 验收 | 网关启动即连 NapCat OneBot WS(`:3001` 出现连接);QQ 私聊机器人能收到回复;`/admin/channels/qq/status` 显示在线 |
 | 工期 | ~2 天 |
 
-| Parcel | P4 — gRPC Agent backend(完整 agent 路径) |
+| Parcel | P4 — gRPC Agent backend(完整 agent 路径) ✅ |
 | --- | --- |
 | Owner | `agent-runtime` agent · 依赖 P0;与 P1/P2/P3 并行 |
 | 涉及 | `corlinman-server/main.py`、`gateway/grpc/`、`corlinman-agent/`、`corlinman-grpc/` |
@@ -165,22 +165,24 @@ class Config(BaseModel):
 
 ### Wave 2 — 功能补全 / 对标 hermes·openclaw(~7 个 agent,并行)
 
-| Parcel | 内容 | 依赖 | 验收要点 |
-| --- | --- | --- | --- |
-| P5 | 真实 `ToolExecutor`(取代 `PlaceholderExecutor`),推理循环里跑插件/工具 | P4 | 工具调用真实执行并回灌结果 |
-| P6 | Evolution apply/rollback(`routes_admin_b/evolution.py` 的 501 → 接 `EvolutionApplier`) | P0 | 提案可 apply/rollback |
-| P7 | Voice 真实 provider(OpenAI realtime,替换 `MockProvider`) | P1 | `/v1/voice` 接真实语音 |
-| P8 | Bedrock(SigV4)/ Azure(部署路由)provider —— 消除运行期 `NotImplementedError` | P1 | 两家 provider 真实可用 |
-| P9 | 记忆/RAG + episodes 整合(tagmemo、`about_tag` resolver) | P0 | 记忆 token 解析齐全 |
-| P10 | 频道广度对标(hermes 30+/openclaw 20+:Discord/Slack 等,按优先级取舍) | P3 | 新频道收发通 |
-| P11 | `core.config` 热重载接线 + 占位引擎替换 | P0 | 改 config.toml 热生效 |
+> ap1.0.0 仅执行 P5；P6–P11 按 §6 范围决策推迟至后续迭代。
 
-### Wave 3 — 加固(2 个 agent)
+| Parcel | 内容 | 依赖 | 验收要点 | 状态 |
+| --- | --- | --- | --- | --- |
+| P5 | 真实 `ToolExecutor`(取代 `PlaceholderExecutor`),推理循环里跑插件/工具 | P4 | 工具调用真实执行并回灌结果 | ✅ |
+| P6 | Evolution apply/rollback(`routes_admin_b/evolution.py` 的 501 → 接 `EvolutionApplier`) | P0 | 提案可 apply/rollback | ⏳ 推迟 |
+| P7 | Voice 真实 provider(OpenAI realtime,替换 `MockProvider`) | P1 | `/v1/voice` 接真实语音 | ⏳ 推迟 |
+| P8 | Bedrock(SigV4)/ Azure(部署路由)provider —— 消除运行期 `NotImplementedError` | P1 | 两家 provider 真实可用 | ⏳ 推迟 |
+| P9 | 记忆/RAG + episodes 整合(tagmemo、`about_tag` resolver) | P0 | 记忆 token 解析齐全 | ⏳ 推迟 |
+| P10 | 频道广度对标(hermes 30+/openclaw 20+:Discord/Slack 等,按优先级取舍) | P3 | 新频道收发通 | ⏳ 推迟 |
+| P11 | `core.config` 热重载接线 + 占位引擎替换 | P0 | 改 config.toml 热生效 | ⏳ 推迟 |
 
-| Parcel | 内容 |
-| --- | --- |
-| P12 | 每 parcel 的 pytest 覆盖、`corlinman doctor` 检查项、observability 指标 |
-| P13 | 文档 + release notes;更新 `milestones.md` / 本计划状态 |
+### Wave 3 — 加固(2 个 agent) ✅
+
+| Parcel | 内容 | 状态 |
+| --- | --- | --- |
+| P12 | 每 parcel 的 pytest 覆盖、`corlinman doctor` 检查项、observability 指标 | ✅ |
+| P13 | 文档 + release notes;更新 `milestones.md` / 本计划状态 | ✅ |
 
 ---
 
