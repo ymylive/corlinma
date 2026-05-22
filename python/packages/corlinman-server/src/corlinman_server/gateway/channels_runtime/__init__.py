@@ -16,12 +16,12 @@ What it does
 
 :func:`bootstrap` is a sibling ``bootstrap(state)`` hook (see contract
 §2). It reads ``state.config["channels"]``, and for each *enabled*
-channel (``qq`` / ``telegram``) builds the channel-params object from
-``corlinman-channels`` and launches ``run_qq_channel`` /
-``run_telegram_channel`` as a background :class:`asyncio.Task`. The list
-of tasks is returned so the gateway lifespan registers them into its
-``background`` list and cancels + awaits them at shutdown under the
-shared ``cancel`` event.
+channel (``qq`` / ``telegram`` / ``discord`` / ``slack`` / ``feishu``)
+builds the channel-params object from ``corlinman-channels`` and
+launches the matching ``run_*_channel`` coroutine as a background
+:class:`asyncio.Task`. The list of tasks is returned so the gateway
+lifespan registers them into its ``background`` list and cancels +
+awaits them at shutdown under the shared ``cancel`` event.
 
 Cancellation contract
 ---------------------
@@ -141,6 +141,88 @@ def _build_telegram_params(
 
     return TelegramChannelParams(
         config=dict(tg_cfg),
+        model=model,
+        chat_service=chat_service,
+    )
+
+
+def _build_discord_params(
+    dc_cfg: Mapping[str, Any], model: str, chat_service: Any
+) -> Any:
+    """Build :class:`corlinman_channels.DiscordChannelParams` from the
+    ``[channels.discord]`` config table.
+
+    ``run_discord_channel`` reads ``bot_token`` / ``allowed_channel_ids`` /
+    ``keyword_filter`` / ``respond_to_all`` / ``gateway_url`` / ``rest_base``
+    off the structural ``config``; the dict from the loader satisfies that.
+    The ``bot_token`` may also be supplied via the ``DISCORD_BOT_TOKEN``
+    env var so the standard deployment works without hand-editing TOML.
+    """
+    from corlinman_channels import DiscordChannelParams
+
+    cfg: dict[str, Any] = dict(dc_cfg)
+    token = cfg.get("bot_token") or os.environ.get("DISCORD_BOT_TOKEN") or ""
+    if token:
+        cfg["bot_token"] = token
+
+    return DiscordChannelParams(
+        config=cfg,
+        model=model,
+        chat_service=chat_service,
+    )
+
+
+def _build_slack_params(
+    sl_cfg: Mapping[str, Any], model: str, chat_service: Any
+) -> Any:
+    """Build :class:`corlinman_channels.SlackChannelParams` from the
+    ``[channels.slack]`` config table.
+
+    ``run_slack_channel`` reads ``app_token`` + ``bot_token`` /
+    ``allowed_channel_ids`` / ``keyword_filter`` / ``respond_to_all`` /
+    ``api_base`` off the structural ``config``. Both tokens may also be
+    supplied via ``SLACK_APP_TOKEN`` / ``SLACK_BOT_TOKEN`` env vars.
+    """
+    from corlinman_channels import SlackChannelParams
+
+    cfg: dict[str, Any] = dict(sl_cfg)
+    app_token = cfg.get("app_token") or os.environ.get("SLACK_APP_TOKEN") or ""
+    bot_token = cfg.get("bot_token") or os.environ.get("SLACK_BOT_TOKEN") or ""
+    if app_token:
+        cfg["app_token"] = app_token
+    if bot_token:
+        cfg["bot_token"] = bot_token
+
+    return SlackChannelParams(
+        config=cfg,
+        model=model,
+        chat_service=chat_service,
+    )
+
+
+def _build_feishu_params(
+    fs_cfg: Mapping[str, Any], model: str, chat_service: Any
+) -> Any:
+    """Build :class:`corlinman_channels.FeishuChannelParams` from the
+    ``[channels.feishu]`` config table.
+
+    ``run_feishu_channel`` reads ``app_id`` + ``app_secret`` /
+    ``allowed_chat_ids`` / ``keyword_filter`` / ``respond_to_all`` /
+    ``api_base`` off the structural ``config``. The credentials may also
+    be supplied via ``FEISHU_APP_ID`` / ``FEISHU_APP_SECRET`` env vars.
+    """
+    from corlinman_channels import FeishuChannelParams
+
+    cfg: dict[str, Any] = dict(fs_cfg)
+    app_id = cfg.get("app_id") or os.environ.get("FEISHU_APP_ID") or ""
+    app_secret = cfg.get("app_secret") or os.environ.get("FEISHU_APP_SECRET") or ""
+    if app_id:
+        cfg["app_id"] = app_id
+    if app_secret:
+        cfg["app_secret"] = app_secret
+
+    return FeishuChannelParams(
+        config=cfg,
         model=model,
         chat_service=chat_service,
     )
@@ -278,6 +360,93 @@ def build_channel_tasks(
             )
     elif tg_cfg:
         logger.debug("gateway.channels.disabled", channel="telegram")
+
+    # --- Discord ------------------------------------------------------------
+    dc_cfg = _as_mapping(channels_cfg.get("discord"))
+    if _is_enabled(dc_cfg):
+        try:
+            from corlinman_channels import run_discord_channel
+
+            params = _build_discord_params(dc_cfg, model, chat_service)
+            task = asyncio.create_task(
+                _run_channel(
+                    "discord",
+                    lambda c, p=params: run_discord_channel(p, c),
+                    cancel,
+                ),
+                name="channel-discord",
+            )
+            tasks.append(task)
+            logger.info(
+                "gateway.channels.started",
+                channel="discord",
+                model=model,
+                has_chat_service=chat_service is not None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "gateway.channels.build_failed", channel="discord", error=str(exc)
+            )
+    elif dc_cfg:
+        logger.debug("gateway.channels.disabled", channel="discord")
+
+    # --- Slack --------------------------------------------------------------
+    sl_cfg = _as_mapping(channels_cfg.get("slack"))
+    if _is_enabled(sl_cfg):
+        try:
+            from corlinman_channels import run_slack_channel
+
+            params = _build_slack_params(sl_cfg, model, chat_service)
+            task = asyncio.create_task(
+                _run_channel(
+                    "slack",
+                    lambda c, p=params: run_slack_channel(p, c),
+                    cancel,
+                ),
+                name="channel-slack",
+            )
+            tasks.append(task)
+            logger.info(
+                "gateway.channels.started",
+                channel="slack",
+                model=model,
+                has_chat_service=chat_service is not None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "gateway.channels.build_failed", channel="slack", error=str(exc)
+            )
+    elif sl_cfg:
+        logger.debug("gateway.channels.disabled", channel="slack")
+
+    # --- Feishu / Lark ------------------------------------------------------
+    fs_cfg = _as_mapping(channels_cfg.get("feishu"))
+    if _is_enabled(fs_cfg):
+        try:
+            from corlinman_channels import run_feishu_channel
+
+            params = _build_feishu_params(fs_cfg, model, chat_service)
+            task = asyncio.create_task(
+                _run_channel(
+                    "feishu",
+                    lambda c, p=params: run_feishu_channel(p, c),
+                    cancel,
+                ),
+                name="channel-feishu",
+            )
+            tasks.append(task)
+            logger.info(
+                "gateway.channels.started",
+                channel="feishu",
+                model=model,
+                has_chat_service=chat_service is not None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "gateway.channels.build_failed", channel="feishu", error=str(exc)
+            )
+    elif fs_cfg:
+        logger.debug("gateway.channels.disabled", channel="feishu")
 
     return tasks
 

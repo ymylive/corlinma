@@ -1,0 +1,570 @@
+"""Discord Gateway (WebSocket) + REST adapter.
+
+corlinman has no Rust reference for Discord — this is a new channel
+modelled on the existing :mod:`corlinman_channels.telegram` adapter so
+the inbound shape (``async for event in adapter.inbound()``) and the
+outbound :class:`DiscordSender` mirror the Telegram pair.
+
+## Transport
+
+Discord splits inbound and outbound:
+
+* **Gateway** — a WebSocket at ``wss://gateway.discord.gg`` carrying the
+  IDENTIFY / HELLO / HEARTBEAT / DISPATCH protocol. The adapter performs
+  the handshake, runs a heartbeat task at the server-supplied interval,
+  and decodes ``MESSAGE_CREATE`` dispatch frames into
+  :class:`InboundEvent` objects.
+* **REST** — ``POST /channels/{id}/messages`` over HTTPS for replies.
+
+We implement against the raw protocol over ``websockets`` / ``httpx``
+(both already dependencies) rather than pulling in ``discord.py`` — the
+slice of the protocol corlinman needs (one intent, text messages, a
+heartbeat) is small and a heavyweight bot framework would bloat the
+dependency graph for no benefit.
+
+## Gateway opcodes
+
+Only the handful the adapter exercises are named here; the rest decode
+as ignored integers.
+
+* ``0`` DISPATCH    — an event (we care about ``MESSAGE_CREATE``).
+* ``1`` HEARTBEAT   — server asks for an immediate heartbeat.
+* ``7`` RECONNECT   — server asks us to reconnect.
+* ``9`` INVALID_SESSION — re-IDENTIFY from scratch.
+* ``10`` HELLO      — carries ``heartbeat_interval`` (ms).
+* ``11`` HEARTBEAT_ACK.
+
+## Reply gating
+
+Discord channels are either guild (server) channels or DMs. The adapter
+mirrors the Telegram gate:
+
+* DMs always respond (``mentioned`` is implicitly ``True``).
+* Guild channels respond only when the bot is @-mentioned, unless
+  ``respond_to_all`` is set. An optional ``keyword_filter`` narrows
+  guild messages further (case-insensitive substring).
+* The bot never replies to its own messages or to other bots.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import AsyncIterator
+from contextlib import suppress
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+import websockets
+from websockets.asyncio.client import ClientConnection
+
+from corlinman_channels.common import (
+    ChannelBinding,
+    ConfigError,
+    InboundEvent,
+    TransportError,
+)
+
+__all__ = [
+    "DEFAULT_GATEWAY_URL",
+    "DEFAULT_REST_BASE",
+    "GATEWAY_INTENT_GUILD_MESSAGES",
+    "DiscordAdapter",
+    "DiscordConfig",
+    "DiscordSender",
+    "binding_from_message",
+    "is_mentioning_bot",
+]
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+#: Default Discord Gateway endpoint. ``?v=10&encoding=json`` selects the
+#: stable API version and the JSON (not ETF) encoding so we can decode
+#: with the stdlib ``json`` module.
+DEFAULT_GATEWAY_URL: str = "wss://gateway.discord.gg/?v=10&encoding=json"
+
+#: Default Discord REST base. API v10 matches the gateway version above.
+DEFAULT_REST_BASE: str = "https://discord.com/api/v10"
+
+#: Gateway intents bitfield. ``GUILD_MESSAGES`` (1<<9) + ``DIRECT_MESSAGES``
+#: (1<<12) + ``MESSAGE_CONTENT`` (1<<15). ``MESSAGE_CONTENT`` is a
+#: privileged intent — the bot owner must enable it in the developer
+#: portal or the gateway closes the connection with code 4014.
+GATEWAY_INTENT_GUILD_MESSAGES: int = (1 << 9) | (1 << 12) | (1 << 15)
+
+#: Backoff after a gateway failure (seconds). Mirrors the Telegram
+#: adapter's ``ERROR_BACKOFF_SECS``.
+ERROR_BACKOFF_SECS: float = 5.0
+
+# Gateway opcodes (only the ones the adapter interprets).
+_OP_DISPATCH = 0
+_OP_HEARTBEAT = 1
+_OP_IDENTIFY = 2
+_OP_RECONNECT = 7
+_OP_INVALID_SESSION = 9
+_OP_HELLO = 10
+_OP_HEARTBEAT_ACK = 11
+
+
+# ===========================================================================
+# Config
+# ===========================================================================
+
+
+@dataclass(slots=True)
+class DiscordConfig:
+    """Configuration for :class:`DiscordAdapter`.
+
+    ``bot_token`` is required (the ``Bot <token>`` credential from the
+    developer portal). ``allowed_channel_ids`` (empty == allow all) and
+    ``keyword_filter`` (case-insensitive substring; empty == allow all)
+    mirror the Telegram gates. ``respond_to_all`` disables the
+    mention-required gate for guild channels.
+    """
+
+    bot_token: str
+    allowed_channel_ids: list[str] = field(default_factory=list)
+    keyword_filter: list[str] = field(default_factory=list)
+    respond_to_all: bool = False
+    gateway_url: str = DEFAULT_GATEWAY_URL
+    rest_base: str = DEFAULT_REST_BASE
+    intents: int = GATEWAY_INTENT_GUILD_MESSAGES
+
+
+# ===========================================================================
+# Mention / binding helpers — pure functions, easy to unit-test.
+# ===========================================================================
+
+
+def is_mentioning_bot(message: dict[str, Any], bot_id: str) -> bool:
+    """True iff ``message`` @-mentions the bot.
+
+    Discord puts resolved mentions in ``message["mentions"]`` — a list of
+    user objects. A raw ``<@id>`` / ``<@!id>`` substring fallback covers
+    edited messages or partial payloads where ``mentions`` was stripped.
+    """
+    if not bot_id:
+        return False
+    for user in message.get("mentions") or []:
+        if isinstance(user, dict) and str(user.get("id", "")) == bot_id:
+            return True
+    content = message.get("content") or ""
+    return f"<@{bot_id}>" in content or f"<@!{bot_id}>" in content
+
+
+def binding_from_message(message: dict[str, Any], bot_id: str) -> ChannelBinding:
+    """Build a :class:`ChannelBinding` from a Discord ``MESSAGE_CREATE``.
+
+    ``account`` is the bot id, ``thread`` the channel id, ``sender`` the
+    author id. DMs have ``guild_id`` absent — ``thread`` is still the
+    channel id so the session key stays stable per-DM.
+    """
+    channel_id = str(message.get("channel_id", ""))
+    author = message.get("author") or {}
+    sender_id = str(author.get("id", "")) if isinstance(author, dict) else ""
+    return ChannelBinding(
+        channel="discord",
+        account=bot_id,
+        thread=channel_id,
+        sender=sender_id or channel_id,
+    )
+
+
+def _strip_mention(content: str, bot_id: str) -> str:
+    """Remove the leading ``<@bot_id>`` mention token from ``content``.
+
+    Keeps the user-facing text clean so the chat backend doesn't see the
+    raw mention markup. Matches the convenience the QQ router applies via
+    ``segments_to_text``.
+    """
+    if not bot_id:
+        return content.strip()
+    for token in (f"<@{bot_id}>", f"<@!{bot_id}>"):
+        content = content.replace(token, " ")
+    return content.strip()
+
+
+# ===========================================================================
+# Adapter
+# ===========================================================================
+
+
+class DiscordAdapter:
+    """Discord Gateway WebSocket adapter.
+
+    Same surface as the other adapters: ``async with`` for lifecycle,
+    ``inbound()`` for the normalized event stream. The gateway handshake
+    (IDENTIFY → HELLO → heartbeat loop) runs in a background task; decoded
+    ``MESSAGE_CREATE`` events land on an internal queue the ``inbound``
+    iterator drains.
+
+    Outbound replies are a separate concern — see :class:`DiscordSender`.
+    """
+
+    def __init__(
+        self,
+        config: DiscordConfig,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        if not config.bot_token:
+            raise ConfigError("DiscordConfig.bot_token is empty")
+        self._cfg = config
+        self._owns_client = http_client is None
+        self._client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+        self._closed = False
+        self._bot_id: str | None = None
+        self._inbound_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
+        self._reader_task: asyncio.Task[None] | None = None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> DiscordAdapter:
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        await self.close()
+
+    async def connect(self) -> None:
+        """Resolve the bot id and spawn the gateway loop.
+
+        ``GET /users/@me`` discovers the bot's own id so the mention gate
+        and self-message filter work. A network failure here raises
+        :class:`TransportError` so the caller fails fast — the Telegram
+        adapter does the same with ``getMe``.
+        """
+        if self._reader_task is not None:
+            return
+        self._bot_id = await self._get_self_id()
+        self._closed = False
+        self._reader_task = asyncio.create_task(
+            self._gateway_loop(), name="discord-gateway"
+        )
+
+    async def close(self) -> None:
+        """Stop the gateway loop and (if we own it) the HTTP client."""
+        self._closed = True
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._reader_task
+            self._reader_task = None
+        if self._owns_client:
+            await self._client.aclose()
+
+    @property
+    def bot_id(self) -> str | None:
+        """The bot's snowflake id, available after :meth:`connect`."""
+        return self._bot_id
+
+    # ------------------------------------------------------------------
+    # Inbound iterator
+    # ------------------------------------------------------------------
+
+    async def inbound(self) -> AsyncIterator[InboundEvent[dict[str, Any]]]:
+        """Yield one :class:`InboundEvent` per accepted inbound message.
+
+        Filtering rules (parallel to the Telegram adapter):
+
+        * skip the bot's own messages and other bots' messages;
+        * ``allowed_channel_ids`` whitelist (empty = allow all);
+        * guild channels: require an @-mention unless ``respond_to_all``,
+          then apply the optional keyword filter;
+        * empty / whitespace-only content is silently skipped.
+        """
+        if self._reader_task is None:
+            await self.connect()
+        assert self._bot_id is not None  # connect() guarantees this
+        bot_id = self._bot_id
+        while not self._closed:
+            try:
+                msg = await self._inbound_q.get()
+            except asyncio.CancelledError:
+                return
+
+            author = msg.get("author") or {}
+            author_id = str(author.get("id", "")) if isinstance(author, dict) else ""
+            # Never reply to ourselves or to other bots — prevents loops.
+            if author_id == bot_id:
+                continue
+            if isinstance(author, dict) and author.get("bot"):
+                continue
+
+            channel_id = str(msg.get("channel_id", ""))
+            if not self._channel_allowed(channel_id):
+                continue
+
+            # A guild message carries ``guild_id``; a DM does not.
+            is_dm = not msg.get("guild_id")
+            mentioned = is_mentioning_bot(msg, bot_id)
+            if not is_dm:
+                if not self._cfg.respond_to_all and not mentioned:
+                    continue
+                if not mentioned and not self._keyword_match(msg):
+                    continue
+
+            content = _strip_mention(msg.get("content") or "", bot_id)
+            if not content.strip():
+                continue
+
+            binding = binding_from_message(msg, bot_id)
+            yield InboundEvent(
+                channel="discord",
+                binding=binding,
+                text=content,
+                message_id=str(msg.get("id", "")) or None,
+                timestamp=_parse_timestamp(msg.get("timestamp")),
+                mentioned=mentioned or is_dm,
+                attachments=[],  # multimodal download is out of scope here
+                payload=msg,
+            )
+
+    # ------------------------------------------------------------------
+    # Gateway loop
+    # ------------------------------------------------------------------
+
+    async def _gateway_loop(self) -> None:
+        """Connect to the gateway and pump dispatch frames forever.
+
+        Reconnects on any transport failure with a fixed backoff —
+        matching the Telegram poll loop's resilience contract. Exits
+        promptly once :meth:`close` flips ``self._closed``.
+        """
+        while not self._closed:
+            try:
+                await self._run_one_connection()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                # Transient — back off and retry, same as the TG adapter.
+                try:
+                    await asyncio.sleep(ERROR_BACKOFF_SECS)
+                except asyncio.CancelledError:
+                    return
+
+    async def _run_one_connection(self) -> None:
+        """Drive a single gateway WebSocket connection from HELLO to close."""
+        heartbeat_task: asyncio.Task[None] | None = None
+        async with websockets.connect(
+            self._cfg.gateway_url, max_size=2 ** 23
+        ) as ws:
+            # First frame must be HELLO (op 10) carrying the heartbeat interval.
+            hello = await self._recv_json(ws)
+            if hello.get("op") != _OP_HELLO:
+                raise TransportError("discord gateway: expected HELLO frame")
+            interval_ms = int(hello.get("d", {}).get("heartbeat_interval", 41250))
+
+            await self._send_identify(ws)
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(ws, interval_ms / 1000.0),
+                name="discord-heartbeat",
+            )
+            try:
+                await self._pump(ws)
+            finally:
+                heartbeat_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat_task
+
+    async def _pump(self, ws: ClientConnection) -> None:
+        """Read dispatch frames and enqueue ``MESSAGE_CREATE`` payloads."""
+        while not self._closed:
+            try:
+                frame = await self._recv_json(ws)
+            except websockets.ConnectionClosed:
+                return
+            op = frame.get("op")
+            if op == _OP_DISPATCH:
+                if frame.get("t") == "MESSAGE_CREATE":
+                    payload = frame.get("d")
+                    if isinstance(payload, dict):
+                        if self._closed:
+                            return
+                        with suppress(asyncio.QueueFull):
+                            self._inbound_q.put_nowait(payload)
+            elif op in (_OP_RECONNECT, _OP_INVALID_SESSION):
+                # Server asked us to reconnect — break so the outer loop
+                # re-IDENTIFYs from scratch.
+                return
+            elif op == _OP_HEARTBEAT:
+                # Server requested an immediate heartbeat.
+                await self._send_json(ws, {"op": _OP_HEARTBEAT, "d": None})
+            # _OP_HEARTBEAT_ACK / unknown → nothing to do.
+
+    async def _heartbeat_loop(self, ws: ClientConnection, interval: float) -> None:
+        """Send an op-1 heartbeat every ``interval`` seconds.
+
+        Discord closes the connection if heartbeats stop; the outer
+        :meth:`_gateway_loop` reconnects when that happens.
+        """
+        while not self._closed:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+            try:
+                await self._send_json(ws, {"op": _OP_HEARTBEAT, "d": None})
+            except (websockets.ConnectionClosed, OSError):
+                return
+
+    async def _send_identify(self, ws: ClientConnection) -> None:
+        """Send the op-2 IDENTIFY frame with our token + intents."""
+        await self._send_json(
+            ws,
+            {
+                "op": _OP_IDENTIFY,
+                "d": {
+                    "token": self._cfg.bot_token,
+                    "intents": self._cfg.intents,
+                    "properties": {
+                        "os": "linux",
+                        "browser": "corlinman",
+                        "device": "corlinman",
+                    },
+                },
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # HTTP / WS primitives
+    # ------------------------------------------------------------------
+
+    async def _get_self_id(self) -> str:
+        """``GET /users/@me`` → the bot's own snowflake id."""
+        try:
+            resp = await self._client.get(
+                f"{self._cfg.rest_base}/users/@me",
+                headers={"Authorization": f"Bot {self._cfg.bot_token}"},
+            )
+        except httpx.HTTPError as exc:
+            raise TransportError(f"discord users/@me failed: {exc}") from exc
+        if resp.status_code >= 400:
+            raise TransportError(
+                f"discord users/@me HTTP {resp.status_code}: {resp.text}"
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise TransportError(f"discord users/@me invalid JSON: {exc}") from exc
+        bot_id = str(body.get("id", "")) if isinstance(body, dict) else ""
+        if not bot_id:
+            raise TransportError("discord users/@me returned no id")
+        return bot_id
+
+    @staticmethod
+    async def _recv_json(ws: ClientConnection) -> dict[str, Any]:
+        """Receive one WS text frame and decode it as a JSON object."""
+        raw = await ws.recv()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        obj = json.loads(raw)
+        if not isinstance(obj, dict):
+            raise TransportError("discord gateway: frame was not a JSON object")
+        return obj
+
+    @staticmethod
+    async def _send_json(ws: ClientConnection, obj: dict[str, Any]) -> None:
+        """Encode ``obj`` as JSON and send it on the WS connection."""
+        await ws.send(json.dumps(obj))
+
+    # ------------------------------------------------------------------
+    # Gates
+    # ------------------------------------------------------------------
+
+    def _channel_allowed(self, channel_id: str) -> bool:
+        allow = self._cfg.allowed_channel_ids
+        return not allow or channel_id in allow
+
+    def _keyword_match(self, msg: dict[str, Any]) -> bool:
+        filter_ = self._cfg.keyword_filter
+        if not filter_:
+            return True
+        lower = (msg.get("content") or "").lower()
+        return any(kw.lower() in lower for kw in filter_)
+
+
+# ===========================================================================
+# Outbound sender
+# ===========================================================================
+
+
+class DiscordSender:
+    """Thin client over the Discord REST surface, scoped to outbound.
+
+    Parallel to :class:`corlinman_channels.telegram_send.TelegramSender`.
+    Construct once per bot token and reuse — the underlying
+    :class:`httpx.AsyncClient` connection pool is the real cost.
+    """
+
+    __slots__ = ("base", "client", "token")
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        token: str,
+        base: str = DEFAULT_REST_BASE,
+    ) -> None:
+        self.client = client
+        self.token = token
+        self.base = base
+
+    async def send_message(
+        self,
+        channel_id: str,
+        text: str,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        """POST ``/channels/{id}/messages``. Returns the new message id.
+
+        When ``reply_to_message_id`` is supplied the message is posted as
+        an inline reply via ``message_reference`` so the addressing stays
+        clear in the channel — parallel to the Telegram ``reply_to``.
+        """
+        body: dict[str, Any] = {"content": text}
+        if reply_to_message_id is not None:
+            body["message_reference"] = {"message_id": reply_to_message_id}
+        try:
+            resp = await self.client.post(
+                f"{self.base}/channels/{channel_id}/messages",
+                json=body,
+                headers={"Authorization": f"Bot {self.token}"},
+            )
+        except httpx.HTTPError as exc:
+            raise TransportError(f"discord sendMessage failed: {exc}") from exc
+        if resp.status_code >= 400:
+            raise TransportError(
+                f"discord sendMessage HTTP {resp.status_code}: {resp.text}"
+            )
+        try:
+            env = resp.json()
+        except ValueError as exc:
+            raise TransportError(f"discord sendMessage invalid JSON: {exc}") from exc
+        return str(env.get("id", "")) if isinstance(env, dict) else ""
+
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+
+def _parse_timestamp(raw: Any) -> int:
+    """Best-effort ISO-8601 → Unix-seconds conversion.
+
+    Discord timestamps are ISO-8601 strings. Falls back to ``0`` when the
+    value is missing or unparseable — :class:`InboundEvent` documents
+    ``0`` as the "no timestamp" sentinel.
+    """
+    if not isinstance(raw, str) or not raw:
+        return 0
+    from datetime import datetime
+
+    try:
+        # Discord uses an offset suffix; ``fromisoformat`` handles it.
+        return int(datetime.fromisoformat(raw).timestamp())
+    except (ValueError, OverflowError):
+        return 0

@@ -27,14 +27,23 @@ from corlinman_channels.onebot import (
 )
 from corlinman_channels.router import RoutedRequest
 from corlinman_channels.service import (
+    DiscordChannelParams,
+    FeishuChannelParams,
     QqChannelParams,
+    SlackChannelParams,
     TelegramChannelParams,
     _build_internal_request,
     _build_reply_action,
     _event_kind,
+    handle_one_discord,
+    handle_one_feishu,
     handle_one_qq,
+    handle_one_slack,
     handle_one_telegram,
+    run_discord_channel,
+    run_feishu_channel,
     run_qq_channel,
+    run_slack_channel,
     run_telegram_channel,
 )
 
@@ -339,3 +348,202 @@ class TestRunChannelConfig:
         params = TelegramChannelParams(config=SimpleNamespace(bot_token=""))
         with pytest.raises(ValueError, match="bot_token"):
             await run_telegram_channel(params, asyncio.Event())
+
+    @pytest.mark.asyncio
+    async def test_run_discord_channel_requires_bot_token(self) -> None:
+        import asyncio
+
+        params = DiscordChannelParams(config=SimpleNamespace(bot_token=""))
+        with pytest.raises(ValueError, match="bot_token"):
+            await run_discord_channel(params, asyncio.Event())
+
+    @pytest.mark.asyncio
+    async def test_run_slack_channel_requires_app_token(self) -> None:
+        import asyncio
+
+        params = SlackChannelParams(
+            config=SimpleNamespace(app_token="", bot_token="xoxb")
+        )
+        with pytest.raises(ValueError, match="app_token"):
+            await run_slack_channel(params, asyncio.Event())
+
+    @pytest.mark.asyncio
+    async def test_run_slack_channel_requires_bot_token(self) -> None:
+        import asyncio
+
+        params = SlackChannelParams(
+            config=SimpleNamespace(app_token="xapp", bot_token="")
+        )
+        with pytest.raises(ValueError, match="bot_token"):
+            await run_slack_channel(params, asyncio.Event())
+
+    @pytest.mark.asyncio
+    async def test_run_feishu_channel_requires_app_id(self) -> None:
+        import asyncio
+
+        params = FeishuChannelParams(
+            config=SimpleNamespace(app_id="", app_secret="s")
+        )
+        with pytest.raises(ValueError, match="app_id"):
+            await run_feishu_channel(params, asyncio.Event())
+
+    @pytest.mark.asyncio
+    async def test_run_feishu_channel_requires_app_secret(self) -> None:
+        import asyncio
+
+        params = FeishuChannelParams(
+            config=SimpleNamespace(app_id="a", app_secret="")
+        )
+        with pytest.raises(ValueError, match="app_secret"):
+            await run_feishu_channel(params, asyncio.Event())
+
+
+# ---------------------------------------------------------------------------
+# handle_one_discord / handle_one_slack / handle_one_feishu — these three
+# text-only channels share the ``_collect_reply`` collapse, so the tests
+# assert the round-trip (token deltas → concatenated reply) and the
+# error-rendering path for each transport's sender shape.
+# ---------------------------------------------------------------------------
+
+
+class _FakeDiscordSender:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str | None]] = []
+
+    async def send_message(
+        self,
+        channel_id: str,
+        text: str,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        self.sent.append((channel_id, text, reply_to_message_id))
+        return "new-msg"
+
+
+class _FakeSlackSender:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str | None]] = []
+
+    async def send_message(
+        self,
+        channel: str,
+        text: str,
+        thread_ts: str | None = None,
+    ) -> str:
+        self.sent.append((channel, text, thread_ts))
+        return "1.1"
+
+
+class _FakeFeishuSender:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str | None]] = []
+
+    async def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        self.sent.append((chat_id, text, reply_to_message_id))
+        return "om-new"
+
+
+def _inbound(channel: str) -> InboundEvent[Any]:
+    binding = ChannelBinding(
+        channel=channel, account="bot", thread="T1", sender="U1"
+    )
+    return InboundEvent(
+        channel=channel,
+        binding=binding,
+        text="ping",
+        message_id="M1",
+        timestamp=0,
+        mentioned=True,
+    )
+
+
+class TestHandleOneDiscord:
+    @pytest.mark.asyncio
+    async def test_concat_and_send(self) -> None:
+        import asyncio
+
+        svc = _ScriptedChatService([
+            _Ev(kind="token_delta", text="he"),
+            _Ev(kind="token_delta", text="llo"),
+            _Ev(kind="done"),
+        ])
+        sender = _FakeDiscordSender()
+        await handle_one_discord(svc, _inbound("discord"), "m", sender, asyncio.Event())  # type: ignore[arg-type]
+        assert sender.sent == [("T1", "hello", "M1")]
+
+    @pytest.mark.asyncio
+    async def test_error_renders_short_reply(self) -> None:
+        import asyncio
+
+        svc = _ScriptedChatService([_Ev(kind="error", error="boom")])
+        sender = _FakeDiscordSender()
+        await handle_one_discord(svc, _inbound("discord"), "m", sender, asyncio.Event())  # type: ignore[arg-type]
+        assert len(sender.sent) == 1
+        assert "[corlinman error]" in sender.sent[0][1]
+        assert "boom" in sender.sent[0][1]
+
+    @pytest.mark.asyncio
+    async def test_empty_reply_is_dropped(self) -> None:
+        import asyncio
+
+        svc = _ScriptedChatService([
+            _Ev(kind="token_delta", text="  "),
+            _Ev(kind="done"),
+        ])
+        sender = _FakeDiscordSender()
+        await handle_one_discord(svc, _inbound("discord"), "m", sender, asyncio.Event())  # type: ignore[arg-type]
+        assert sender.sent == []
+
+
+class TestHandleOneSlack:
+    @pytest.mark.asyncio
+    async def test_concat_and_send_threaded(self) -> None:
+        import asyncio
+
+        svc = _ScriptedChatService([
+            _Ev(kind="token_delta", text="hi "),
+            _Ev(kind="token_delta", text="there"),
+            _Ev(kind="done"),
+        ])
+        sender = _FakeSlackSender()
+        await handle_one_slack(svc, _inbound("slack"), "m", sender, asyncio.Event())  # type: ignore[arg-type]
+        # message_id is threaded as thread_ts.
+        assert sender.sent == [("T1", "hi there", "M1")]
+
+    @pytest.mark.asyncio
+    async def test_error_renders_short_reply(self) -> None:
+        import asyncio
+
+        svc = _ScriptedChatService([_Ev(kind="error", error="nope")])
+        sender = _FakeSlackSender()
+        await handle_one_slack(svc, _inbound("slack"), "m", sender, asyncio.Event())  # type: ignore[arg-type]
+        assert "[corlinman error]" in sender.sent[0][1]
+
+
+class TestHandleOneFeishu:
+    @pytest.mark.asyncio
+    async def test_concat_and_send_reply(self) -> None:
+        import asyncio
+
+        svc = _ScriptedChatService([
+            _Ev(kind="token_delta", text="ok"),
+            _Ev(kind="done"),
+        ])
+        sender = _FakeFeishuSender()
+        await handle_one_feishu(svc, _inbound("feishu"), "m", sender, asyncio.Event())  # type: ignore[arg-type]
+        assert sender.sent == [("T1", "ok", "M1")]
+
+    @pytest.mark.asyncio
+    async def test_error_renders_short_reply(self) -> None:
+        import asyncio
+
+        svc = _ScriptedChatService([_Ev(kind="error", error="bad")])
+        sender = _FakeFeishuSender()
+        await handle_one_feishu(svc, _inbound("feishu"), "m", sender, asyncio.Event())  # type: ignore[arg-type]
+        assert "[corlinman error]" in sender.sent[0][1]
+        assert "bad" in sender.sent[0][1]

@@ -55,6 +55,16 @@ from corlinman_channels.common import (
     UserId,
 )
 from corlinman_channels.common import ChannelError as _CommonChannelError
+from corlinman_channels.discord import (
+    DiscordAdapter,
+    DiscordConfig,
+    DiscordSender,
+)
+from corlinman_channels.feishu import (
+    FeishuAdapter,
+    FeishuConfig,
+    FeishuSender,
+)
 from corlinman_channels.logstream import (
     LogFrame,
     LogStreamAdapter,
@@ -106,12 +116,26 @@ from corlinman_channels.router import (
 from corlinman_channels.service import (
     ChatEventLike,
     ChatServiceLike,
+    DiscordChannelParams,
+    FeishuChannelParams,
     QqChannelParams,
+    SlackChannelParams,
     TelegramChannelParams,
+    handle_one_discord,
+    handle_one_feishu,
     handle_one_qq,
+    handle_one_slack,
     handle_one_telegram,
+    run_discord_channel,
+    run_feishu_channel,
     run_qq_channel,
+    run_slack_channel,
     run_telegram_channel,
+)
+from corlinman_channels.slack import (
+    SlackAdapter,
+    SlackConfig,
+    SlackSender,
 )
 from corlinman_channels.telegram import (
     Chat,
@@ -194,12 +218,33 @@ __all__ = [  # noqa: RUF022 — grouped by subsystem for human readability.
     # Service orchestration
     "ChatEventLike",
     "ChatServiceLike",
+    "DiscordChannelParams",
+    "FeishuChannelParams",
     "QqChannelParams",
+    "SlackChannelParams",
     "TelegramChannelParams",
+    "handle_one_discord",
+    "handle_one_feishu",
     "handle_one_qq",
+    "handle_one_slack",
     "handle_one_telegram",
+    "run_discord_channel",
+    "run_feishu_channel",
     "run_qq_channel",
+    "run_slack_channel",
     "run_telegram_channel",
+    # Discord
+    "DiscordAdapter",
+    "DiscordConfig",
+    "DiscordSender",
+    # Slack
+    "SlackAdapter",
+    "SlackConfig",
+    "SlackSender",
+    # Feishu / Lark
+    "FeishuAdapter",
+    "FeishuConfig",
+    "FeishuSender",
     # OneBot
     "Action",
     "AtSegment",
