@@ -283,7 +283,17 @@ def build_tool_executor(state: Any) -> Any:
             return None
 
     registry = getattr(state, "plugin_registry", None)
-    invoker = build_registry_invoker(registry)
+    # P14/P16: thread the plugin supervisor + connected MCP client
+    # manager into the invoker so ``service``- and ``mcp``-kind plugin
+    # calls dispatch for real instead of degrading to
+    # ``unsupported_plugin_type``. Both are absent in degraded boots —
+    # ``build_registry_invoker`` tolerates ``None`` for either.
+    supervisor = getattr(state, "plugin_supervisor", None)
+    extras = getattr(state, "extras", None) or {}
+    mcp_manager = extras.get("mcp_manager")
+    invoker = build_registry_invoker(
+        registry, supervisor=supervisor, mcp_manager=mcp_manager
+    )
     if registry is None:
         log.info(
             "grpc_backend.tool_executor_built registry=absent "

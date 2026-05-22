@@ -910,6 +910,23 @@ def build_app(
         cancel = asyncio.Event()
         background: list[asyncio.Task[Any]] = []
 
+        # Parcel P14: build + connect the external MCP client manager
+        # *before* the sibling-bootstrap loop, so ``services.bootstrap``
+        # → ``build_tool_executor`` can bind ``mcp``-kind plugin dispatch
+        # to live MCP servers. Best-effort: a missing package, no
+        # ``[mcp]`` config, or an unreachable server degrades to "no MCP
+        # tools" — the gateway still boots. Closed in the lifespan-exit
+        # ``finally``.
+        try:
+            from corlinman_mcp_server import McpClientManager
+
+            mcp_manager = McpClientManager.from_config(state.config)
+            await mcp_manager.connect_all()
+            state.extras["mcp_manager"] = mcp_manager
+            logger.info("gateway.mcp.manager_connected")
+        except Exception as exc:  # noqa: BLE001 — MCP is optional
+            logger.warning("gateway.mcp.manager_failed", error=str(exc))
+
         # Generic sibling-bootstrap seam (see docs/contracts/runtime-
         # wiring.md §2). Each sibling module *may* export
         # ``bootstrap(state) -> None | Awaitable | list[asyncio.Task]``.
@@ -1089,6 +1106,13 @@ def build_app(
             for task in background:
                 with suppress(asyncio.CancelledError, Exception):
                     await task
+            # P14 teardown: close the external MCP client manager so
+            # stdio child processes / ws connections are released.
+            mcp_manager = state.extras.get("mcp_manager")
+            if mcp_manager is not None:
+                with suppress(Exception):
+                    await mcp_manager.aclose()
+                state.extras.pop("mcp_manager", None)
             # W5.0 teardown: close the evolution sqlite cleanly so the
             # WAL file is checkpointed and tests don't leave stale
             # file handles open on Windows.
