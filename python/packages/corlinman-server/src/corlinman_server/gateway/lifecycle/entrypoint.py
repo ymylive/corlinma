@@ -38,13 +38,23 @@ imported, so the FastAPI app factory uses :func:`_lazy_import` to swallow
   (chat / admin / channels / canvas / …).
 * ``gateway.grpc.serve_placeholder_in_background(state, cancel)`` →
   spawns the Rust→Python placeholder UDS server (returns an awaitable).
-* ``gateway.services.bootstrap(state)`` → spins up channel adapters,
-  plugin supervisors, hot reloaders.
-* ``gateway.evolution.bootstrap(state)`` → spawns the evolution observer
-  + scheduler.
+* ``gateway.<sibling>.bootstrap(state)`` → optional startup hook every
+  runtime sibling may export. The lifespan iterates a fixed list
+  (``providers``, ``services``, ``evolution``) and calls each module's
+  ``bootstrap`` if present. A hook may return ``None``, an awaitable,
+  or a list of :class:`asyncio.Task`; returned tasks are registered
+  into the background list and cancelled + awaited at shutdown. New
+  Wave-1 runtime modules plug in by adding a ``bootstrap`` symbol — the
+  seam itself does not need re-editing. See
+  ``docs/contracts/runtime-wiring.md`` §2 for the full contract.
 
 Each hook is best-effort: a missing sibling logs ``warning`` and the
 gateway boots in degraded mode so a partial port can still serve.
+
+The config loader (``gateway.core.config.load_from_path``) is a
+sibling too — :func:`_load_config` lazy-imports it. It is no longer
+missing (Parcel P0); a TOML parse failure still falls through to
+degraded mode.
 """
 
 from __future__ import annotations
@@ -732,26 +742,48 @@ def build_app(
                 error=str(exc),
             )
 
-        services = _lazy_import("corlinman_server.gateway.services")
-        evolution = _lazy_import("corlinman_server.gateway.evolution")
         grpc_mod = _lazy_import("corlinman_server.gateway.grpc")
 
         cancel = asyncio.Event()
         background: list[asyncio.Task[Any]] = []
 
-        for sibling, name in (
-            (services, "services"),
-            (evolution, "evolution"),
-        ):
+        # Generic sibling-bootstrap seam (see docs/contracts/runtime-
+        # wiring.md §2). Each sibling module *may* export
+        # ``bootstrap(state) -> None | Awaitable | list[asyncio.Task]``.
+        # P0 made this list the single place new Wave-1 runtime modules
+        # plug in: P1 (providers), P2/P3 (services — chat + channels),
+        # and evolution all land here without editing the seam again.
+        # The order is load-bearing: ``providers`` must boot before
+        # ``services`` so the ChatService/registry attach points on
+        # ``AppState`` are populated when the chat + channel bootstraps
+        # read them.
+        sibling_names = (
+            "corlinman_server.gateway.providers",  # P1 — provider_registry
+            "corlinman_server.gateway.services",   # P2/P3 — chat + channels
+            "corlinman_server.gateway.evolution",  # evolution observer
+        )
+        for dotted in sibling_names:
+            sibling = _lazy_import(dotted)
             if sibling is None:
                 continue
+            name = dotted.rsplit(".", 1)[-1]
             bootstrap = getattr(sibling, "bootstrap", None)
             if bootstrap is None:
                 continue
             try:
                 result = bootstrap(state)
                 if isinstance(result, Awaitable):
-                    await result
+                    result = await result
+                # A bootstrap may hand back background tasks (channel
+                # adapters, hot reloaders). Register them so the
+                # lifespan-exit ``finally`` cancels + awaits them under
+                # the same ``cancel`` event.
+                if isinstance(result, asyncio.Task):
+                    background.append(result)
+                elif isinstance(result, (list, tuple)):
+                    for item in result:
+                        if isinstance(item, asyncio.Task):
+                            background.append(item)
             except Exception as exc:  # pragma: no cover — sibling-owned
                 logger.warning(
                     "gateway.sibling.bootstrap_failed",
@@ -765,7 +797,15 @@ def build_app(
             )
             if serve is not None:
                 try:
-                    task = asyncio.create_task(serve(state, cancel))
+                    result = serve(state, cancel)
+                    # ``serve_placeholder_in_background`` may hand back an
+                    # already-scheduled Task (its name implies so) or a
+                    # bare coroutine — accept either without double-wrap.
+                    task = (
+                        result
+                        if isinstance(result, asyncio.Task)
+                        else asyncio.create_task(result)
+                    )
                     background.append(task)
                 except Exception as exc:  # pragma: no cover — sibling-owned
                     logger.warning(
@@ -887,6 +927,11 @@ def build_app(
 
     app = FastAPI(lifespan=_lifespan)
     app.state.corlinman_state = state
+    # ``get_app_state`` (gateway.core.state) + the runtime route handlers
+    # (chat / models, see docs/contracts/runtime-wiring.md) resolve the
+    # live AppState via ``app.state.corlinman``. Keep ``corlinman_state``
+    # for back-compat; ``corlinman`` is the documented contract name.
+    app.state.corlinman = state
     app.state.corlinman_config = cfg
     app.state.corlinman_data_dir = resolved_data_dir
 
@@ -943,16 +988,28 @@ def build_app(
     app.state.corlinman_admin_b_state = admin_b_state
     app.state.corlinman_admin_config_path = admin_config_path
 
-    # Degraded-mode safety net: if no routes module mounted a ``/health``
-    # path, expose a trivial liveness endpoint so probes succeed.
+    # Liveness + readiness net: if no routes module mounted a ``/health``
+    # path, expose one here. ``mode`` is computed from the live runtime
+    # rather than hard-coded — ``ok`` once the Wave 1 attach points
+    # (provider registry + chat service) are wired, ``degraded`` while
+    # either slot is still unfilled. See docs/contracts/runtime-wiring.md.
     _have_health = any(
         getattr(r, "path", None) == "/health" for r in app.routes
     )
     if not _have_health:
 
         @app.get("/health")
-        async def _health() -> dict[str, str]:  # pragma: no cover — trivial
-            return {"status": "ok", "mode": "degraded"}
+        async def _health() -> dict[str, str]:
+            rt = getattr(app.state, "corlinman", None)
+            wired = (
+                rt is not None
+                and getattr(rt, "provider_registry", None) is not None
+                and getattr(rt, "chat", None) is not None
+            )
+            return {
+                "status": "ok",
+                "mode": "ok" if wired else "degraded",
+            }
 
     # UI static fall-through. The docker image bakes the Next.js static
     # export into ``/app/ui-static``; this mount serves it for any path

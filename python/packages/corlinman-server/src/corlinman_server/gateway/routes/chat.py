@@ -408,7 +408,21 @@ def router(state: ChatState | None = None) -> APIRouter:
         request: Request,
         x_session_key: str | None = Header(default=None),
     ) -> JSONResponse | StreamingResponse:
-        if state is None:
+        # Resolve the ChatService. Tests pass ``state`` directly; in the
+        # gateway the router is composed before the lifespan runs, so
+        # pull the live service the ``services.bootstrap`` sibling hook
+        # attached to ``AppState.chat`` (docs/contracts/runtime-wiring.md).
+        chat_state = state
+        if chat_state is None:
+            app_state = getattr(request.app.state, "corlinman", None)
+            svc = (
+                getattr(app_state, "chat", None)
+                if app_state is not None
+                else None
+            )
+            if svc is not None:
+                chat_state = ChatState(service=svc)
+        if chat_state is None:
             return _error_response(
                 status.HTTP_501_NOT_IMPLEMENTED,
                 "not_implemented",
@@ -431,7 +445,7 @@ def router(state: ChatState | None = None) -> APIRouter:
         # Model alias / unknown-model fallback. Pure function so the
         # logging tier sits in the handler.
         original_model = req.model
-        resolution = apply_model_aliases(req.model, state.model_redirect)
+        resolution = apply_model_aliases(req.model, chat_state.model_redirect)
         if resolution.kind == "aliased":
             req.model = resolution.resolved or req.model
         elif resolution.kind == "fallback_default":
@@ -452,7 +466,7 @@ def router(state: ChatState | None = None) -> APIRouter:
             async def _agen() -> AsyncIterator[bytes]:
                 try:
                     async for chunk in _sse_iter(
-                        state.service, internal_req, req.model, cancel
+                        chat_state.service, internal_req, req.model, cancel
                     ):
                         if await request.is_disconnected():
                             cancel.set()
@@ -463,6 +477,8 @@ def router(state: ChatState | None = None) -> APIRouter:
 
             return StreamingResponse(_agen(), media_type="text/event-stream")
 
-        return await _run_nonstream(state.service, internal_req, req.model, cancel)
+        return await _run_nonstream(
+            chat_state.service, internal_req, req.model, cancel
+        )
 
     return api
